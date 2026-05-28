@@ -1,0 +1,1017 @@
+#!/usr/bin/env python3
+"""Train a binary L/T classifier from ultrasound frames."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import random
+import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Set
+
+import numpy as np
+import torch
+import torch.nn as nn
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torchvision import transforms
+from torchvision.models import ResNet18_Weights, resnet18
+from torchvision.transforms import InterpolationMode
+from torchvision.transforms import functional as TF
+
+
+LABELS: Sequence[str] = ("L", "T")
+
+
+@dataclass(frozen=True)
+class SampleRow:
+    image_path: Path
+    split: str
+    label_lt: str
+    manufacturer: str
+    group_id: str
+    rect_left_norm: float
+    rect_top_norm: float
+    rect_right_norm: float
+    rect_bottom_norm: float
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def choose_device(prefer: Optional[str]) -> torch.device:
+    if prefer:
+        return torch.device(prefer)
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def _parse_csv_values(values: Sequence[str]) -> Set[str]:
+    out: Set[str] = set()
+    for value in values:
+        for token in value.split(","):
+            cleaned = token.strip()
+            if cleaned:
+                out.add(cleaned)
+    return out
+
+
+def _to_float_or_nan(value: object) -> float:
+    try:
+        num = float(value)
+    except Exception:
+        return float("nan")
+    if not math.isfinite(num):
+        return float("nan")
+    return num
+
+
+def _has_valid_norm_rect(
+    left: float,
+    top: float,
+    right: float,
+    bottom: float,
+) -> bool:
+    if not all(math.isfinite(v) for v in (left, top, right, bottom)):
+        return False
+    return right > left and bottom > top
+
+
+def load_manifest_rows(
+    manifest_path: Path,
+    include_manufacturers: Set[str],
+    exclude_manufacturers: Set[str],
+    rect_left_col: str,
+    rect_top_col: str,
+    rect_right_col: str,
+    rect_bottom_col: str,
+    drop_missing_rect: bool,
+) -> List[SampleRow]:
+    rows: List[SampleRow] = []
+    with manifest_path.open("r", encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            label = (row.get("label_lt") or row.get("label") or "").strip().upper()
+            if label not in LABELS:
+                continue
+
+            manufacturer = (row.get("manufacturer") or "UNKNOWN").strip() or "UNKNOWN"
+            if include_manufacturers and manufacturer not in include_manufacturers:
+                continue
+            if manufacturer in exclude_manufacturers:
+                continue
+
+            split = (row.get("split") or "").strip().lower()
+            if split not in {"train", "val", "test"}:
+                continue
+
+            image_path = (row.get("image_path") or "").strip()
+            if not image_path:
+                continue
+            rect_left_norm = _to_float_or_nan(row.get(rect_left_col))
+            rect_top_norm = _to_float_or_nan(row.get(rect_top_col))
+            rect_right_norm = _to_float_or_nan(row.get(rect_right_col))
+            rect_bottom_norm = _to_float_or_nan(row.get(rect_bottom_col))
+            if drop_missing_rect and not _has_valid_norm_rect(
+                rect_left_norm,
+                rect_top_norm,
+                rect_right_norm,
+                rect_bottom_norm,
+            ):
+                continue
+
+            rows.append(
+                SampleRow(
+                    image_path=Path(image_path).expanduser().resolve(),
+                    split=split,
+                    label_lt=label,
+                    manufacturer=manufacturer,
+                    group_id=(row.get("group_id") or "").strip(),
+                    rect_left_norm=rect_left_norm,
+                    rect_top_norm=rect_top_norm,
+                    rect_right_norm=rect_right_norm,
+                    rect_bottom_norm=rect_bottom_norm,
+                )
+            )
+    return rows
+
+
+def subset_rows(rows: List[SampleRow], limit: int, seed: int) -> List[SampleRow]:
+    if limit <= 0 or len(rows) <= limit:
+        return rows
+    rng = random.Random(seed)
+    idx = list(range(len(rows)))
+    rng.shuffle(idx)
+    chosen = sorted(idx[:limit])
+    return [rows[i] for i in chosen]
+
+
+class LTDataset(Dataset):
+    def __init__(
+        self,
+        rows: Sequence[SampleRow],
+        label_to_idx: Dict[str, int],
+        image_size: int,
+        augment: bool,
+        use_rect_crop: bool,
+        rect_margin_frac: float,
+        rect_min_side_px: int,
+    ) -> None:
+        self.rows = list(rows)
+        self.label_to_idx = label_to_idx
+        self.image_size = image_size
+        self.augment = augment
+        self.use_rect_crop = bool(use_rect_crop)
+        self.rect_margin_frac = max(0.0, float(rect_margin_frac))
+        self.rect_min_side_px = max(1, int(rect_min_side_px))
+        self.normalize = transforms.Normalize(
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225),
+        )
+        self.train_jitter = transforms.ColorJitter(
+            brightness=0.15,
+            contrast=0.15,
+            saturation=0.08,
+            hue=0.02,
+        )
+        self.train_erasing = transforms.RandomErasing(
+            p=0.12,
+            scale=(0.01, 0.08),
+            ratio=(0.4, 2.5),
+            value="random",
+            inplace=False,
+        )
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, idx: int):  # type: ignore[override]
+        row = self.rows[idx]
+        with Image.open(row.image_path) as img:
+            image = img.convert("RGB")
+            crop_applied = False
+            if self.use_rect_crop and _has_valid_norm_rect(
+                row.rect_left_norm,
+                row.rect_top_norm,
+                row.rect_right_norm,
+                row.rect_bottom_norm,
+            ):
+                width, height = image.size
+                x1 = row.rect_left_norm * width
+                y1 = row.rect_top_norm * height
+                x2 = row.rect_right_norm * width
+                y2 = row.rect_bottom_norm * height
+
+                if self.rect_margin_frac > 0.0:
+                    box_w = max(1.0, x2 - x1)
+                    box_h = max(1.0, y2 - y1)
+                    margin_x = box_w * self.rect_margin_frac
+                    margin_y = box_h * self.rect_margin_frac
+                    x1 -= margin_x
+                    x2 += margin_x
+                    y1 -= margin_y
+                    y2 += margin_y
+
+                x1 = max(0.0, min(x1, width - 1))
+                y1 = max(0.0, min(y1, height - 1))
+                x2 = max(1.0, min(x2, width))
+                y2 = max(1.0, min(y2, height))
+                if x2 <= x1:
+                    x2 = min(float(width), x1 + 1.0)
+                if y2 <= y1:
+                    y2 = min(float(height), y1 + 1.0)
+
+                x1_i = int(round(x1))
+                y1_i = int(round(y1))
+                x2_i = int(round(x2))
+                y2_i = int(round(y2))
+                x1_i = max(0, min(x1_i, width - 1))
+                y1_i = max(0, min(y1_i, height - 1))
+                x2_i = max(1, min(x2_i, width))
+                y2_i = max(1, min(y2_i, height))
+                if x2_i <= x1_i:
+                    x2_i = min(width, x1_i + 1)
+                if y2_i <= y1_i:
+                    y2_i = min(height, y1_i + 1)
+
+                if (x2_i - x1_i) >= self.rect_min_side_px and (y2_i - y1_i) >= self.rect_min_side_px:
+                    image = image.crop((x1_i, y1_i, x2_i, y2_i))
+                    crop_applied = True
+
+            image = TF.resize(
+                image,
+                size=[self.image_size, self.image_size],
+                interpolation=InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+            if self.augment:
+                if random.random() < 0.45:
+                    image = self.train_jitter(image)
+                if random.random() < 0.10:
+                    image = TF.gaussian_blur(image, kernel_size=3)
+            tensor = TF.to_tensor(image)
+            if self.augment:
+                tensor = self.train_erasing(tensor)
+            tensor = self.normalize(tensor)
+
+        target = self.label_to_idx[row.label_lt]
+        metadata = {
+            "label_lt": row.label_lt,
+            "manufacturer": row.manufacturer,
+            "group_id": row.group_id,
+            "image_path": row.image_path.as_posix(),
+            "crop_applied": crop_applied,
+        }
+        return tensor, target, metadata
+
+
+def collate_batch(batch):
+    images = torch.stack([item[0] for item in batch], dim=0)
+    targets = torch.tensor([item[1] for item in batch], dtype=torch.long)
+    metadata = [item[2] for item in batch]
+    return images, targets, metadata
+
+
+class LTClassifier(nn.Module):
+    def __init__(self, num_classes: int, pretrained: bool) -> None:
+        super().__init__()
+        weights = ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = resnet18(weights=weights)
+        in_features = backbone.fc.in_features
+        backbone.fc = nn.Identity()
+        self.backbone = backbone
+        self.head = nn.Sequential(
+            nn.Linear(in_features, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.30),
+            nn.Linear(256, num_classes),
+        )
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        feats = self.backbone(images)
+        return self.head(feats)
+
+
+def _compute_classification_metrics(
+    y_true: List[int],
+    y_pred: List[int],
+    num_classes: int,
+    idx_to_label: Sequence[str],
+) -> Dict[str, object]:
+    confusion = np.zeros((num_classes, num_classes), dtype=np.int64)
+    for t, p in zip(y_true, y_pred):
+        confusion[t, p] += 1
+
+    support = confusion.sum(axis=1)
+    pred_count = confusion.sum(axis=0)
+    tp = np.diag(confusion)
+
+    per_class: List[Dict[str, object]] = []
+    macro_p = 0.0
+    macro_r = 0.0
+    macro_f1 = 0.0
+    classes_with_support = 0
+
+    for i in range(num_classes):
+        precision = float(tp[i] / pred_count[i]) if pred_count[i] > 0 else 0.0
+        recall = float(tp[i] / support[i]) if support[i] > 0 else 0.0
+        denom = precision + recall
+        f1 = float(2.0 * precision * recall / denom) if denom > 0 else 0.0
+
+        if support[i] > 0:
+            macro_p += precision
+            macro_r += recall
+            macro_f1 += f1
+            classes_with_support += 1
+
+        per_class.append(
+            {
+                "label_lt": idx_to_label[i],
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "support": int(support[i]),
+            }
+        )
+
+    macro_div = max(1, classes_with_support)
+    accuracy = float(tp.sum() / max(1, confusion.sum()))
+    return {
+        "accuracy": accuracy,
+        "macro_precision": macro_p / macro_div,
+        "macro_recall": macro_r / macro_div,
+        "macro_f1": macro_f1 / macro_div,
+        "classes_with_support": classes_with_support,
+        "per_class": per_class,
+        "confusion_matrix": confusion.tolist(),
+    }
+
+
+def run_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    criterion: nn.Module,
+    optimizer: Optional[torch.optim.Optimizer],
+    epoch: int,
+    phase: str,
+    idx_to_label: Sequence[str],
+    log_interval: int = 0,
+    collect_details: bool = False,
+) -> Dict[str, object]:
+    is_train = optimizer is not None
+    model.train(mode=is_train)
+
+    total_loss = 0.0
+    total_samples = 0
+    total_steps = len(loader)
+    epoch_start = time.time()
+
+    y_true: List[int] = []
+    y_pred: List[int] = []
+    manufacturers: List[str] = []
+
+    for step_idx, (images, targets, metadata) in enumerate(loader, start=1):
+        images = images.to(device, non_blocking=True)
+        targets = targets.to(device, non_blocking=True)
+
+        with torch.set_grad_enabled(is_train):
+            logits = model(images)
+            loss = criterion(logits, targets)
+            if is_train:
+                assert optimizer is not None
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+
+        batch_size = images.size(0)
+        total_samples += batch_size
+        loss_value = float(loss.detach().cpu())
+        if math.isfinite(loss_value):
+            total_loss += loss_value * batch_size
+
+        preds = torch.argmax(logits.detach(), dim=1)
+        y_true.extend(targets.detach().cpu().tolist())
+        y_pred.extend(preds.cpu().tolist())
+
+        if collect_details:
+            manufacturers.extend(str(meta.get("manufacturer", "UNKNOWN")) for meta in metadata)
+
+        if log_interval > 0 and (step_idx % log_interval == 0 or step_idx == total_steps):
+            elapsed = time.time() - epoch_start
+            progress = step_idx / max(1, total_steps)
+            eta = (elapsed / progress - elapsed) if progress > 0 else 0.0
+            running_loss = total_loss / max(1, total_samples)
+            running_acc = float(
+                (np.array(y_true, dtype=np.int64) == np.array(y_pred, dtype=np.int64)).mean()
+            )
+            print(
+                f"[Epoch {epoch:03d}][{phase}] step {step_idx}/{total_steps} "
+                f"({progress * 100:.1f}%) loss {running_loss:.4f} acc {running_acc:.4f} "
+                f"elapsed {elapsed:.1f}s eta {max(0.0, eta):.1f}s",
+                flush=True,
+            )
+
+    mean_loss = total_loss / max(1, total_samples)
+    metrics = _compute_classification_metrics(
+        y_true=y_true,
+        y_pred=y_pred,
+        num_classes=len(idx_to_label),
+        idx_to_label=idx_to_label,
+    )
+    metrics["loss"] = mean_loss
+    metrics["samples"] = total_samples
+    if collect_details:
+        metrics["y_true"] = y_true
+        metrics["y_pred"] = y_pred
+        metrics["manufacturers"] = manufacturers
+    return metrics
+
+
+def make_loader(
+    rows: List[SampleRow],
+    label_to_idx: Dict[str, int],
+    image_size: int,
+    batch_size: int,
+    num_workers: int,
+    augment: bool,
+    use_balanced_sampler: bool,
+    use_rect_crop: bool,
+    rect_margin_frac: float,
+    rect_min_side_px: int,
+) -> DataLoader:
+    dataset = LTDataset(
+        rows=rows,
+        label_to_idx=label_to_idx,
+        image_size=image_size,
+        augment=augment,
+        use_rect_crop=use_rect_crop,
+        rect_margin_frac=rect_margin_frac,
+        rect_min_side_px=rect_min_side_px,
+    )
+
+    sampler = None
+    shuffle = False
+    if augment:
+        if use_balanced_sampler:
+            counts = Counter(row.label_lt for row in rows)
+            sample_weights = [1.0 / counts[row.label_lt] for row in rows]
+            sampler = WeightedRandomSampler(
+                weights=torch.tensor(sample_weights, dtype=torch.double),
+                num_samples=len(sample_weights),
+                replacement=True,
+            )
+        else:
+            shuffle = True
+
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=False,
+        collate_fn=collate_batch,
+        drop_last=False,
+    )
+
+
+def _build_class_weights(
+    rows: Sequence[SampleRow],
+    label_to_idx: Dict[str, int],
+    power: float,
+) -> torch.Tensor:
+    counts = Counter(row.label_lt for row in rows)
+    weights = torch.ones(len(label_to_idx), dtype=torch.float32)
+    total = float(sum(counts.values()))
+    num_classes = float(len(label_to_idx))
+    safe_power = max(0.0, float(power))
+    for label, idx in label_to_idx.items():
+        cls_count = float(counts[label])
+        base_weight = total / (num_classes * max(1.0, cls_count))
+        weights[idx] = float(base_weight ** safe_power)
+    weights = weights / weights.mean().clamp(min=1e-12)
+    return weights
+
+
+def _write_per_class_csv(path: Path, per_class: Sequence[Dict[str, object]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["label_lt", "precision", "recall", "f1", "support"])
+        for row in per_class:
+            writer.writerow(
+                [
+                    row["label_lt"],
+                    f"{float(row['precision']):.6f}",
+                    f"{float(row['recall']):.6f}",
+                    f"{float(row['f1']):.6f}",
+                    int(row["support"]),
+                ]
+            )
+
+
+def _write_confusion_csv(path: Path, confusion: Sequence[Sequence[int]], labels: Sequence[str]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["true\\pred", *labels])
+        for label, row in zip(labels, confusion):
+            writer.writerow([label, *row])
+
+
+def _drop_unseen(rows: List[SampleRow], known_labels: Sequence[str]) -> List[SampleRow]:
+    known = set(known_labels)
+    return [row for row in rows if row.label_lt in known]
+
+
+def _compute_per_manufacturer_metrics(
+    y_true: Sequence[int],
+    y_pred: Sequence[int],
+    manufacturers: Sequence[str],
+    idx_to_label: Sequence[str],
+) -> List[Dict[str, object]]:
+    by_vendor: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: {"y_true": [], "y_pred": []})
+    for t, p, vendor in zip(y_true, y_pred, manufacturers):
+        by_vendor[vendor]["y_true"].append(int(t))
+        by_vendor[vendor]["y_pred"].append(int(p))
+
+    out: List[Dict[str, object]] = []
+    for vendor in sorted(by_vendor):
+        data = by_vendor[vendor]
+        metrics = _compute_classification_metrics(
+            y_true=data["y_true"],
+            y_pred=data["y_pred"],
+            num_classes=len(idx_to_label),
+            idx_to_label=idx_to_label,
+        )
+        support_by_class = Counter(int(x) for x in data["y_true"])
+        out.append(
+            {
+                "manufacturer": vendor,
+                "samples": len(data["y_true"]),
+                "accuracy": float(metrics["accuracy"]),
+                "macro_precision": float(metrics["macro_precision"]),
+                "macro_recall": float(metrics["macro_recall"]),
+                "macro_f1": float(metrics["macro_f1"]),
+                "support_l": int(support_by_class.get(0, 0)),
+                "support_t": int(support_by_class.get(1, 0)),
+            }
+        )
+    return out
+
+
+def _write_per_manufacturer_csv(path: Path, rows: Sequence[Dict[str, object]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            [
+                "manufacturer",
+                "samples",
+                "accuracy",
+                "macro_precision",
+                "macro_recall",
+                "macro_f1",
+                "support_l",
+                "support_t",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row["manufacturer"],
+                    int(row["samples"]),
+                    f"{float(row['accuracy']):.6f}",
+                    f"{float(row['macro_precision']):.6f}",
+                    f"{float(row['macro_recall']):.6f}",
+                    f"{float(row['macro_f1']):.6f}",
+                    int(row["support_l"]),
+                    int(row["support_t"]),
+                ]
+            )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Train L/T classifier from ultrasound frames.",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path("artifacts/20_datasets/lt_dataset_from_ssd_esi1_n3/manifest_lt.csv"),
+        help="Manifest CSV prodotto da prepare_ultrasound_lt_dataset.py.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("artifacts/30_models/lt_training_general"),
+        help="Cartella output checkpoint e metriche.",
+    )
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--batch-size", type=int, default=48)
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--image-size", type=int, default=320)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--pretrained", action="store_true")
+    parser.add_argument("--max-train-samples", type=int, default=0)
+    parser.add_argument("--max-val-samples", type=int, default=0)
+    parser.add_argument("--max-test-samples", type=int, default=0)
+    parser.add_argument("--early-stopping-patience", type=int, default=6)
+    parser.add_argument("--log-interval", type=int, default=0)
+    parser.add_argument("--disable-balanced-sampler", action="store_true")
+    parser.add_argument("--disable-class-weights", action="store_true")
+    parser.add_argument("--class-weight-power", type=float, default=0.5)
+    parser.add_argument("--label-smoothing", type=float, default=0.03)
+    parser.add_argument(
+        "--drop-unseen-val-test",
+        action="store_true",
+        help="Se attivo, rimuove campioni val/test con label non presenti in train.",
+    )
+    parser.add_argument(
+        "--manufacturer",
+        action="append",
+        default=[],
+        help="Include solo questi vendor (ripetibile o CSV).",
+    )
+    parser.add_argument(
+        "--exclude-manufacturer",
+        action="append",
+        default=[],
+        help="Esclude questi vendor (ripetibile o CSV).",
+    )
+    parser.add_argument(
+        "--use-rect-crop",
+        action="store_true",
+        help="Usa solo il contenuto del rettangolo ecografico (crop prima del resize).",
+    )
+    parser.add_argument(
+        "--rect-left-col",
+        type=str,
+        default="pred_left_norm",
+        help="Nome colonna manifest per left del rettangolo (normalizzato 0..1).",
+    )
+    parser.add_argument(
+        "--rect-top-col",
+        type=str,
+        default="pred_top_norm",
+        help="Nome colonna manifest per top del rettangolo (normalizzato 0..1).",
+    )
+    parser.add_argument(
+        "--rect-right-col",
+        type=str,
+        default="pred_right_norm",
+        help="Nome colonna manifest per right del rettangolo (normalizzato 0..1).",
+    )
+    parser.add_argument(
+        "--rect-bottom-col",
+        type=str,
+        default="pred_bottom_norm",
+        help="Nome colonna manifest per bottom del rettangolo (normalizzato 0..1).",
+    )
+    parser.add_argument(
+        "--drop-missing-rect",
+        action="store_true",
+        help="Se attivo, scarta righe senza rettangolo valido nelle colonne --rect-*-col.",
+    )
+    parser.add_argument(
+        "--rect-margin-frac",
+        type=float,
+        default=0.0,
+        help="Margine relativo sul box (es. 0.05 = +5%% per lato).",
+    )
+    parser.add_argument(
+        "--rect-min-side-px",
+        type=int,
+        default=8,
+        help="Dimensione minima lato crop per applicare il rettangolo.",
+    )
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    if not (0.0 <= args.label_smoothing < 1.0):
+        raise ValueError("--label-smoothing deve essere in [0, 1).")
+    if args.class_weight_power < 0.0:
+        raise ValueError("--class-weight-power deve essere >= 0.")
+
+    set_seed(args.seed)
+
+    include_manufacturers = _parse_csv_values(args.manufacturer)
+    exclude_manufacturers = _parse_csv_values(args.exclude_manufacturer)
+
+    manifest_path = args.manifest.expanduser().resolve()
+    output_dir = args.output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    rows = load_manifest_rows(
+        manifest_path=manifest_path,
+        include_manufacturers=include_manufacturers,
+        exclude_manufacturers=exclude_manufacturers,
+        rect_left_col=args.rect_left_col,
+        rect_top_col=args.rect_top_col,
+        rect_right_col=args.rect_right_col,
+        rect_bottom_col=args.rect_bottom_col,
+        drop_missing_rect=bool(args.drop_missing_rect and args.use_rect_crop),
+    )
+    split_rows = {
+        "train": [row for row in rows if row.split == "train"],
+        "val": [row for row in rows if row.split == "val"],
+        "test": [row for row in rows if row.split == "test"],
+    }
+
+    for split, limit in (
+        ("train", args.max_train_samples),
+        ("val", args.max_val_samples),
+        ("test", args.max_test_samples),
+    ):
+        split_seed_offset = {"train": 11, "val": 23, "test": 37}[split]
+        split_rows[split] = subset_rows(split_rows[split], limit=limit, seed=args.seed + split_seed_offset)
+
+    if not split_rows["train"]:
+        raise RuntimeError("Train vuoto.")
+
+    train_labels = sorted({row.label_lt for row in split_rows["train"]})
+    if train_labels != sorted(LABELS):
+        raise RuntimeError(
+            "Train deve contenere entrambe le classi L e T. "
+            f"Classi trovate: {train_labels}"
+        )
+
+    label_to_idx = {label: idx for idx, label in enumerate(LABELS)}
+    idx_to_label = list(LABELS)
+
+    unseen_val = sorted({row.label_lt for row in split_rows["val"] if row.label_lt not in label_to_idx})
+    unseen_test = sorted({row.label_lt for row in split_rows["test"] if row.label_lt not in label_to_idx})
+    dropped_stats = {
+        "unseen_val_labels": unseen_val,
+        "unseen_test_labels": unseen_test,
+        "dropped_val_samples": 0,
+        "dropped_test_samples": 0,
+    }
+    if unseen_val or unseen_test:
+        if not args.drop_unseen_val_test:
+            raise RuntimeError(
+                "Classi presenti in val/test ma assenti in train. "
+                f"val_only={unseen_val}, test_only={unseen_test}. "
+                "Usa --drop-unseen-val-test per continuare filtrando."
+            )
+        old_val = len(split_rows["val"])
+        old_test = len(split_rows["test"])
+        split_rows["val"] = _drop_unseen(split_rows["val"], idx_to_label)
+        split_rows["test"] = _drop_unseen(split_rows["test"], idx_to_label)
+        dropped_stats["dropped_val_samples"] = old_val - len(split_rows["val"])
+        dropped_stats["dropped_test_samples"] = old_test - len(split_rows["test"])
+        print(
+            "ATTENZIONE: filtrati campioni val/test con label unseen in train. "
+            f"dropped_val={dropped_stats['dropped_val_samples']}, "
+            f"dropped_test={dropped_stats['dropped_test_samples']}",
+            flush=True,
+        )
+
+    if not split_rows["val"] or not split_rows["test"]:
+        raise RuntimeError(
+            "Val/test vuoti dopo il filtraggio. "
+            f"val={len(split_rows['val'])}, test={len(split_rows['test'])}"
+        )
+
+    device = choose_device(args.device)
+    print(f"Device: {device}", flush=True)
+    print(
+        "Samples train/val/test: "
+        f"{len(split_rows['train'])}/{len(split_rows['val'])}/{len(split_rows['test'])}",
+        flush=True,
+    )
+    print(f"Classes: {idx_to_label}", flush=True)
+    print(
+        "Rect crop mode: "
+        f"{'ON' if args.use_rect_crop else 'OFF'} "
+        f"(cols={args.rect_left_col},{args.rect_top_col},{args.rect_right_col},{args.rect_bottom_col}, "
+        f"drop_missing={bool(args.drop_missing_rect and args.use_rect_crop)}, "
+        f"margin={args.rect_margin_frac:.4f}, min_side_px={args.rect_min_side_px})",
+        flush=True,
+    )
+    if include_manufacturers:
+        print(f"Include manufacturers: {sorted(include_manufacturers)}", flush=True)
+    if exclude_manufacturers:
+        print(f"Exclude manufacturers: {sorted(exclude_manufacturers)}", flush=True)
+
+    train_loader = make_loader(
+        split_rows["train"],
+        label_to_idx=label_to_idx,
+        image_size=args.image_size,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        augment=True,
+        use_balanced_sampler=not args.disable_balanced_sampler,
+        use_rect_crop=bool(args.use_rect_crop),
+        rect_margin_frac=float(args.rect_margin_frac),
+        rect_min_side_px=int(args.rect_min_side_px),
+    )
+    val_loader = make_loader(
+        split_rows["val"],
+        label_to_idx=label_to_idx,
+        image_size=args.image_size,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        augment=False,
+        use_balanced_sampler=False,
+        use_rect_crop=bool(args.use_rect_crop),
+        rect_margin_frac=float(args.rect_margin_frac),
+        rect_min_side_px=int(args.rect_min_side_px),
+    )
+    test_loader = make_loader(
+        split_rows["test"],
+        label_to_idx=label_to_idx,
+        image_size=args.image_size,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        augment=False,
+        use_balanced_sampler=False,
+        use_rect_crop=bool(args.use_rect_crop),
+        rect_margin_frac=float(args.rect_margin_frac),
+        rect_min_side_px=int(args.rect_min_side_px),
+    )
+
+    model = LTClassifier(num_classes=len(idx_to_label), pretrained=args.pretrained).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, args.epochs),
+    )
+
+    class_weights: Optional[torch.Tensor] = None
+    if not args.disable_class_weights:
+        class_weights = _build_class_weights(
+            split_rows["train"],
+            label_to_idx=label_to_idx,
+            power=args.class_weight_power,
+        ).to(device)
+        print(f"Class weights: enabled (power={args.class_weight_power:.3f})", flush=True)
+    else:
+        print("Class weights: disabled", flush=True)
+    print(f"Label smoothing: {args.label_smoothing:.3f}", flush=True)
+    criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=float(args.label_smoothing))
+
+    history: List[Dict[str, object]] = []
+    best_val_macro_f1 = -math.inf
+    best_epoch = -1
+    epochs_without_improvement = 0
+    best_model_path = output_dir / "best_model.pt"
+
+    for epoch in range(1, args.epochs + 1):
+        train_metrics = run_epoch(
+            model,
+            train_loader,
+            device,
+            criterion=criterion,
+            optimizer=optimizer,
+            epoch=epoch,
+            phase="train",
+            idx_to_label=idx_to_label,
+            log_interval=args.log_interval,
+        )
+        val_metrics = run_epoch(
+            model,
+            val_loader,
+            device,
+            criterion=criterion,
+            optimizer=None,
+            epoch=epoch,
+            phase="val",
+            idx_to_label=idx_to_label,
+            log_interval=args.log_interval,
+        )
+        scheduler.step()
+
+        record = {
+            "epoch": epoch,
+            "lr": float(optimizer.param_groups[0]["lr"]),
+            "train": train_metrics,
+            "val": val_metrics,
+        }
+        history.append(record)
+        print(
+            f"Epoch {epoch:03d} | "
+            f"train loss {train_metrics['loss']:.4f}, acc {train_metrics['accuracy']:.4f}, macroF1 {train_metrics['macro_f1']:.4f} | "
+            f"val loss {val_metrics['loss']:.4f}, acc {val_metrics['accuracy']:.4f}, macroF1 {val_metrics['macro_f1']:.4f}",
+            flush=True,
+        )
+
+        curr_val_f1 = float(val_metrics["macro_f1"])
+        if curr_val_f1 > best_val_macro_f1:
+            best_val_macro_f1 = curr_val_f1
+            best_epoch = epoch
+            epochs_without_improvement = 0
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "best_val_macro_f1": best_val_macro_f1,
+                    "class_names": idx_to_label,
+                    "args": {
+                        key: (str(value) if isinstance(value, Path) else value)
+                        for key, value in vars(args).items()
+                    },
+                },
+                best_model_path,
+            )
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= args.early_stopping_patience:
+                print(
+                    "Early stopping: nessun miglioramento su validation macro-F1 "
+                    f"per {args.early_stopping_patience} epoche.",
+                    flush=True,
+                )
+                break
+
+    checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    test_metrics = run_epoch(
+        model,
+        test_loader,
+        device,
+        criterion=criterion,
+        optimizer=None,
+        epoch=best_epoch if best_epoch > 0 else args.epochs,
+        phase="test",
+        idx_to_label=idx_to_label,
+        log_interval=args.log_interval,
+        collect_details=True,
+    )
+    test_y_true = list(test_metrics.pop("y_true"))
+    test_y_pred = list(test_metrics.pop("y_pred"))
+    test_manufacturers = list(test_metrics.pop("manufacturers"))
+
+    per_manufacturer_test = _compute_per_manufacturer_metrics(
+        y_true=test_y_true,
+        y_pred=test_y_pred,
+        manufacturers=test_manufacturers,
+        idx_to_label=idx_to_label,
+    )
+
+    print(
+        f"Best epoch: {best_epoch} | best val macro-F1: {best_val_macro_f1:.4f} | "
+        f"test acc: {test_metrics['accuracy']:.4f} | test macro-F1: {test_metrics['macro_f1']:.4f}",
+        flush=True,
+    )
+
+    metrics_path = output_dir / "metrics.json"
+    metrics = {
+        "best_epoch": best_epoch,
+        "best_val_macro_f1": best_val_macro_f1,
+        "class_names": idx_to_label,
+        "dropped_stats": dropped_stats,
+        "test": test_metrics,
+        "per_manufacturer_test": per_manufacturer_test,
+        "history": history,
+        "train_samples": len(split_rows["train"]),
+        "val_samples": len(split_rows["val"]),
+        "test_samples": len(split_rows["test"]),
+        "device": str(device),
+        "include_manufacturers": sorted(include_manufacturers),
+        "exclude_manufacturers": sorted(exclude_manufacturers),
+    }
+    metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    per_class_path = output_dir / "test_per_lt_metrics.csv"
+    _write_per_class_csv(per_class_path, test_metrics["per_class"])
+
+    confusion_path = output_dir / "test_confusion_matrix.csv"
+    _write_confusion_csv(confusion_path, test_metrics["confusion_matrix"], idx_to_label)
+
+    per_vendor_path = output_dir / "test_per_manufacturer_metrics.csv"
+    _write_per_manufacturer_csv(per_vendor_path, per_manufacturer_test)
+
+    print(f"Checkpoint best model: {best_model_path}", flush=True)
+    print(f"Metriche complete: {metrics_path}", flush=True)
+    print(f"Metriche per classe L/T: {per_class_path}", flush=True)
+    print(f"Confusion matrix: {confusion_path}", flush=True)
+    print(f"Metriche per vendor (test): {per_vendor_path}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

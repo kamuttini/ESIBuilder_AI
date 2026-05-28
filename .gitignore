@@ -1,0 +1,29 @@
+# macOS / editor noise
+.DS_Store
+**/.DS_Store
+*.swp
+*.swo
+*~
+
+# Python caches / local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Large local data and generated experiment artifacts
+data/
+artifacts/
+
+# Nested legacy application repository; manage it from its own git repo.
+OldSoftwareEsiBuilder/
+
+# Runtime logs and temporary outputs
+*.log
+tmp/
+temp/
+

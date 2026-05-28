@@ -1,0 +1,30 @@
+[
+  {
+    "score": 0.8557,
+    "seq": 0.8663,
+    "jac": 0.8312,
+    "a": "tools/ultrasound/train_ultrasound_probe_classifier.py",
+    "b": "tools/ultrasound/train_ultrasound_vendor_classifier.py"
+  },
+  {
+    "score": 0.6968,
+    "seq": 0.6958,
+    "jac": 0.6991,
+    "a": "tools/line16/train_orientation_template_detector.py",
+    "b": "tools/ultrasound/train_ultrasound_rect_net.py"
+  },
+  {
+    "score": 0.6359,
+    "seq": 0.6531,
+    "jac": 0.5957,
+    "a": "tools/ultrasound/predict_ultrasound_probe_by_folder.py",
+    "b": "tools/ultrasound/predict_ultrasound_vendor_by_folder.py"
+  },
+  {
+    "score": 0.4905,
+    "seq": 0.437,
+    "jac": 0.6154,
+    "a": "tools/ultrasound/train_ultrasound_rect_net.py",
+    "b": "tools/ultrasound/train_ultrasound_vendor_classifier.py"
+  }
+]
