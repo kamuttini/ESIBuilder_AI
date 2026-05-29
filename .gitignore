@@ -12,12 +12,20 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.venv-*/
 venv/
 env/
 
-# Large local data and generated experiment artifacts
+# Large local input datasets
 data/
-artifacts/
+
+# Pipeline artifacts
+# Keep artifacts trackable so official models, maps, metadata, and references
+# can be committed. Only volatile run outputs stay local.
+artifacts/**/runs/
+artifacts/**/workbench_ui/
+artifacts/**/logs/
+artifacts/**/*.log
 
 # Nested legacy application repository; manage it from its own git repo.
 OldSoftwareEsiBuilder/
@@ -26,4 +34,3 @@ OldSoftwareEsiBuilder/
 *.log
 tmp/
 temp/
-
