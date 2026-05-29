@@ -94,6 +94,84 @@ def _is_subpath(path: Path, parent: Path) -> bool:
         return False
 
 
+def _load_excluded_image_rels(exclude_images_file: Optional[Path], input_folder: Path) -> List[str]:
+    if exclude_images_file is None:
+        return []
+    path = exclude_images_file.expanduser().resolve()
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        raw = path.read_text(encoding="utf-8").splitlines()
+    if isinstance(raw, dict):
+        items = raw.get("excluded_images_rel", raw.get("excluded", []))
+    else:
+        items = raw
+    if not isinstance(items, list):
+        return []
+
+    out: List[str] = []
+    seen = set()
+    for item in items:
+        txt = str(item or "").strip()
+        if not txt:
+            continue
+        rel_txt = txt
+        try:
+            p = Path(txt).expanduser()
+            if p.is_absolute():
+                rel_txt = p.resolve().relative_to(input_folder).as_posix()
+        except Exception:
+            rel_txt = txt
+        rel_txt = rel_txt.replace("\\", "/").lstrip("/")
+        if not rel_txt or rel_txt.startswith("../") or "/../" in rel_txt:
+            continue
+        if rel_txt not in seen:
+            seen.add(rel_txt)
+            out.append(rel_txt)
+    return out
+
+
+def _create_filtered_input_symlinks(input_folder: Path, input_ref_folder: Path, excluded_rels: Sequence[str]) -> Dict[str, Any]:
+    excluded = {str(x or "").replace("\\", "/").lstrip("/") for x in excluded_rels if str(x or "").strip()}
+    raw_images = _collect_acquisition_images(input_folder)
+    included = []
+    excluded_existing = []
+    for path in raw_images:
+        try:
+            rel = path.relative_to(input_folder).as_posix()
+        except Exception:
+            rel = path.name
+        if rel in excluded:
+            excluded_existing.append(rel)
+        else:
+            included.append((path, rel))
+    if not included:
+        raise RuntimeError("Tutte le immagini della cartella risultano escluse: modifica la lista esclusioni.")
+
+    input_ref_folder.mkdir(parents=True, exist_ok=False)
+    for src, rel in included:
+        dst = input_ref_folder / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dst.symlink_to(src)
+        except Exception:
+            # Fallback conservativo se il filesystem non consente symlink su file.
+            import shutil as _shutil
+
+            _shutil.copy2(src, dst)
+
+    return {
+        "mode": "filtered_symlinks",
+        "raw_total": int(len(raw_images)),
+        "included": int(len(included)),
+        "excluded_existing": int(len(excluded_existing)),
+        "excluded_images_rel": sorted(excluded),
+        "excluded_existing_rel": sorted(excluded_existing),
+    }
+
+
 def _load_first_prediction(csv_path: Path) -> Tuple[Optional[Dict[str, str]], int]:
     first: Optional[Dict[str, str]] = None
     rows = 0
@@ -1854,6 +1932,92 @@ def _load_lr_marker_vendor_library_preview(vendor: str) -> Dict[str, object]:
     return out
 
 
+def _lr_marker_orientation_group_from_quadrant(side: str, vertical: str) -> str:
+    side_norm = str(side or "").strip().lower()
+    vertical_norm = str(vertical or "").strip().lower()
+    if side_norm == "left" and vertical_norm == "su":
+        return "NF"
+    if side_norm == "right" and vertical_norm == "su":
+        return "LR"
+    if side_norm == "left" and vertical_norm == "giu":
+        return "UD"
+    if side_norm == "right" and vertical_norm == "giu":
+        return "LRUD"
+    return ""
+
+
+def _lr_marker_quadrant_fields_from_item(item: Dict[str, object]) -> Dict[str, object]:
+    fields: Dict[str, object] = {
+        "quadrant_valid": 0,
+        "quadrant_status": "unknown",
+        "quadrant_reason": "",
+        "quadrant_expected": "",
+        "quadrant_center": "",
+        "quadrant_group": "",
+        "quadrant_center_group": "",
+        "echo_mid_x_abs": "",
+        "echo_mid_y_abs": "",
+    }
+    side = str(item.get("detected_marker_side", "") or "").strip().lower()
+    sugiu = str(item.get("su_giu_pred", "") or "").strip().lower()
+    try:
+        echo_top = int(item.get("echo_rect_top_abs", 0) or 0)
+        echo_left = int(item.get("echo_rect_left_abs", 0) or 0)
+        echo_bottom = int(item.get("echo_rect_bottom_abs", 0) or 0)
+        echo_right = int(item.get("echo_rect_right_abs", 0) or 0)
+        marker_top = int(item.get("marker_top_abs", 0) or 0)
+        marker_left = int(item.get("marker_left_abs", 0) or 0)
+        marker_bottom = int(item.get("marker_bottom_abs", 0) or 0)
+        marker_right = int(item.get("marker_right_abs", 0) or 0)
+    except Exception:
+        fields["quadrant_reason"] = "invalid_quadrant_coordinates"
+        return fields
+    if echo_bottom <= echo_top or echo_right <= echo_left or marker_bottom <= marker_top or marker_right <= marker_left:
+        fields["quadrant_reason"] = "invalid_quadrant_rect"
+        return fields
+
+    mid_x = (echo_left + echo_right) / 2.0
+    mid_y = (echo_top + echo_bottom) / 2.0
+    marker_cx = (marker_left + marker_right) / 2.0
+    marker_cy = (marker_top + marker_bottom) / 2.0
+    center_side = "left" if marker_cx < mid_x else "right"
+    center_vertical = "su" if marker_cy < mid_y else "giu"
+    fields.update(
+        {
+            "quadrant_expected": f"{side}_{sugiu}" if side in {"left", "right"} and sugiu in {"su", "giu"} else "",
+            "quadrant_center": f"{center_side}_{center_vertical}",
+            "quadrant_group": _lr_marker_orientation_group_from_quadrant(side, sugiu),
+            "quadrant_center_group": _lr_marker_orientation_group_from_quadrant(center_side, center_vertical),
+            "echo_mid_x_abs": float(mid_x),
+            "echo_mid_y_abs": float(mid_y),
+        }
+    )
+
+    reasons: List[str] = []
+    if side not in {"left", "right"}:
+        reasons.append("missing_marker_side")
+    if sugiu not in {"su", "giu"}:
+        reasons.append("missing_sugiu_pred")
+    if side == "left" and marker_right > mid_x:
+        reasons.append("marker_crosses_vertical_median")
+    elif side == "right" and marker_left < mid_x:
+        reasons.append("marker_crosses_vertical_median")
+    if sugiu == "su" and marker_bottom > mid_y:
+        reasons.append("marker_crosses_horizontal_median")
+    elif sugiu == "giu" and marker_top < mid_y:
+        reasons.append("marker_crosses_horizontal_median")
+
+    if reasons:
+        fields["quadrant_status"] = "invalid"
+        fields["quadrant_valid"] = 0
+        fields["quadrant_reason"] = ";".join(dict.fromkeys(reasons))
+    else:
+        fields["quadrant_status"] = "ok"
+        fields["quadrant_valid"] = 1
+        fields["quadrant_reason"] = ""
+    return fields
+
+
 def _build_lr_marker_per_image_evidence(
     *,
     run_dir: Path,
@@ -1867,6 +2031,7 @@ def _build_lr_marker_per_image_evidence(
         "images_total": 0,
         "label_counts": {"not_lr_flipped": 0, "lr_flipped": 0, "other": 0},
         "status_counts": {"ok": 0, "review": 0, "other": 0},
+        "quadrant_counts": {"ok": 0, "invalid": 0, "unknown": 0},
         "search_strategy_counts": {},
         "best": {},
         "items": [],
@@ -1886,6 +2051,7 @@ def _build_lr_marker_per_image_evidence(
     items: List[Dict[str, object]] = []
     label_counts = {"not_lr_flipped": 0, "lr_flipped": 0, "other": 0}
     status_counts = {"ok": 0, "review": 0, "other": 0}
+    quadrant_counts = {"ok": 0, "invalid": 0, "unknown": 0}
     strategy_counts: Dict[str, int] = {}
     template_path_counts: Dict[str, int] = {}
     best_item: Dict[str, object] = {}
@@ -1915,10 +2081,6 @@ def _build_lr_marker_per_image_evidence(
                     label_counts[label] += 1
                 else:
                     label_counts["other"] += 1
-                if status in status_counts:
-                    status_counts[status] += 1
-                else:
-                    status_counts["other"] += 1
                 if strategy:
                     strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
                 template_path = str(row.get("template_path", "") or "")
@@ -1992,6 +2154,32 @@ def _build_lr_marker_per_image_evidence(
                     "marker_cx_crop_norm": _safe_float(str(row.get("marker_cx_crop_norm", "") or "0"), 0.0),
                     "marker_cy_crop_norm": _safe_float(str(row.get("marker_cy_crop_norm", "") or "0"), 0.0),
                 }
+                quadrant_fields = _lr_marker_quadrant_fields_from_item(item)
+                item.update(quadrant_fields)
+                quadrant_status = str(item.get("quadrant_status", "") or "unknown").strip().lower() or "unknown"
+                if quadrant_status in quadrant_counts:
+                    quadrant_counts[quadrant_status] += 1
+                else:
+                    quadrant_counts["unknown"] += 1
+                if quadrant_status == "invalid":
+                    status = "review"
+                    review_parts = [
+                        part
+                        for part in str(item.get("review_reason", "") or "").split(";")
+                        if part
+                    ]
+                    review_parts.append("quadrant_logic_violation")
+                    review_parts.extend(
+                        part
+                        for part in str(item.get("quadrant_reason", "") or "").split(";")
+                        if part
+                    )
+                    item["review_reason"] = ";".join(dict.fromkeys(review_parts))
+                    item["status"] = status
+                if status in status_counts:
+                    status_counts[status] += 1
+                else:
+                    status_counts["other"] += 1
                 if darkness_pct is not None:
                     item["darkness_pct"] = float(darkness_pct)
                 items.append(item)
@@ -2007,6 +2195,7 @@ def _build_lr_marker_per_image_evidence(
     out["images_total"] = len(items)
     out["label_counts"] = label_counts
     out["status_counts"] = status_counts
+    out["quadrant_counts"] = quadrant_counts
     out["search_strategy_counts"] = dict(sorted(strategy_counts.items()))
     out["template_path_counts"] = dict(sorted(template_path_counts.items(), key=lambda item: (-int(item[1]), str(item[0]))))
     darkness_rank = sorted(
@@ -3093,6 +3282,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Non crea cartelle SU/GIU e L/T con symlink per ridurre inode/spazio nel batch.",
     )
+    p.add_argument(
+        "--exclude-images-file",
+        type=Path,
+        default=None,
+        help="JSON o testo con immagini relative alla cartella input da escludere dalla run.",
+    )
     p.add_argument("--rect-per-image-worker", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--rect-worker-images-json", type=Path, default=None, help=argparse.SUPPRESS)
     p.add_argument("--rect-worker-checkpoint", type=Path, default=None, help=argparse.SUPPRESS)
@@ -3173,14 +3368,45 @@ def main() -> int:
     )
     if input_ref_folder.exists():
         raise RuntimeError(f"Riferimento input già esistente: {input_ref_folder}")
-    try:
-        input_ref_folder.symlink_to(input_folder, target_is_directory=True)
-    except Exception as exc:
-        raise RuntimeError(
-            "Impossibile creare il riferimento (symlink) alla cartella input. "
-            "Verifica permessi filesystem."
-        ) from exc
-    _emit_event("copy_completed", dst=input_ref_folder.as_posix(), mode="reference_symlink")
+    excluded_images_rel = _load_excluded_image_rels(args.exclude_images_file, input_folder)
+    input_reference_meta: Dict[str, Any] = {
+        "mode": "reference_symlink",
+        "raw_total": 0,
+        "included": 0,
+        "excluded_existing": 0,
+        "excluded_images_rel": excluded_images_rel,
+        "excluded_existing_rel": [],
+    }
+    if excluded_images_rel:
+        input_reference_meta = _create_filtered_input_symlinks(
+            input_folder=input_folder,
+            input_ref_folder=input_ref_folder,
+            excluded_rels=excluded_images_rel,
+        )
+    else:
+        try:
+            input_ref_folder.symlink_to(input_folder, target_is_directory=True)
+        except Exception as exc:
+            raise RuntimeError(
+                "Impossibile creare il riferimento (symlink) alla cartella input. "
+                "Verifica permessi filesystem."
+            ) from exc
+    _emit_event(
+        "copy_completed",
+        dst=input_ref_folder.as_posix(),
+        mode=str(input_reference_meta.get("mode", "reference_symlink")),
+        excluded_images_count=int(input_reference_meta.get("excluded_existing", 0) or 0),
+    )
+    raw_images_before_pipeline = _collect_acquisition_images(input_folder)
+    _emit_event(
+        "raw_images_ready_for_input_copy",
+        count=len(_collect_acquisition_images(input_ref_folder)),
+        original_count=len(raw_images_before_pipeline),
+        excluded_images_count=int(input_reference_meta.get("excluded_existing", 0) or 0),
+        input_original=input_folder.as_posix(),
+        input_copy_folder=input_ref_folder.as_posix(),
+        mode=str(input_reference_meta.get("mode", "reference_symlink")),
+    )
 
     pipeline_script = (SCRIPT_DIR / "predict_fss_head_from_acquisitions.py").resolve()
     if not pipeline_script.is_file():
@@ -3283,6 +3509,17 @@ def main() -> int:
             predictions_rows=0,
             review_reasons=reason_txt,
         )
+    _emit_event(
+        "pipeline_row_decisions",
+        vendor=str(row.get("vendor_pred", "") or row.get("vendor_predicted", "") or ""),
+        vendor_confidence=float(_safe_float(row.get("vendor_conf", row.get("vendor_confidence", 0.0)), 0.0)),
+        rotation_deg_clockwise=int(_safe_int(row.get("rotation_deg_clockwise", 0), 0)),
+        rect_echo=str(row.get("line_11_rect_echo", "") or ""),
+        probe_id=str(row.get("line_03_id_probe", "") or ""),
+        probe_confidence=float(_safe_float(row.get("line_03_probe_conf", row.get("line_03_probe_confidence", 0.0)), 0.0)),
+        line13=str(row.get("line_13_rect_name_echo", "") or ""),
+        line14=str(row.get("line_14_rect_name_probe", "") or ""),
+    )
     probe_name_map = _load_probe_name_map()
     probe_id_row = _normalize_probe_id(row.get("line_03_id_probe", ""))
     if probe_id_row and probe_id_row in probe_name_map:
@@ -3625,6 +3862,13 @@ def main() -> int:
         "lr_marker_expanded_search_threshold": float(
             pipeline_summary.get("lr_marker_expanded_search_threshold", 0.66) or 0.66
         ),
+        "lr_marker_expanded_search_steps": (
+            pipeline_summary.get("lr_marker_expanded_search_steps")
+            if isinstance(pipeline_summary.get("lr_marker_expanded_search_steps"), list)
+            else []
+        ),
+        "lr_marker_blank_template_max_value": int(pipeline_summary.get("lr_marker_blank_template_max_value", 3) or 3),
+        "lr_marker_min_sugiu_confidence": float(pipeline_summary.get("lr_marker_min_sugiu_confidence", 0.80) or 0.80),
         "lr_marker_template_policy": str(pipeline_summary.get("lr_marker_template_policy", "") or ""),
         "lt_checkpoint_global": str(pipeline_summary.get("lt_rect_checkpoint", "") or ""),
         "lt_checkpoint_used": str(row.get("lt_checkpoint", "") or pipeline_summary.get("lt_rect_checkpoint", "") or ""),
@@ -3809,7 +4053,10 @@ def main() -> int:
     summary = {
         "input_original_folder": input_folder.as_posix(),
         "input_copy_folder": input_ref_folder.as_posix(),
-        "input_reference_mode": "symlink",
+        "input_reference_mode": str(input_reference_meta.get("mode", "reference_symlink")),
+        "excluded_images_count": int(input_reference_meta.get("excluded_existing", 0) or 0),
+        "excluded_images_rel": list(input_reference_meta.get("excluded_images_rel", [])),
+        "excluded_existing_images_rel": list(input_reference_meta.get("excluded_existing_rel", [])),
         "generated_images_enabled": bool(generate_images),
         "split_symlinks_enabled": not bool(args.no_split_symlinks),
         "run_dir": run_dir.as_posix(),

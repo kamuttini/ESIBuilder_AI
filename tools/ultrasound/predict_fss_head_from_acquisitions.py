@@ -1650,6 +1650,102 @@ def _lr_marker_truthy_flag(value: object) -> bool:
         return bool(value)
 
 
+def _lr_marker_orientation_group_from_quadrant(side: str, vertical: str) -> str:
+    side_norm = str(side or "").strip().lower()
+    vertical_norm = str(vertical or "").strip().lower()
+    if side_norm == "left" and vertical_norm == "su":
+        return "NF"
+    if side_norm == "right" and vertical_norm == "su":
+        return "LR"
+    if side_norm == "left" and vertical_norm == "giu":
+        return "UD"
+    if side_norm == "right" and vertical_norm == "giu":
+        return "LRUD"
+    return ""
+
+
+def _lr_marker_quadrant_validation_fields(row: Dict[str, object]) -> Dict[str, object]:
+    fields: Dict[str, object] = {
+        "quadrant_valid": 0,
+        "quadrant_status": "unknown",
+        "quadrant_reason": "",
+        "quadrant_expected": "",
+        "quadrant_center": "",
+        "quadrant_group": "",
+        "quadrant_center_group": "",
+        "echo_mid_x_abs": "",
+        "echo_mid_y_abs": "",
+    }
+    side = str(row.get("detected_marker_side", "") or "").strip().lower()
+    sugiu = str(row.get("su_giu_pred", "") or "").strip().lower()
+    try:
+        echo_top = int(row.get("echo_rect_top_abs", 0) or 0)
+        echo_left = int(row.get("echo_rect_left_abs", 0) or 0)
+        echo_bottom = int(row.get("echo_rect_bottom_abs", 0) or 0)
+        echo_right = int(row.get("echo_rect_right_abs", 0) or 0)
+        marker_top = int(row.get("marker_top_abs", 0) or 0)
+        marker_left = int(row.get("marker_left_abs", 0) or 0)
+        marker_bottom = int(row.get("marker_bottom_abs", 0) or 0)
+        marker_right = int(row.get("marker_right_abs", 0) or 0)
+    except (TypeError, ValueError):
+        fields["quadrant_reason"] = "invalid_quadrant_coordinates"
+        return fields
+    if echo_bottom <= echo_top or echo_right <= echo_left or marker_bottom <= marker_top or marker_right <= marker_left:
+        fields["quadrant_reason"] = "invalid_quadrant_rect"
+        return fields
+
+    mid_x = (echo_left + echo_right) / 2.0
+    mid_y = (echo_top + echo_bottom) / 2.0
+    marker_cx = (marker_left + marker_right) / 2.0
+    marker_cy = (marker_top + marker_bottom) / 2.0
+    center_side = "left" if marker_cx < mid_x else "right"
+    center_vertical = "su" if marker_cy < mid_y else "giu"
+    expected = f"{side}_{sugiu}" if side in {"left", "right"} and sugiu in {"su", "giu"} else ""
+    center = f"{center_side}_{center_vertical}"
+    fields.update(
+        {
+            "quadrant_expected": expected,
+            "quadrant_center": center,
+            "quadrant_group": _lr_marker_orientation_group_from_quadrant(side, sugiu),
+            "quadrant_center_group": _lr_marker_orientation_group_from_quadrant(center_side, center_vertical),
+            "echo_mid_x_abs": f"{mid_x:.3f}",
+            "echo_mid_y_abs": f"{mid_y:.3f}",
+        }
+    )
+
+    reasons: List[str] = []
+    if side not in {"left", "right"}:
+        reasons.append("missing_marker_side")
+    if sugiu not in {"su", "giu"}:
+        reasons.append("missing_sugiu_pred")
+    if side == "left" and marker_right > mid_x:
+        reasons.append("marker_crosses_vertical_median")
+    elif side == "right" and marker_left < mid_x:
+        reasons.append("marker_crosses_vertical_median")
+    if sugiu == "su" and marker_bottom > mid_y:
+        reasons.append("marker_crosses_horizontal_median")
+    elif sugiu == "giu" and marker_top < mid_y:
+        reasons.append("marker_crosses_horizontal_median")
+
+    if reasons:
+        fields["quadrant_valid"] = 0
+        fields["quadrant_status"] = "invalid"
+        fields["quadrant_reason"] = ";".join(dict.fromkeys(reasons))
+    else:
+        fields["quadrant_valid"] = 1
+        fields["quadrant_status"] = "ok"
+        fields["quadrant_reason"] = ""
+    return fields
+
+
+def _lr_marker_row_quadrant_valid_or_unknown(row: Dict[str, object]) -> bool:
+    raw = row.get("quadrant_valid", "")
+    if str(raw).strip() != "":
+        return _lr_marker_truthy_flag(raw)
+    fields = _lr_marker_quadrant_validation_fields(row)
+    return str(fields.get("quadrant_status", "") or "") != "invalid"
+
+
 def _lr_marker_reliable_rows(
     rows: Sequence[Dict[str, object]],
     *,
@@ -1672,6 +1768,8 @@ def _lr_marker_reliable_rows(
             target_image_width=int(target_image_width or 0),
             target_image_height=int(target_image_height or 0),
         ):
+            continue
+        if not _lr_marker_row_quadrant_valid_or_unknown(dict(row)):
             continue
         review_parts = set(str(row.get("review_reason", "") or "").split(";"))
         if _lr_marker_truthy_flag(row.get("match_patch_is_blank", False)) or "blank_marker_match" in review_parts:
@@ -1789,8 +1887,11 @@ def _predict_lr_marker_on_su_giu_rows(
                 target_image_height=int(target_image_height or 0),
             )
             and not _lr_marker_truthy_flag(row.get("match_patch_is_blank", False))
+            and _lr_marker_row_quadrant_valid_or_unknown(dict(row))
         ]
-        candidate_rows_for_selection = canonical_candidate_rows or candidate_rows
+        if not canonical_candidate_rows:
+            return []
+        candidate_rows_for_selection = canonical_candidate_rows
 
         def _sample_is_canonical(item: Dict[str, object]) -> bool:
             if int(target_image_width or 0) <= 0 or int(target_image_height or 0) <= 0:
@@ -1846,6 +1947,12 @@ def _predict_lr_marker_on_su_giu_rows(
                     or Path(str(row.get("image_path", "") or "")).name == Path(candidate_sample_path).name
                 ]
                 if not sample_candidates or not candidate_sample_path:
+                    continue
+                sample_candidates = [
+                    row for row in sample_candidates
+                    if _lr_marker_row_quadrant_valid_or_unknown(dict(row))
+                ]
+                if not sample_candidates:
                     continue
                 selected_template_candidates = [
                     row for row in sample_candidates
@@ -2068,17 +2175,15 @@ def _predict_lr_marker_on_su_giu_rows(
                     reasons.append("low_template_score")
                 if bool(patch_stats.get("blank", False)):
                     reasons.append("blank_marker_match")
-                status = "ok" if not reasons else "review"
-                out_rows.append(
-                    {
+                row_lr: Dict[str, object] = {
                         "image_index": int(row_sg.get("image_index", 0) or 0),
                         "image_path": image_path.as_posix(),
                         "image_width": int(width),
                         "image_height": int(height),
                         "canonical_image_size": int(1 if image_is_canonical else 0),
                         "vendor": vendor_name,
-                        "status": status,
-                        "review_reason": ";".join(reasons),
+                        "status": "",
+                        "review_reason": "",
                         "lr_label": lr_label,
                         "lr_label_it": lr_label_it,
                         "lr_binary": int(lr_binary),
@@ -2125,7 +2230,18 @@ def _predict_lr_marker_on_su_giu_rows(
                         "marker_cx_crop_norm": float(marker_cx / max(1, crop_width)),
                         "marker_cy_crop_norm": float(marker_cy / max(1, crop_height)),
                     }
-                )
+                quadrant_fields = _lr_marker_quadrant_validation_fields(row_lr)
+                row_lr.update(quadrant_fields)
+                if str(quadrant_fields.get("quadrant_status", "") or "") == "invalid":
+                    reasons.append("quadrant_logic_violation")
+                    reasons.extend(
+                        part
+                        for part in str(quadrant_fields.get("quadrant_reason", "") or "").split(";")
+                        if part
+                    )
+                row_lr["status"] = "ok" if not reasons else "review"
+                row_lr["review_reason"] = ";".join(dict.fromkeys(reasons))
+                out_rows.append(row_lr)
         except Exception:
             continue
     if selected_template_path and len(templates) == 1:
@@ -2167,10 +2283,19 @@ def _infer_lr_marker_orientation_group(image_path_text: str) -> str:
 
 
 def _infer_lr_marker_orientation_group_from_row(row: Dict[str, object]) -> str:
+    quadrant_fields = _lr_marker_quadrant_validation_fields(row)
+    if str(quadrant_fields.get("quadrant_status", "") or "") == "ok":
+        quadrant_group = str(quadrant_fields.get("quadrant_group", "") or "").strip().upper()
+        if quadrant_group in {"NF", "LR", "UD", "LRUD"}:
+            return quadrant_group
+    side = str(row.get("detected_marker_side", "") or "").strip().lower()
+    sugiu = str(row.get("su_giu_pred", "") or "").strip().lower()
+    quadrant_group = _lr_marker_orientation_group_from_quadrant(side, sugiu)
+    if quadrant_group and _lr_marker_row_quadrant_valid_or_unknown(dict(row)):
+        return quadrant_group
     group = _infer_lr_marker_orientation_group(str(row.get("image_path", "") or ""))
     if group:
         return group
-    side = str(row.get("detected_marker_side", "") or "").strip().lower()
     try:
         cy = float(row.get("marker_cy_crop_norm", 0.0) or 0.0)
     except (TypeError, ValueError):
@@ -2228,6 +2353,7 @@ def _stabilize_lr_marker_rows_with_spatial_consensus(
             target_image_height=int(target_image_height or 0),
         )
         and not _lr_marker_truthy_flag(row.get("match_patch_is_blank", False))
+        and _lr_marker_row_quadrant_valid_or_unknown(dict(row))
     ]
     if len(consensus_rows) < 8:
         return out
@@ -2374,15 +2500,39 @@ def _stabilize_lr_marker_rows_with_spatial_consensus(
             row["marker_right_abs"] = int(marker_right_abs)
             row["marker_cx_crop_norm"] = float(marker_cx_new / max(1, crop_w))
             row["marker_cy_crop_norm"] = float(marker_cy_new / max(1, crop_h))
+            quadrant_fields = _lr_marker_quadrant_validation_fields(row)
+            row.update(quadrant_fields)
+            drop_reasons = {
+                "low_template_score",
+                "quadrant_logic_violation",
+                "marker_crosses_vertical_median",
+                "marker_crosses_horizontal_median",
+                "missing_marker_side",
+                "missing_sugiu_pred",
+                "invalid_quadrant_coordinates",
+                "invalid_quadrant_rect",
+            }
             reasons = [
                 part for part in str(row.get("review_reason", "") or "").split(";")
-                if part and part != "low_template_score"
+                if part and part not in drop_reasons
             ]
             if bool(patch_stats.get("blank", False)):
                 reasons.append("blank_marker_match")
+            if str(quadrant_fields.get("quadrant_status", "") or "") == "invalid":
+                reasons.append("quadrant_logic_violation")
+                reasons.extend(
+                    part
+                    for part in str(quadrant_fields.get("quadrant_reason", "") or "").split(";")
+                    if part
+                )
             reasons.append("spatial_consensus_forced" if forced_consensus else "spatial_consensus_refined")
             row["review_reason"] = ";".join(dict.fromkeys(reasons))
-            blocking_reasons = {"low_sugiu_conf", "blank_marker_match", "non_canonical_image_size"}
+            blocking_reasons = {
+                "low_sugiu_conf",
+                "blank_marker_match",
+                "non_canonical_image_size",
+                "quadrant_logic_violation",
+            }
             if (
                 not forced_consensus
                 and float(score_new) >= float(min_match_score)
@@ -2425,6 +2575,8 @@ def _build_line16_rect_orientation_from_lr_marker_rows(
             target_image_height=int(target_image_height or 0),
         ):
             continue
+        if not _lr_marker_row_quadrant_valid_or_unknown(dict(row)):
+            continue
         review_reason = str(row.get("review_reason", "") or "")
         if _lr_marker_truthy_flag(row.get("match_patch_is_blank", False)) or "blank_marker_match" in review_reason.split(";"):
             continue
@@ -2453,6 +2605,7 @@ def _build_line16_rect_orientation_from_lr_marker_rows(
             "min_match_score": float(min_match_score),
             "target_image_width": int(target_image_width or 0),
             "target_image_height": int(target_image_height or 0),
+            "grouping": "quadrant_marker_sugiu",
             "groups": groups,
         },
         ensure_ascii=False,
@@ -2468,7 +2621,7 @@ def _build_line16_rect_orientation_from_lr_marker_rows(
             f"{int(env['top'])}|{int(env['left'])}|{int(env['bottom'])}|{int(env['right'])}|"
             f"{LINE16_PENDING_MATCH_TAIL};"
         )
-    return "".join(checks), "lr_marker_orientation_envelopes_pending_thresholds", boxes_count, groups_json
+    return "".join(checks), "lr_marker_quadrant_orientation_envelopes_pending_thresholds", boxes_count, groups_json
 
 
 def _predict_lt_on_rect_crops(
@@ -5871,11 +6024,18 @@ def main() -> int:
                         row_lr["template_policy_effective"] = lr_marker_template_policy_effective
                 lr_marker_images_predicted = len(lr_marker_rows)
                 if lr_marker_rows:
+                    decision_lr_rows = _lr_marker_reliable_rows(
+                        lr_marker_rows,
+                        min_match_score=float(args.lr_marker_min_match_score),
+                        target_image_width=int(out_video_x or 0),
+                        target_image_height=int(out_video_y or 0),
+                    )
                     label_counter: Counter[str] = Counter()
-                    for row_lr in lr_marker_rows:
+                    for row_lr in decision_lr_rows:
                         label = str(row_lr.get("lr_label", "") or "").strip()
                         if label:
                             label_counter[label] += 1
+                    for row_lr in lr_marker_rows:
                         lr_marker_per_image_rows.append(
                             {
                                 "folder_path": folder.as_posix(),
@@ -5888,20 +6048,25 @@ def main() -> int:
                             label_counter.items(),
                             key=lambda item: (item[1], item[0] == "not_lr_flipped", item[0]),
                         )
-                        lr_marker_majority_vote_ratio = float(majority_count / max(1, lr_marker_images_predicted))
+                        lr_marker_majority_vote_ratio = float(majority_count / max(1, len(decision_lr_rows)))
                         lr_marker_majority_counter[lr_marker_majority_label] += 1
-                    best_lr = max(lr_marker_rows, key=lambda item: float(item.get("match_score", 0.0) or 0.0))
-                    lr_marker_best_label = str(best_lr.get("lr_label", "") or "")
-                    lr_marker_best_score = float(best_lr.get("match_score", 0.0) or 0.0)
-                    lr_marker_best_template_path = str(best_lr.get("template_path", "") or "")
-                    lr_marker_best_search_strategy = str(best_lr.get("search_strategy", "") or "")
-                    lr_marker_source = (
-                        "classical_vendor_derived_folder_template"
-                        if lr_marker_template_policy_effective == "derived_folder"
-                        else "classical_vendor_historical_best_template"
-                    )
-                    if lr_marker_template_fallback_reason:
-                        lr_marker_source = f"{lr_marker_source}_fallback"
+                    if decision_lr_rows:
+                        best_lr = max(decision_lr_rows, key=lambda item: float(item.get("match_score", 0.0) or 0.0))
+                        lr_marker_best_label = str(best_lr.get("lr_label", "") or "")
+                        lr_marker_best_score = float(best_lr.get("match_score", 0.0) or 0.0)
+                        lr_marker_best_template_path = str(best_lr.get("template_path", "") or "")
+                        lr_marker_best_search_strategy = str(best_lr.get("search_strategy", "") or "")
+                        lr_marker_source = (
+                            "classical_vendor_derived_folder_template"
+                            if lr_marker_template_policy_effective == "derived_folder"
+                            else "classical_vendor_historical_best_template"
+                        )
+                        if lr_marker_template_fallback_reason:
+                            lr_marker_source = f"{lr_marker_source}_fallback"
+                    elif any(not _lr_marker_row_quadrant_valid_or_unknown(dict(row_lr)) for row_lr in lr_marker_rows):
+                        lr_marker_source = "lr_marker_quadrant_logic_failed"
+                    else:
+                        lr_marker_source = "no_reliable_marker_predictions"
                 else:
                     lr_marker_source = "no_marker_predictions"
         (
@@ -6711,6 +6876,15 @@ def main() -> int:
                 "su_giu_conf",
                 "prob_su",
                 "prob_giu",
+                "quadrant_valid",
+                "quadrant_status",
+                "quadrant_reason",
+                "quadrant_expected",
+                "quadrant_center",
+                "quadrant_group",
+                "quadrant_center_group",
+                "echo_mid_x_abs",
+                "echo_mid_y_abs",
                 "echo_rect_top_abs",
                 "echo_rect_left_abs",
                 "echo_rect_bottom_abs",
@@ -6780,6 +6954,15 @@ def main() -> int:
                     "su_giu_conf": f"{float(row.get('su_giu_conf', 0.0) or 0.0):.6f}",
                     "prob_su": f"{float(row.get('prob_su', 0.0) or 0.0):.6f}",
                     "prob_giu": f"{float(row.get('prob_giu', 0.0) or 0.0):.6f}",
+                    "quadrant_valid": int(row.get("quadrant_valid", 0) or 0),
+                    "quadrant_status": str(row.get("quadrant_status", "") or ""),
+                    "quadrant_reason": str(row.get("quadrant_reason", "") or ""),
+                    "quadrant_expected": str(row.get("quadrant_expected", "") or ""),
+                    "quadrant_center": str(row.get("quadrant_center", "") or ""),
+                    "quadrant_group": str(row.get("quadrant_group", "") or ""),
+                    "quadrant_center_group": str(row.get("quadrant_center_group", "") or ""),
+                    "echo_mid_x_abs": row.get("echo_mid_x_abs", ""),
+                    "echo_mid_y_abs": row.get("echo_mid_y_abs", ""),
                     "echo_rect_top_abs": int(row.get("echo_rect_top_abs", 0) or 0),
                     "echo_rect_left_abs": int(row.get("echo_rect_left_abs", 0) or 0),
                     "echo_rect_bottom_abs": int(row.get("echo_rect_bottom_abs", 0) or 0),

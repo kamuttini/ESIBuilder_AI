@@ -32,8 +32,13 @@ except ModuleNotFoundError:
 try:
     from run_pipeline_single_folder_safe import (
         _analyze_duplicates as _runner_analyze_duplicates,
+        _build_lr_marker_per_image_evidence as _runner_build_lr_marker_per_image_evidence,
         _build_rect_red_evidence as _runner_build_rect_red_evidence,
         _build_rect_per_image_evidence as _runner_build_rect_per_image_evidence,
+        _build_su_giu_per_image_evidence as _runner_build_su_giu_per_image_evidence,
+        _build_su_giu_split_folders as _runner_build_su_giu_split_folders,
+        _build_lt_per_image_evidence as _runner_build_lt_per_image_evidence,
+        _build_lt_split_folders as _runner_build_lt_split_folders,
         _collect_acquisition_images as _runner_collect_acquisition_images,
         _parse_rect_coords as _runner_parse_rect_coords,
         _save_rect_crop_preview as _runner_save_rect_crop_preview,
@@ -41,8 +46,13 @@ try:
 except ModuleNotFoundError:
     from tools.ultrasound.run_pipeline_single_folder_safe import (
         _analyze_duplicates as _runner_analyze_duplicates,
+        _build_lr_marker_per_image_evidence as _runner_build_lr_marker_per_image_evidence,
         _build_rect_red_evidence as _runner_build_rect_red_evidence,
         _build_rect_per_image_evidence as _runner_build_rect_per_image_evidence,
+        _build_su_giu_per_image_evidence as _runner_build_su_giu_per_image_evidence,
+        _build_su_giu_split_folders as _runner_build_su_giu_split_folders,
+        _build_lt_per_image_evidence as _runner_build_lt_per_image_evidence,
+        _build_lt_split_folders as _runner_build_lt_split_folders,
         _collect_acquisition_images as _runner_collect_acquisition_images,
         _parse_rect_coords as _runner_parse_rect_coords,
         _save_rect_crop_preview as _runner_save_rect_crop_preview,
@@ -1217,6 +1227,219 @@ HTML_PAGE = """<!doctype html>
       padding: 10px;
       box-shadow: var(--shadow-sm);
     }
+    .home-run-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.8fr) minmax(280px, 0.8fr);
+      gap: 10px;
+      align-items: stretch;
+    }
+    .run-mode-section,
+    .rerun-box,
+    .exclusion-box {
+      border: 1px solid #d5dbe5;
+      border-radius: 10px;
+      background: #fbfdff;
+      padding: 10px;
+      min-width: 0;
+    }
+    .run-mode-section.bulk-mode {
+      background: #f8fafc;
+    }
+    .run-mode-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .run-mode-title h3 {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.2;
+      color: #0f172a;
+    }
+    .input-browse.compact {
+      margin-bottom: 8px;
+    }
+    .compact-params,
+    .rerun-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(84px, 1fr));
+      gap: 8px;
+      align-items: end;
+      min-width: 0;
+    }
+    .compact-params.single {
+      grid-template-columns: minmax(220px, 1fr) auto auto;
+      margin-top: 8px;
+    }
+    .compact-params input,
+    .compact-params select,
+    .rerun-grid input,
+    .rerun-grid select {
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+    .check-line {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0;
+      color: #334155;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .check-line input {
+      width: auto;
+      margin: 0;
+    }
+    .exclusion-box,
+    .rerun-box {
+      margin-top: 10px;
+    }
+    .exclusion-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .mini-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      justify-content: flex-end;
+    }
+    .image-exclusion-list {
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      background: #fff;
+      max-height: 190px;
+      overflow: auto;
+      min-height: 38px;
+    }
+    .image-exclusion-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 8px;
+      border-bottom: 1px solid #eef2f7;
+      font-size: 12px;
+    }
+    .image-exclusion-row:last-child {
+      border-bottom: none;
+    }
+    .image-exclusion-row input {
+      width: auto;
+      margin: 0;
+    }
+    .image-exclusion-row .path {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+      color: #334155;
+    }
+    .image-exclusion-row .size {
+      color: #64748b;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .compact-actions {
+      margin-top: 8px;
+    }
+    .rerun-box {
+      background: #f0f9ff;
+      border-color: #bae6fd;
+    }
+    .rerun-grid {
+      grid-template-columns: minmax(140px, 0.9fr) minmax(160px, 1.1fr) minmax(96px, 0.7fr) minmax(96px, 0.7fr) auto auto;
+    }
+    .rerun-step-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .rerun-step {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      border: 1px solid #dbe3ef;
+      border-radius: 8px;
+      background: #fff;
+      padding: 7px 8px;
+      min-width: 0;
+      cursor: pointer;
+    }
+    .rerun-step input {
+      width: auto;
+      margin: 2px 0 0;
+    }
+    .rerun-step .name {
+      font-size: 12px;
+      font-weight: 750;
+      color: #0f172a;
+      line-height: 1.2;
+    }
+    .rerun-step .hint {
+      font-size: 11px;
+      color: #64748b;
+      line-height: 1.25;
+      margin-top: 2px;
+    }
+    .rerun-tools {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+      margin-top: 8px;
+    }
+    .workspace-rerun-panel {
+      border: 1px solid #bae6fd;
+      border-radius: 8px;
+      background: #f0f9ff;
+      margin: 8px 0 10px;
+      padding: 8px 10px;
+    }
+    .workspace-rerun-panel summary {
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 800;
+      color: #075985;
+    }
+    .workspace-rerun-panel .rerun-step-grid {
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    }
+    .compact-models {
+      margin-top: 10px;
+      max-height: min(36vh, 360px);
+    }
+    @media (max-width: 1280px) {
+      .home-run-grid { grid-template-columns: 1fr; }
+      .compact-params { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .rerun-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      .input-browse.compact { grid-template-columns: minmax(0, 1fr) auto auto; }
+      .compact-params { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .compact-params.single { grid-template-columns: minmax(0, 1fr) auto auto; }
+      .rerun-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .exclusion-head {
+        display: grid;
+      }
+      .check-line {
+        white-space: normal;
+      }
+    }
+    @media (max-width: 560px) {
+      .input-browse.compact,
+      .compact-params,
+      .compact-params.single,
+      .rerun-grid {
+        grid-template-columns: 1fr;
+      }
+    }
     .home-encoding-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1328,6 +1551,15 @@ HTML_PAGE = """<!doctype html>
       border-collapse: collapse;
       min-width: 1180px;
       font-size: 12px;
+    }
+    .models-table-title {
+      position: sticky;
+      left: 0;
+      padding: 8px;
+      font-weight: 800;
+      color: #0f172a;
+      background: #f8fafc;
+      border-bottom: 1px solid #e5e7eb;
     }
     .models-table th,
     .models-table td {
@@ -1649,6 +1881,54 @@ HTML_PAGE = """<!doctype html>
       max-height: min(62vh, 680px);
       overflow: auto;
       padding-right: 4px;
+    }
+    .monitor-activity {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 6px;
+      margin: 10px 0;
+      padding: 10px 12px;
+      border: 1px solid #bae6fd;
+      border-left: 4px solid var(--monitor);
+      border-radius: 8px;
+      background: #f0f9ff;
+      color: #075985;
+      min-width: 0;
+    }
+    .monitor-activity.is-hot {
+      border-color: #38bdf8;
+      background: #e0f2fe;
+      box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.12);
+    }
+    .monitor-activity .activity-title {
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+    .monitor-activity .activity-main {
+      font-size: 15px;
+      font-weight: 750;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+    .monitor-activity .activity-meta {
+      font-size: 12px;
+      color: #0369a1;
+      overflow-wrap: anywhere;
+    }
+    .monitor-activity .activity-events {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .monitor-activity .activity-event {
+      border: 1px solid #7dd3fc;
+      background: #fff;
+      border-radius: 999px;
+      padding: 3px 7px;
+      font-size: 11px;
+      color: #075985;
     }
     .analysis-tree-card {
       margin-top: 10px;
@@ -1979,6 +2259,43 @@ HTML_PAGE = """<!doctype html>
       overflow-wrap: anywhere;
       word-break: break-word;
     }
+    .raw-gallery {
+      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    }
+    .raw-tile {
+      gap: 6px;
+    }
+    .raw-tile.excluded {
+      border-color: #fca5a5;
+      background: #fff7f7;
+    }
+    .gallery-modal-item.excluded {
+      border-color: #fca5a5;
+      background: #fff7f7;
+    }
+    .raw-image-button {
+      border: 0;
+      background: transparent;
+      padding: 0;
+      cursor: zoom-in;
+      min-height: 120px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .raw-exclude-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #334155;
+      line-height: 1.2;
+    }
+    .raw-exclude-toggle input {
+      width: auto;
+      margin: 0;
+    }
     .evidence-card {
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -1992,7 +2309,7 @@ HTML_PAGE = """<!doctype html>
       gap: 8px;
       margin-top: 8px;
     }
-    #predictionSummary { display: block; }
+    #predictionSummary { display: none; }
     .analysis-layout,
     .evidence-layout {
       display: grid;
@@ -2701,6 +3018,62 @@ HTML_PAGE = """<!doctype html>
       color: #475569;
       overflow-wrap: anywhere;
       word-break: break-word;
+    }
+    .orientation-decision-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .orientation-decision-card {
+      border: 1px solid #d9e2ec;
+      border-radius: 8px;
+      background: #fff;
+      padding: 8px;
+      min-width: 0;
+    }
+    .orientation-decision-card b {
+      display: block;
+      font-size: 12px;
+      color: #0f172a;
+      margin-bottom: 4px;
+    }
+    .orientation-decision-card .meta {
+      font-size: 11px;
+      color: #475569;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .orientation-mini-table {
+      display: grid;
+      grid-template-columns: minmax(62px, 0.7fr) repeat(4, minmax(48px, 1fr));
+      gap: 1px;
+      margin-top: 8px;
+      border: 1px solid #d9e2ec;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #d9e2ec;
+      font-size: 11px;
+    }
+    .orientation-mini-table > div {
+      background: #fff;
+      padding: 5px 6px;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .orientation-mini-table .head {
+      font-weight: 800;
+      color: #0f172a;
+      background: #f8fafc;
+    }
+    .orientation-summary-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .orientation-summary-strip .tag {
+      font-size: 11px;
     }
     .lr-low-review-grid {
       grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
@@ -3416,6 +3789,8 @@ HTML_PAGE = """<!doctype html>
     .tag-rect { color: #7f1d1d; background: #fee2e2; border-color: #fca5a5; }
     .tag-rotation { color: #9a3412; background: #ffedd5; border-color: #fdba74; }
     .tag-data { color: #164e63; background: #cffafe; border-color: #67e8f9; }
+    .tag-ok { color: #166534; background: #dcfce7; border-color: #86efac; }
+    .tag-warn { color: #92400e; background: #fef3c7; border-color: #fcd34d; }
     .tag-model { color: #334155; background: #e2e8f0; border-color: #cbd5e1; }
     .small { font-size: 12px; color: var(--muted); }
     .path,
@@ -4394,6 +4769,73 @@ HTML_PAGE = """<!doctype html>
     .rect-focus-meta .meta-item b {
       color: var(--muted) !important;
     }
+    @media (max-width: 760px) {
+      body {
+        padding: 8px !important;
+        overflow-x: hidden !important;
+      }
+      .header h1 {
+        font-size: 1.55rem !important;
+        letter-spacing: 0 !important;
+        overflow-wrap: anywhere;
+      }
+      .app-layout,
+      body.workspace-mode .app-layout {
+        min-width: 0 !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        grid-template-columns: 1fr !important;
+      }
+      .app-shell,
+      .main-column,
+      .workspace-shell,
+      .workspace-topbar,
+      .workspace-meta,
+      .pane-stack,
+      .pane-panel,
+      .evidence-layout,
+      .evidence-main,
+      .evidence-card,
+      .pair-grid,
+      .pair-item,
+      .history-column .panel,
+      .workspace-rail,
+      .lr-template-preview {
+        min-width: 0 !important;
+        width: 100% !important;
+        max-width: 100% !important;
+        box-sizing: border-box;
+      }
+      .history-column {
+        position: static !important;
+        width: 100% !important;
+        max-height: none !important;
+      }
+      .folder-badge {
+        max-width: 100% !important;
+        white-space: normal !important;
+        text-overflow: clip !important;
+        overflow-wrap: anywhere;
+      }
+      .folder-path,
+      .lr-template-preview .meta {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .pair-grid {
+        grid-template-columns: 1fr !important;
+      }
+      .lr-marker-visual-grid {
+        grid-template-columns: 1fr !important;
+      }
+      .orientation-mini-table {
+        grid-template-columns: minmax(48px, 0.8fr) repeat(4, minmax(38px, 1fr));
+        font-size: 10px;
+      }
+      .orientation-mini-table > div {
+        padding: 4px;
+      }
+    }
   </style>
 </head>
 <body class="{% if initial_selected_run %}workspace-mode{% else %}setup-mode{% endif %}">
@@ -4405,99 +4847,169 @@ HTML_PAGE = """<!doctype html>
     <div class="app-layout">
       <main class="main-column">
         <div class="panel panel-core">
-          <h2>Nuova Run <span class="tag tag-data">setup</span></h2>
+          <div class="panel-head">
+            <h2 style="margin:0;">Home Run <span class="tag tag-data">setup</span></h2>
+            <button id="refreshRunsBtn" type="button" class="btn secondary mini">Aggiorna Lista</button>
+          </div>
           <form id="startForm" method="post" action="/runs/start_form">
-            <div class="row">
-              <div>
-                <label>Cartella input (originale)</label>
-                <div class="input-browse">
+            <input id="excludedImagesJson" name="excluded_images_rel_json" type="hidden" value="__use_saved__">
+            <div class="home-run-grid">
+              <section class="run-mode-section">
+                <div class="run-mode-title">
+                  <h3>Singola run</h3>
+                  <span class="tag tag-monitor">manuale</span>
+                </div>
+                <div class="input-browse compact">
                   <input id="inputFolder" name="input_folder" type="text" placeholder="/percorso/cartella_acquisizione" value="{{ initial_input|e }}">
                   <button id="browseInputBtn" type="submit" formmethod="get" formaction="/pick-folder" class="btn secondary">Sfoglia...</button>
                   <a id="browseWebLink" href="/browse" class="btn secondary" title="Fallback se il popup di sistema non si apre">Browser web</a>
                 </div>
-              </div>
-            </div>
-            <div class="row2">
-              <div>
-                <label>Batch size</label>
-                <input id="batchSize" name="batch_size" type="number" min="1" value="32">
-              </div>
-              <div>
-                <label>Sample per folder</label>
-                <input id="samplePerFolder" name="sample_per_folder" type="number" min="1" value="80">
-              </div>
-            </div>
-            <div class="row2">
-              <div>
-                <label>Rotation max samples</label>
-                <input id="rotationMaxSamples" name="rotation_max_samples" type="number" min="1" value="24">
-              </div>
-              <div>
-                <label>Policy low confidence</label>
-                <select id="lowPolicy" name="low_confidence_policy">
-                  <option value="review" selected>review</option>
-                  <option value="error">error</option>
-                  <option value="ask_user">ask_user</option>
-                </select>
-              </div>
-            </div>
-            <div class="row2">
-              <div>
-                <label>Vendor min conf</label>
-                <input id="vendorMinConf" name="vendor_min_confidence" type="number" min="0" max="1" step="0.01" value="0.50">
-              </div>
-              <div>
-                <label>Probe min conf</label>
-                <input id="probeMinConf" name="probe_min_confidence" type="number" min="0" max="1" step="0.01" value="0.50">
-              </div>
-            </div>
-            <div class="row">
-              <div>
-                <label>LR marker template</label>
-                <select id="lrMarkerTemplatePolicy" name="lr_marker_template_policy">
-                  <option value="historical_best_then_derived" selected>historical_best_then_derived</option>
-                  <option value="historical_best">historical_best</option>
-                  <option value="derived_folder">derived_folder</option>
-                </select>
-              </div>
-            </div>
-            <div class="actions">
-              <button id="startRunBtn" type="submit" class="btn">Avvia Run</button>
-              <button id="refreshRunsBtn" type="button" class="btn secondary">Aggiorna Lista</button>
-            </div>
-            <div class="batch-tools">
-              <div>
-                <label>Batch SSD acquisizioni</label>
+                <div class="compact-params">
+                  <div>
+                    <label>Batch</label>
+                    <input id="batchSize" name="batch_size" type="number" min="1" value="32">
+                  </div>
+                  <div>
+                    <label>Sample</label>
+                    <input id="samplePerFolder" name="sample_per_folder" type="number" min="1" value="80">
+                  </div>
+                  <div>
+                    <label>Rot. sample</label>
+                    <input id="rotationMaxSamples" name="rotation_max_samples" type="number" min="1" value="24">
+                  </div>
+                  <div>
+                    <label>Low conf</label>
+                    <select id="lowPolicy" name="low_confidence_policy">
+                      <option value="review" selected>review</option>
+                      <option value="error">error</option>
+                      <option value="ask_user">ask_user</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Vendor conf</label>
+                    <input id="vendorMinConf" name="vendor_min_confidence" type="number" min="0" max="1" step="0.01" value="0.50">
+                  </div>
+                  <div>
+                    <label>Probe conf</label>
+                    <input id="probeMinConf" name="probe_min_confidence" type="number" min="0" max="1" step="0.01" value="0.50">
+                  </div>
+                </div>
+                <div class="compact-params single">
+                  <div>
+                    <label>LR marker template</label>
+                    <select id="lrMarkerTemplatePolicy" name="lr_marker_template_policy">
+                      <option value="historical_best_then_derived" selected>storico poi derivato</option>
+                      <option value="historical_best">solo storico</option>
+                      <option value="derived_folder">derivato cartella</option>
+                    </select>
+                  </div>
+                  <label class="check-line"><input id="noGeneratedImages" name="no_generated_images" type="checkbox" value="1"> evidenze leggere</label>
+                  <label class="check-line"><input id="noSplitSymlinks" name="no_split_symlinks" type="checkbox" value="1"> senza split symlink</label>
+                </div>
+                <div class="exclusion-box">
+                  <div class="exclusion-head">
+                    <div>
+                      <b>Esclusioni immagini</b>
+                      <div id="exclusionStatus" class="small">Nessuna cartella caricata.</div>
+                    </div>
+                    <div class="mini-actions">
+                      <button id="loadExclusionsBtn" type="button" class="btn secondary mini">Carica</button>
+                      <button id="saveExclusionsBtn" type="button" class="btn secondary mini">Salva</button>
+                      <button id="clearExclusionsBtn" type="button" class="btn secondary mini">Svuota</button>
+                    </div>
+                  </div>
+                  <div id="imageExclusionList" class="image-exclusion-list"></div>
+                </div>
+                <div class="actions compact-actions">
+                  <button id="startRunBtn" type="submit" class="btn">Avvia singola run</button>
+                </div>
+              </section>
+
+              <section class="run-mode-section bulk-mode">
+                <div class="run-mode-title">
+                  <h3>Runna tutte le cartelle</h3>
+                  <span class="tag tag-data">batch</span>
+                </div>
+                <label>Root acquisizioni</label>
                 <input id="bulkAcquisitionRoot" type="text" value="/Volumes/SSD_esi1_n3/ACQUISITION ELABORATION">
-              </div>
-              <button id="startBulkBtn" type="button" class="btn secondary">Reset + Run tutte le cartelle</button>
-              <button id="refreshBulkBtn" type="button" class="btn secondary">Stato batch</button>
+                <div class="actions compact-actions">
+                  <button id="startBulkBtn" type="button" class="btn secondary">Reset + run tutte</button>
+                  <button id="refreshBulkBtn" type="button" class="btn secondary">Stato batch</button>
+                </div>
+                <div id="bulkStatus" class="small">Batch SSD non avviato.</div>
+              </section>
             </div>
-            <div id="bulkStatus" class="small" style="margin-top:8px;">Batch SSD non avviato.</div>
+
+            <section class="rerun-box">
+              <div class="run-mode-title">
+                <h3>Rifai solo i punti che ti servono</h3>
+                <span class="tag tag-evidence">rerun</span>
+              </div>
+              <div class="rerun-grid">
+                <div>
+                  <label>Preset</label>
+                  <select id="rerunPreset">
+                    <option value="selected">solo checkbox</option>
+                    <option value="orientation">orientamento</option>
+                    <option value="rect">rettangolo</option>
+                    <option value="all_evidence">tutte evidenze</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Rect margin %</label>
+                  <input id="rerunRectMarginPct" type="number" min="0" max="30" step="0.5" value="5">
+                </div>
+                <div>
+                  <label>Bright thr</label>
+                  <input id="rerunRectBrightThr" type="number" min="0" max="255" step="1" value="70">
+                </div>
+                <label class="check-line"><input id="rerunForceEvidence" type="checkbox" checked> ricalcola cache</label>
+                <button id="rerunSelectedBtn" type="button" class="btn secondary">Esegui rerun</button>
+              </div>
+              <div class="rerun-step-grid" id="rerunStepGrid">
+                <label class="rerun-step">
+                  <input type="checkbox" data-rerun-target="full_pipeline">
+                  <span><span class="name">Run completa nuova</span><span class="hint">Rilancia tutta la pipeline sulla cartella input.</span></span>
+                </label>
+                <label class="rerun-step">
+                  <input type="checkbox" data-rerun-target="rect_red">
+                  <span><span class="name">Rect rosso linea 11</span><span class="hint">Ricalcola il rettangolo eco da segmenti rossi.</span></span>
+                </label>
+                <label class="rerun-step">
+                  <input type="checkbox" data-rerun-target="rect_per_image">
+                  <span><span class="name">Rect per immagine</span><span class="hint">Riesegue l'audit box frame-by-frame.</span></span>
+                </label>
+                <label class="rerun-step">
+                  <input type="checkbox" data-rerun-target="rect_compare">
+                  <span><span class="name">Confronto reti rect</span><span class="hint">Globale vs specifica vendor.</span></span>
+                </label>
+                <label class="rerun-step">
+                  <input type="checkbox" data-rerun-target="su_giu">
+                  <span><span class="name">SU/GIU</span><span class="hint">Rigenera evidenza e cartelle split.</span></span>
+                </label>
+                <label class="rerun-step">
+                  <input type="checkbox" data-rerun-target="lr_marker">
+                  <span><span class="name">LR marker + linea 16</span><span class="hint">Ricalcola quadranti, gruppi NF/LR/UD/LRUD e line16.</span></span>
+                </label>
+                <label class="rerun-step">
+                  <input type="checkbox" data-rerun-target="lt">
+                  <span><span class="name">L/T</span><span class="hint">Rigenera evidenza e cartelle split L/T.</span></span>
+                </label>
+                <label class="rerun-step">
+                  <input type="checkbox" data-rerun-target="line13">
+                  <span><span class="name">Linea 13 template</span><span class="hint">Rigenera crop/preview del rect_name_echo.</span></span>
+                </label>
+              </div>
+              <div class="rerun-tools">
+                <button id="rerunSelectAllBtn" type="button" class="btn secondary mini">Spunta tutto</button>
+                <button id="rerunClearBtn" type="button" class="btn secondary mini">Svuota</button>
+                <button id="rerunOnlyOrientationBtn" type="button" class="btn secondary mini">Solo orientamento</button>
+                <button id="rerunOnlyRectBtn" type="button" class="btn secondary mini">Solo rettangolo</button>
+              </div>
+              <div id="rerunStatus" class="small">Spunta una o piu parti: se scegli "Run completa nuova" nasce una nuova run; gli altri punti si ricalcolano sulla run selezionata.</div>
+            </section>
             <div id="startStatus" class="small" style="margin-top:8px;">{{ initial_notice|e }}</div>
           </form>
-
-          <section id="modelsRegistrySection" class="home-models">
-            <div class="panel-head">
-              <h2 style="margin:0;">Reti Generate Finora <span class="tag tag-model">registry</span></h2>
-              <div class="home-models-toolbar">
-                <button id="refreshModelsBtn" type="button" class="btn secondary mini">Aggiorna Metriche</button>
-                <button
-                  id="openModelsCsvBtn"
-                  type="button"
-                  class="btn secondary mini{% if not models_metrics_csv_path %} is-disabled{% endif %}"
-                  {% if not models_metrics_csv_path %}disabled{% endif %}
-                  data-open-folder-path="{{ models_metrics_csv_path|e }}"
-                >
-                  Apri CSV
-                </button>
-              </div>
-            </div>
-            <div id="modelsRegistryStatus" class="small">Caricamento registro reti...</div>
-            <div id="modelsRegistryKpis" class="models-kpi-grid"></div>
-            <div id="modelsRegistryTop" class="models-top-list" hidden></div>
-            <div id="modelsRegistryTableWrap" class="models-table-wrap"></div>
-          </section>
 
           <section id="encodingStructSection" class="home-encoding">
             <div class="panel-head">
@@ -4572,6 +5084,29 @@ HTML_PAGE = """<!doctype html>
             <div class="small">Catalogo non disponibile: {{ (encoding_struct_catalog.error if encoding_struct_catalog else 'errore sconosciuto')|e }}</div>
             {% endif %}
           </section>
+
+          <section id="modelsRegistrySection" class="home-models">
+            <div class="panel-head">
+              <h2 style="margin:0;">Catalogo Reti <span class="tag tag-model">registry</span></h2>
+              <div class="home-models-toolbar">
+                <button id="refreshModelsBtn" type="button" class="btn secondary mini">Aggiorna Metriche</button>
+                <button
+                  id="openModelsCsvBtn"
+                  type="button"
+                  class="btn secondary mini{% if not models_metrics_csv_path %} is-disabled{% endif %}"
+                  {% if not models_metrics_csv_path %}disabled{% endif %}
+                  data-open-folder-path="{{ models_metrics_csv_path|e }}"
+                >
+                  Apri CSV
+                </button>
+              </div>
+            </div>
+            <div id="modelsRegistryStatus" class="small">Caricamento registro reti...</div>
+            <div id="modelsRegistryKpis" class="models-kpi-grid"></div>
+            <div id="modelsRegistryTop" class="models-top-list" hidden></div>
+            <div id="modelsPipelineTableWrap" class="models-table-wrap compact-models"></div>
+            <div id="modelsLegacyTableWrap" class="models-table-wrap compact-models"></div>
+          </section>
         </div>
 
         <div class="workspace-shell">
@@ -4590,6 +5125,51 @@ HTML_PAGE = """<!doctype html>
             <button id="backToSetupBtn" type="button" class="btn back mini">Nuova Run + Storico</button>
           </div>
         </div>
+        <details class="workspace-rerun-panel" id="workspaceRerunPanel" data-rerun-root>
+          <summary>Rerun selettivo: spunta i punti da ricalcolare</summary>
+          <div class="rerun-step-grid">
+            <label class="rerun-step">
+              <input type="checkbox" data-rerun-target="full_pipeline">
+              <span><span class="name">Run completa nuova</span><span class="hint">Rilancia tutta la pipeline.</span></span>
+            </label>
+            <label class="rerun-step">
+              <input type="checkbox" data-rerun-target="rect_red">
+              <span><span class="name">Rect rosso linea 11</span><span class="hint">Segmenti rossi e line11.</span></span>
+            </label>
+            <label class="rerun-step">
+              <input type="checkbox" data-rerun-target="rect_per_image">
+              <span><span class="name">Rect per immagine</span><span class="hint">Audit box frame-by-frame.</span></span>
+            </label>
+            <label class="rerun-step">
+              <input type="checkbox" data-rerun-target="rect_compare">
+              <span><span class="name">Confronto reti rect</span><span class="hint">Globale vs specifica vendor.</span></span>
+            </label>
+            <label class="rerun-step">
+              <input type="checkbox" data-rerun-target="su_giu">
+              <span><span class="name">SU/GIU</span><span class="hint">Evidenza e split.</span></span>
+            </label>
+            <label class="rerun-step">
+              <input type="checkbox" data-rerun-target="lr_marker">
+              <span><span class="name">LR marker + linea 16</span><span class="hint">Quadranti e NF/LR/UD/LRUD.</span></span>
+            </label>
+            <label class="rerun-step">
+              <input type="checkbox" data-rerun-target="lt">
+              <span><span class="name">L/T</span><span class="hint">Evidenza e split L/T.</span></span>
+            </label>
+            <label class="rerun-step">
+              <input type="checkbox" data-rerun-target="line13">
+              <span><span class="name">Linea 13 template</span><span class="hint">Crop/preview rect_name_echo.</span></span>
+            </label>
+          </div>
+          <div class="rerun-tools">
+            <button type="button" class="btn secondary mini" data-rerun-action="all">Spunta tutto</button>
+            <button type="button" class="btn secondary mini" data-rerun-action="clear">Svuota</button>
+            <button type="button" class="btn secondary mini" data-rerun-action="orientation">Solo orientamento</button>
+            <button type="button" class="btn secondary mini" data-rerun-action="rect">Solo rettangolo</button>
+            <button type="button" class="btn secondary mini" data-rerun-action="execute">Esegui rerun</button>
+            <span id="workspaceRerunStatus" class="small">Nessun punto selezionato.</span>
+          </div>
+        </details>
         <div class="pane-stack">
         <section class="panel pane-panel active" id="paneMonitor" data-pane="monitor" role="tabpanel" aria-labelledby="tabMonitor">
           <h2>Monitor <span class="tag tag-monitor">live</span></h2>
@@ -4603,6 +5183,7 @@ HTML_PAGE = """<!doctype html>
                   <div class="kpi"><div class="k">Stage</div><div id="kpiStage" class="v">{{ fallback_kpi_stage|e }}</div></div>
                   <div class="kpi"><div class="k">Ultimo Agg.</div><div id="kpiUpdated" class="v" style="font-size:15px;">{{ fallback_kpi_updated|e }}</div></div>
                 </div>
+                <div id="monitorActivity" class="monitor-activity" hidden></div>
                 <pre id="runLog" class="log">{{ fallback_log_text|e }}</pre>
               </div>
             </div>
@@ -4656,174 +5237,16 @@ HTML_PAGE = """<!doctype html>
           <div id="evidenceStatus" class="small">{{ fallback_evidence_status|e }}</div>
           <div class="pane-nav evidence-nav" role="tablist" aria-label="Sezioni evidenze" style="margin-top:8px;">
             <button type="button" class="pane-btn evidence-btn active" data-evidence-section="raw">Raw</button>
-            <button type="button" class="pane-btn evidence-btn" data-evidence-section="decision">Decisioni</button>
             <button type="button" class="pane-btn evidence-btn" data-evidence-section="duplicates">Duplicati</button>
             <button type="button" class="pane-btn evidence-btn" data-evidence-section="rotation">Rotazioni</button>
-            <button type="button" class="pane-btn evidence-btn" data-evidence-section="orientation">Orientamento</button>
-            <button type="button" class="pane-btn evidence-btn" data-evidence-section="lt">L/T</button>
             <button type="button" class="pane-btn evidence-btn" data-evidence-section="rect">Rect</button>
             <button type="button" class="pane-btn evidence-btn" data-evidence-section="template">Template</button>
+            <button type="button" class="pane-btn evidence-btn" data-evidence-section="orientation">Orientamento</button>
+            <button type="button" class="pane-btn evidence-btn" data-evidence-section="lt">L/T</button>
+            <button type="button" class="pane-btn evidence-btn" data-evidence-section="scale">Scala</button>
+            <button type="button" class="pane-btn evidence-btn" data-evidence-section="depth">Depth</button>
           </div>
-          <div id="predictionSummary">
-            {% if initial_selected_run %}
-            <div class="evidence-card">
-              <div class="evidence-title">Riepilogo Predizioni (fallback)</div>
-              <div class="summary-grid">
-                <div class="summary-item sum-vendor">
-                  <div class="k">Vendor</div>
-                  <div class="v">{{ fallback_vendor_predicted_name or "-" }}</div>
-                  <div class="conf-chip {% if fallback_vendor_confidence is none or fallback_vendor_confidence == '' %}empty{% endif %}">conf {{ fallback_vendor_confidence or "-" }}</div>
-                </div>
-                <div class="summary-item sum-probe">
-                  <div class="k">Probe</div>
-                  <div class="v">{{ fallback_probe_label or "-" }}</div>
-                  <div class="conf-chip {% if fallback_probe_confidence is none or fallback_probe_confidence == '' %}empty{% endif %}">conf {{ fallback_probe_confidence or "-" }}</div>
-                </div>
-                <div class="summary-item sum-rect">
-                  <div class="k">Rect line11</div>
-                  <div class="v">{{ fallback_line11_rect or "-" }}</div>
-                  <div class="conf-chip {% if fallback_rect_confidence is none or fallback_rect_confidence == '' %}empty{% endif %}">conf {{ fallback_rect_confidence or "-" }}</div>
-                </div>
-                <div class="summary-item sum-rect"><div class="k">Rect conf method</div><div class="v">{{ fallback_rect_confidence_method or "-" }}</div></div>
-                <div class="summary-item sum-rect"><div class="k">Rect source</div><div class="v">{{ fallback_rect_source or "-" }}</div></div>
-                <div class="summary-item sum-rect"><div class="k">Rect frames usati</div><div class="v">{{ fallback_rect_images_used or "-" }}</div></div>
-                <div class="summary-item sum-rect"><div class="k">Rect size px (WxH)</div><div class="v">{{ fallback_rect_size_px or "-" }}</div></div>
-                <div class="summary-item sum-rect"><div class="k">Rect area ratio</div><div class="v">{{ fallback_rect_area_ratio or "-" }}</div></div>
-                <div class="summary-item sum-rect"><div class="k">Rect aspect ratio</div><div class="v">{{ fallback_rect_aspect_ratio or "-" }}</div></div>
-                <div class="summary-item sum-rect"><div class="k">Rect confidence note</div><div class="v">{{ fallback_rect_confidence_note or "-" }}</div></div>
-                <div class="summary-item sum-data"><div class="k">line13 rect_name_echo</div><div class="v">{{ fallback_line13_value or "-" }}</div></div>
-                <div class="summary-item sum-data"><div class="k">line14 rect_name_probe</div><div class="v">{{ fallback_line14_value or "-" }}</div></div>
-                <div class="summary-item sum-status"><div class="k">Status predizione</div><div class="v">{{ fallback_line90_status or "-" }}</div></div>
-                <div class="summary-item sum-status"><div class="k">Reason</div><div class="v">{{ fallback_line91_reason or "-" }}</div></div>
-                <div class="summary-item sum-rotation"><div class="k">Rotazione (deg)</div><div class="v">{{ fallback_rotation_deg_clockwise or "-" }}</div></div>
-                <div class="summary-item sum-data"><div class="k">Raw images</div><div class="v">{{ fallback_raw_images_count or "-" }}</div></div>
-                <div class="summary-item sum-data"><div class="k">Duplicati rimossi</div><div class="v">{{ fallback_duplicates_removed_count or "-" }}</div></div>
-              </div>
-            </div>
-            {% endif %}
-          </div>
-          {% if initial_selected_run %}
-          <div class="evidence-card">
-            <div class="evidence-title">Fallback Server (se JS non aggiorna) <span class="tag tag-model">fallback</span></div>
-            <div class="small">run_id: {{ initial_selected_run }}</div>
-            <div class="detail-list" style="margin-top:6px;">
-              <div><b>Vendor checkpoint</b><br><span class="path">{{ fallback_model_vendor_checkpoint or "-" }}</span><br><span class="split-mock">split dataset: mock disabilitato</span></div>
-              <div><b>Probe checkpoint</b><br><span class="path">{{ fallback_model_probe_checkpoint or "-" }}</span><br><span class="split-mock">split dataset: mock disabilitato</span></div>
-              <div><b>Rect checkpoint (globale)</b><br><span class="path">{{ fallback_model_rect_global or "-" }}</span><br><span class="split-mock">split dataset: mock disabilitato</span></div>
-              <div><b>Rect checkpoint (usato)</b><br><span class="path">{{ fallback_model_rect_used or "-" }}</span><br><span class="split-mock">split dataset: mock disabilitato</span></div>
-            </div>
-            <div class="evidence-title" style="margin-top:10px;">Vendor / Probe scelti (fallback) <span class="tag tag-vendor">vendor</span><span class="tag tag-probe">probe</span></div>
-            <div class="detail-list">
-              <div>
-                <b>Vendor</b><br>
-                predetto: {{ fallback_vendor_predicted_name or "-" }}<br>
-                conf: {{ fallback_vendor_confidence or "-" }}<br>
-                OCR usato: <b>{% if fallback_vendor_ocr_used %}SI{% else %}NO{% endif %}</b><br>
-                source: {{ fallback_vendor_source_hint or "-" }}<br>
-                commento: {{ fallback_vendor_ocr_comment or "-" }}<br>
-                elementi OCR: {{ fallback_vendor_ocr_elements_text or "-" }}
-              </div>
-              <div>
-                <b>Probe</b><br>
-                predetta: {{ fallback_probe_label or "-" }}<br>
-                conf: {{ fallback_probe_confidence or "-" }}<br>
-                OCR usato: <b>{% if fallback_probe_ocr_used %}SI{% else %}NO{% endif %}</b><br>
-                source: {{ fallback_probe_source_hint or "-" }}<br>
-                commento: {{ fallback_probe_ocr_comment or "-" }}<br>
-                elementi OCR: {{ fallback_probe_ocr_elements_text or "-" }}
-              </div>
-            </div>
-            <div class="evidence-title" style="margin-top:10px;">Duplicati rimossi (fallback) <span class="tag tag-data">dedup</span></div>
-            {% if false and fallback_duplicate_examples and fallback_duplicate_examples|length > 0 %}
-            <details class="toggle-block">
-              <summary>Apri/chiudi duplicati (totale {{ fallback_duplicates_removed_count or fallback_duplicate_examples|length }}, esempi {{ fallback_duplicate_examples|length }})</summary>
-              <div class="toggle-content">
-                {% for dup in fallback_duplicate_examples %}
-                <div class="evidence-card" style="margin-top:8px;">
-                  <div class="small">sha1 {{ dup.sha1_prefix or "-" }} | {{ dup.size_bytes or "-" }} bytes</div>
-                  <div class="pair-grid">
-                    <div class="pair-item">
-                      <div class="label">Tenuta (kept)</div>
-                      <img src="/api/runs/{{ initial_selected_run|urlencode }}/preview?path={{ dup.kept_rel|urlencode }}" loading="lazy">
-                      <div class="path">{{ dup.kept_rel }}</div>
-                    </div>
-                    <div class="pair-item">
-                      <div class="label">Rimossa (removed)</div>
-                      <img src="/api/runs/{{ initial_selected_run|urlencode }}/preview?path={{ dup.removed_rel|urlencode }}" loading="lazy">
-                      <div class="path">{{ dup.removed_rel }}</div>
-                    </div>
-                  </div>
-                  <div class="dup-actions">
-                    <button
-                      type="button"
-                      class="btn secondary mini"
-                      data-open-dup-compare="1"
-                      data-run-id="{{ initial_selected_run|e }}"
-                      data-kept="{{ dup.kept_rel|e }}"
-                      data-removed="{{ dup.removed_rel|e }}"
-                      data-sha="{{ dup.sha1_prefix|e }}"
-                      data-size="{{ dup.size_bytes|e }}"
-                    >Apri confronto grande</button>
-                  </div>
-                </div>
-                {% endfor %}
-              </div>
-            </details>
-            {% else %}
-            <div class="small">Nessun esempio duplicati disponibile.</div>
-            {% endif %}
-            <div class="evidence-title" style="margin-top:10px;">Sample Vendor/Probe <span class="tag tag-data">samples</span></div>
-            {% if false and fallback_vendor_probe_samples and fallback_vendor_probe_samples|length > 0 %}
-            <div class="mini-grid">
-              {% for rel in fallback_vendor_probe_samples %}
-              <div class="pair-item">
-                <div class="label">sample {{ loop.index }}</div>
-                <img src="/api/runs/{{ initial_selected_run|urlencode }}/preview?path={{ rel|urlencode }}" loading="lazy">
-                <div class="path">{{ rel }}</div>
-              </div>
-              {% endfor %}
-            </div>
-            {% else %}
-            <div class="small">Nessun sample vendor/probe disponibile.</div>
-            {% endif %}
-            <div class="evidence-title" style="margin-top:10px;">Overlay Rect Linea 11 <span class="tag tag-rect">rect</span></div>
-            {% if fallback_rect_overlay_rel %}
-            <div class="pair-item">
-              <img src="/api/runs/{{ initial_selected_run|urlencode }}/preview?path={{ fallback_rect_overlay_rel|urlencode }}" loading="lazy">
-              <div class="path">{{ fallback_rect_overlay_rel }}</div>
-            </div>
-            {% else %}
-            <div class="small">Nessun overlay rettangolo disponibile.</div>
-            {% endif %}
-            <div class="evidence-title" style="margin-top:10px;">Template Linee 13/14 <span class="tag tag-data">template</span></div>
-            <div class="detail-list">
-              <div>
-                <b>line13 rect_name_echo</b><br>
-                value: {{ fallback_line13_value or "-" }}<br>
-                source: {{ fallback_line13_source or "-" }}<br>
-                support: {{ fallback_line13_support or "-" }}
-                {% if fallback_line13_overlay_rel %}
-                <div class="pair-item" style="margin-top:6px;">
-                  <img src="/api/runs/{{ initial_selected_run|urlencode }}/preview?path={{ fallback_line13_overlay_rel|urlencode }}" loading="lazy">
-                  <div class="path">{{ fallback_line13_overlay_rel }}</div>
-                </div>
-                {% endif %}
-              </div>
-              <div>
-                <b>line14 rect_name_probe</b><br>
-                value: {{ fallback_line14_value or "-" }}<br>
-                source: {{ fallback_line14_source or "-" }}<br>
-                support: {{ fallback_line14_support or "-" }}
-                {% if fallback_line14_overlay_rel %}
-                <div class="pair-item" style="margin-top:6px;">
-                  <img src="/api/runs/{{ initial_selected_run|urlencode }}/preview?path={{ fallback_line14_overlay_rel|urlencode }}" loading="lazy">
-                  <div class="path">{{ fallback_line14_overlay_rel }}</div>
-                </div>
-                {% endif %}
-              </div>
-            </div>
-          </div>
-          {% endif %}
+          <div id="predictionSummary" hidden></div>
           <div id="decisionEvidence"></div>
           <div id="templateEvidence"></div>
           <div id="rotationEvidence"></div>
@@ -4831,10 +5254,19 @@ HTML_PAGE = """<!doctype html>
           <div id="suGiuEvidence"></div>
           <div id="lrMarkerEvidence"></div>
           <div id="ltEvidence"></div>
+          <div id="scaleEvidence"></div>
+          <div id="depthEvidence"></div>
           <div id="dupEvidence"></div>
           <div id="rawEvidenceBlock">
-            <div class="small" style="margin-top:8px;">Immagini grezze della cartella (sample)</div>
-            <div id="gallery" class="gallery">
+            <div class="evidence-card raw-evidence-card">
+              <div class="evidence-title">Raw <span class="tag tag-data">images</span></div>
+              <div class="dup-actions">
+                <button type="button" class="btn secondary mini" data-open-evidence-gallery="raw">Apri galleria</button>
+                <button type="button" class="btn secondary mini" data-raw-exclusion-action="save">Salva esclusioni</button>
+                <button type="button" class="btn secondary mini" data-raw-exclusion-action="clear">Deseleziona</button>
+              </div>
+              <div id="rawExclusionStatus" class="small" style="margin-top:6px;">Caricamento immagini...</div>
+              <div id="gallery" class="gallery raw-gallery">
             {% if false and initial_selected_run and fallback_raw_images_rel and fallback_raw_images_rel|length > 0 %}
               {% for rel in fallback_raw_images_rel[:12] %}
               <div class="tile">
@@ -4843,6 +5275,7 @@ HTML_PAGE = """<!doctype html>
               </div>
               {% endfor %}
             {% endif %}
+              </div>
             </div>
           </div>
           </div>
@@ -4987,6 +5420,7 @@ HTML_PAGE = """<!doctype html>
                 <div class="t">{{ run.run_id }}</div>
                 <div class="s">{{ run.input_folder or "-" }}</div>
                 <div class="s"><span class="status-pill {% if run.status in ['ok','completed'] %}status-ok{% elif run.status in ['error','failed'] %}status-error{% else %}status-review{% endif %}">{{ run.status or "-" }}</span> {{ run.created_at or "-" }}</div>
+                <div class="s">tempo: {{ run.elapsed_text or "-" }}</div>
                 <div class="run-actions">
                   <form class="inline-form" method="post" action="/runs/rerun_form" onclick="event.stopPropagation();" onsubmit="return confirm('Rieseguire la pipeline sulla stessa cartella di questa run?');">
                     <input type="hidden" name="run_id" value="{{ run.run_id }}">
@@ -5167,6 +5601,8 @@ HTML_PAGE = """<!doctype html>
     const suGiuEvidenceEl = document.getElementById("suGiuEvidence");
     const lrMarkerEvidenceEl = document.getElementById("lrMarkerEvidence");
     const ltEvidenceEl = document.getElementById("ltEvidence");
+    const scaleEvidenceEl = document.getElementById("scaleEvidence");
+    const depthEvidenceEl = document.getElementById("depthEvidence");
     const dupEvidenceEl = document.getElementById("dupEvidence");
     const folderBrowserModalEl = document.getElementById("folderBrowserModal");
     const dupCompareModalEl = document.getElementById("dupCompareModal");
@@ -5221,10 +5657,33 @@ HTML_PAGE = """<!doctype html>
     const modelsRegistryKpisEl = document.getElementById("modelsRegistryKpis");
     const modelsRegistryTopEl = document.getElementById("modelsRegistryTop");
     const modelsRegistryTableWrapEl = document.getElementById("modelsRegistryTableWrap");
+    const modelsPipelineTableWrapEl = document.getElementById("modelsPipelineTableWrap");
+    const modelsLegacyTableWrapEl = document.getElementById("modelsLegacyTableWrap");
     const bulkAcquisitionRootEl = document.getElementById("bulkAcquisitionRoot");
     const startBulkBtnEl = document.getElementById("startBulkBtn");
     const refreshBulkBtnEl = document.getElementById("refreshBulkBtn");
     const bulkStatusEl = document.getElementById("bulkStatus");
+    const excludedImagesJsonEl = document.getElementById("excludedImagesJson");
+    const exclusionStatusEl = document.getElementById("exclusionStatus");
+    const rawExclusionStatusEl = document.getElementById("rawExclusionStatus");
+    const imageExclusionListEl = document.getElementById("imageExclusionList");
+    const loadExclusionsBtnEl = document.getElementById("loadExclusionsBtn");
+    const saveExclusionsBtnEl = document.getElementById("saveExclusionsBtn");
+    const clearExclusionsBtnEl = document.getElementById("clearExclusionsBtn");
+    const noGeneratedImagesEl = document.getElementById("noGeneratedImages");
+    const noSplitSymlinksEl = document.getElementById("noSplitSymlinks");
+    const rerunPresetEl = document.getElementById("rerunPreset");
+    const rerunStepGridEl = document.getElementById("rerunStepGrid");
+    const rerunSelectAllBtnEl = document.getElementById("rerunSelectAllBtn");
+    const rerunClearBtnEl = document.getElementById("rerunClearBtn");
+    const rerunOnlyOrientationBtnEl = document.getElementById("rerunOnlyOrientationBtn");
+    const rerunOnlyRectBtnEl = document.getElementById("rerunOnlyRectBtn");
+    const rerunRectMarginPctEl = document.getElementById("rerunRectMarginPct");
+    const rerunRectBrightThrEl = document.getElementById("rerunRectBrightThr");
+    const rerunForceEvidenceEl = document.getElementById("rerunForceEvidence");
+    const rerunSelectedBtnEl = document.getElementById("rerunSelectedBtn");
+    const rerunStatusEl = document.getElementById("rerunStatus");
+    const workspaceRerunStatusEl = document.getElementById("workspaceRerunStatus");
     const studyTypeSelectEl = document.getElementById("studyTypeSelect");
     const studyRunPickerEl = document.getElementById("studyRunPicker");
     const studyPrevRunBtnEl = document.getElementById("studyPrevRunBtn");
@@ -5233,6 +5692,7 @@ HTML_PAGE = """<!doctype html>
     const studyStatusEl = document.getElementById("studyStatus");
     const studyContentEl = document.getElementById("studyContent");
     const decisionTreeLiveEls = Array.from(document.querySelectorAll(".decision-tree-live-target"));
+    const monitorActivityEl = document.getElementById("monitorActivity");
     const workspaceShellEl = document.querySelector(".workspace-shell");
     const setupPanelEl = document.querySelector(".panel-core");
     const historyColumnEl = document.querySelector(".history-column");
@@ -5249,10 +5709,13 @@ HTML_PAGE = """<!doctype html>
 
     const STAGES_ORDER = [
       "queued",
+      "run_started",
       "copy_started",
       "copy_completed",
+      "raw_images_ready_for_input_copy",
       "pipeline_started",
       "pipeline_finished",
+      "pipeline_row_decisions",
       "checks_built",
       "review_html_built",
       "run_completed"
@@ -5296,6 +5759,9 @@ HTML_PAGE = """<!doctype html>
     let activeStudyType = "duplicates";
     let studyRunId = "";
     let studyDataCache = {};
+    let inputImageRows = [];
+    let rawExclusionRows = [];
+    let rawEvidenceLoadToken = 0;
     const initialSelectedRunId = "{{ initial_selected_run|e }}";
     const historyRunsRoot = "{{ history_runs_root|e }}";
     const browseDefaultRoot = "{{ browse_default_root|e }}";
@@ -5308,6 +5774,24 @@ HTML_PAGE = """<!doctype html>
       const d = new Date(iso);
       if (isNaN(d.getTime())) return iso;
       return d.toLocaleString();
+    }
+
+    function fmtRunElapsed(run) {
+      const r = (run && typeof run === "object") ? run : {};
+      const txt = String(r.elapsed_text || "").trim();
+      if (txt) return txt;
+      const sec = Number(r.elapsed_seconds);
+      if (!Number.isFinite(sec)) return "-";
+      const total = Math.max(0, Math.round(sec));
+      if (total < 60) return `${total}s`;
+      const minutes = Math.floor(total / 60);
+      const rem = total % 60;
+      if (minutes < 60) return `${minutes}m ${String(rem).padStart(2, "0")}s`;
+      const hours = Math.floor(minutes / 60);
+      const min = minutes % 60;
+      if (hours < 24) return `${hours}h ${String(min).padStart(2, "0")}m`;
+      const days = Math.floor(hours / 24);
+      return `${days}g ${String(hours % 24).padStart(2, "0")}h`;
     }
 
     function statusClass(status) {
@@ -5343,12 +5827,105 @@ HTML_PAGE = """<!doctype html>
       return n.toLocaleString("it-IT", {maximumFractionDigits: 2});
     }
 
+    function formatBytes(value) {
+      const n = Number(value || 0);
+      if (!Number.isFinite(n) || n <= 0) return "-";
+      if (n < 1024) return `${Math.round(n)} B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+      return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function selectedExcludedImages() {
+      if (!imageExclusionListEl) return [];
+      return Array.from(imageExclusionListEl.querySelectorAll('input[data-image-rel]:checked'))
+        .map((el) => String(el.getAttribute("data-image-rel") || "").trim())
+        .filter(Boolean);
+    }
+
+    function syncExcludedImagesHidden() {
+      const excluded = selectedExcludedImages();
+      const total = Array.isArray(inputImageRows) ? inputImageRows.length : 0;
+      if (excludedImagesJsonEl) excludedImagesJsonEl.value = total ? JSON.stringify(excluded) : "__use_saved__";
+      if (exclusionStatusEl) {
+        exclusionStatusEl.textContent = total
+          ? `${excluded.length} escluse su ${total} immagini. Memoria modificabile.`
+          : "Nessuna cartella caricata.";
+      }
+      return excluded;
+    }
+
+    function renderImageExclusions(images) {
+      inputImageRows = Array.isArray(images) ? images : [];
+      if (!imageExclusionListEl) return;
+      if (!inputImageRows.length) {
+        imageExclusionListEl.innerHTML = "<div class='small' style='padding:8px;'>Nessuna immagine trovata nella cartella.</div>";
+        syncExcludedImagesHidden();
+        return;
+      }
+      imageExclusionListEl.innerHTML = inputImageRows.map((img) => {
+        const rel = String(img.rel || "");
+        return `
+          <label class="image-exclusion-row">
+            <input type="checkbox" data-image-rel="${esc(rel)}"${img.excluded ? " checked" : ""}>
+            <span class="path">${esc(rel)}</span>
+            <span class="size">${esc(formatBytes(img.size_bytes))}</span>
+          </label>
+        `;
+      }).join("");
+      imageExclusionListEl.querySelectorAll('input[data-image-rel]').forEach((el) => {
+        el.addEventListener("change", syncExcludedImagesHidden);
+      });
+      syncExcludedImagesHidden();
+    }
+
+    async function loadInputExclusions() {
+      const inputFolder = String((document.getElementById("inputFolder") || {}).value || "").trim();
+      if (!inputFolder) {
+        if (exclusionStatusEl) exclusionStatusEl.textContent = "Inserisci prima una cartella input.";
+        return;
+      }
+      if (exclusionStatusEl) exclusionStatusEl.textContent = "Caricamento immagini...";
+      const out = await apiPost("/api/input/images", {input_folder: inputFolder});
+      renderImageExclusions(out.images || []);
+      if (exclusionStatusEl) {
+        const excluded = selectedExcludedImages().length;
+        exclusionStatusEl.textContent = `${excluded} escluse su ${Number(out.count || 0)} immagini. Memoria: ${out.memory_path || "-"}`;
+      }
+    }
+
+    async function saveInputExclusions() {
+      const inputFolder = String((document.getElementById("inputFolder") || {}).value || "").trim();
+      if (!inputFolder) {
+        if (exclusionStatusEl) exclusionStatusEl.textContent = "Inserisci prima una cartella input.";
+        return;
+      }
+      const excluded = syncExcludedImagesHidden();
+      const out = await apiPost("/api/input/exclusions", {
+        input_folder: inputFolder,
+        excluded_images_rel: excluded,
+      });
+      if (exclusionStatusEl) {
+        exclusionStatusEl.textContent = `${Number(out.excluded_count || excluded.length)} esclusioni salvate.`;
+      }
+    }
+
+    function clearInputExclusions() {
+      if (!imageExclusionListEl) return;
+      imageExclusionListEl.querySelectorAll('input[data-image-rel]').forEach((el) => {
+        el.checked = false;
+      });
+      syncExcludedImagesHidden();
+    }
+
     function renderModelsRegistry(payload) {
-      if (!modelsRegistryStatusEl || !modelsRegistryKpisEl || !modelsRegistryTableWrapEl) return;
+      const primaryWrap = modelsPipelineTableWrapEl || modelsRegistryTableWrapEl;
+      const legacyWrap = modelsLegacyTableWrapEl;
+      if (!modelsRegistryStatusEl || !modelsRegistryKpisEl || !primaryWrap) return;
       if (!payload || typeof payload !== "object") {
         modelsRegistryStatusEl.textContent = "Registro reti non disponibile.";
         modelsRegistryKpisEl.innerHTML = "";
-        modelsRegistryTableWrapEl.innerHTML = "<div class='small' style='padding:8px;'>Nessun dato.</div>";
+        primaryWrap.innerHTML = "<div class='small' style='padding:8px;'>Nessun dato.</div>";
+        if (legacyWrap) legacyWrap.innerHTML = "";
         if (modelsRegistryTopEl) {
           modelsRegistryTopEl.innerHTML = "";
           modelsRegistryTopEl.hidden = true;
@@ -5358,7 +5935,8 @@ HTML_PAGE = """<!doctype html>
       if (!payload.ok) {
         modelsRegistryStatusEl.textContent = `Errore registro reti: ${String(payload.error || "errore sconosciuto")}`;
         modelsRegistryKpisEl.innerHTML = "";
-        modelsRegistryTableWrapEl.innerHTML = "<div class='small' style='padding:8px;'>Impossibile leggere il CSV metriche.</div>";
+        primaryWrap.innerHTML = "<div class='small' style='padding:8px;'>Impossibile leggere il CSV metriche.</div>";
+        if (legacyWrap) legacyWrap.innerHTML = "";
         if (modelsRegistryTopEl) {
           modelsRegistryTopEl.innerHTML = "";
           modelsRegistryTopEl.hidden = true;
@@ -5426,11 +6004,26 @@ HTML_PAGE = """<!doctype html>
       }
 
       if (!rows.length) {
-        modelsRegistryTableWrapEl.innerHTML = "<div class='small' style='padding:8px;'>CSV letto ma senza righe dati.</div>";
+        primaryWrap.innerHTML = "<div class='small' style='padding:8px;'>CSV letto ma senza righe dati.</div>";
+        if (legacyWrap) legacyWrap.innerHTML = "";
         return;
       }
 
-      const tableRowsHtml = rows.map((r) => {
+      function isPipelineModel(r) {
+        const family = String(r.family || "").toLowerCase();
+        const ckpt = String(r.checkpoint_path || "").toLowerCase();
+        const runName = String(r.run_name || "").toLowerCase();
+        if (ckpt.includes("artifacts/10_active_pipeline/pipeline_fss_head/models/")) return true;
+        if (family === "orientation_su_giu_classifier" && runName.includes("model_su_giu_rect")) return true;
+        if (family === "lt_classifier" && runName.includes("transrectal_rect_only")) return true;
+        return false;
+      }
+
+      function renderModelsTable(title, tableRows) {
+        if (!tableRows.length) {
+          return `<div class="small" style="padding:8px;"><b>${esc(title)}</b>: nessuna rete.</div>`;
+        }
+        const tableRowsHtml = tableRows.map((r) => {
         const status = String(r.update_status || "UNKNOWN");
         const sampleNum = toNumMaybe(r.test_samples_num);
         const sampleIsSmall = sampleNum !== null && sampleNum < 50;
@@ -5480,9 +6073,10 @@ HTML_PAGE = """<!doctype html>
             </td>
           </tr>
         `;
-      }).join("");
+        }).join("");
 
-      modelsRegistryTableWrapEl.innerHTML = `
+        return `
+        <div class="models-table-title">${esc(title)} <span class="tag tag-model">${tableRows.length}</span></div>
         <table class="models-table">
           <thead>
             <tr>
@@ -5497,6 +6091,12 @@ HTML_PAGE = """<!doctype html>
           <tbody>${tableRowsHtml}</tbody>
         </table>
       `;
+      }
+
+      const pipelineRows = rows.filter(isPipelineModel);
+      const legacyRows = rows.filter((r) => !isPipelineModel(r));
+      primaryWrap.innerHTML = renderModelsTable("Reti in uso dalla pipeline", pipelineRows);
+      if (legacyWrap) legacyWrap.innerHTML = renderModelsTable("Reti legacy / non attive", legacyRows);
     }
 
     async function loadModelsRegistry() {
@@ -5608,6 +6208,102 @@ HTML_PAGE = """<!doctype html>
       return String(historyRunsRoot || "").trim();
     }
 
+    function statusEvents(statusObj) {
+      const st = (statusObj && typeof statusObj === "object") ? statusObj : {};
+      return Array.isArray(st.events) ? st.events.filter((ev) => ev && typeof ev === "object") : [];
+    }
+
+    function eventName(ev) {
+      return String((ev && ev.event) || "").trim();
+    }
+
+    function latestEvent(statusObj) {
+      const events = statusEvents(statusObj);
+      return events.length ? events[events.length - 1] : null;
+    }
+
+    function eventByName(statusObj, name) {
+      const target = String(name || "");
+      const events = statusEvents(statusObj);
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        if (eventName(events[i]) === target) return events[i];
+      }
+      return null;
+    }
+
+    function hasEvent(statusObj, name) {
+      return !!eventByName(statusObj, name);
+    }
+
+    function eventCountsText(obj) {
+      if (!obj || typeof obj !== "object") return "";
+      const parts = Object.entries(obj)
+        .map(([k, v]) => `${k}=${cleanVal(v)}`)
+        .filter(Boolean);
+      return parts.join(" | ");
+    }
+
+    function renderMonitorActivity(statusObj) {
+      if (!monitorActivityEl) return;
+      const st = (statusObj && typeof statusObj === "object") ? statusObj : {};
+      if (!statusObj) {
+        monitorActivityEl.hidden = true;
+        monitorActivityEl.innerHTML = "";
+        monitorActivityEl.classList.remove("is-hot");
+        return;
+      }
+      const events = statusEvents(st);
+      const latest = latestEvent(st);
+      const latestName = eventName(latest);
+      const rawReady = eventByName(st, "raw_images_ready_for_input_copy");
+      const copyStarted = eventByName(st, "copy_started");
+      const copyDone = eventByName(st, "copy_completed");
+      const pipelineStarted = hasEvent(st, "pipeline_started");
+      const logLines = Array.isArray(st.logs_tail) ? st.logs_tail : [];
+      const latestLog = String(logLines.length ? logLines[logLines.length - 1] : "").trim();
+      let title = "Attivita live";
+      let main = latestName ? latestName : cleanVal(st.stage || st.status);
+      let meta = latestLog ? latestLog : `run=${cleanVal(st.run_id)}`;
+      let hot = false;
+      if (rawReady && !pipelineStarted) {
+        title = "Raw images pronte per elaborazione";
+        main = `${cleanVal(rawReady.count)} raw images stanno per essere elaborate nella copia/riferimento input`;
+        meta = `cartella input copia: ${cleanVal(rawReady.input_copy_folder)} | modo: ${cleanVal(rawReady.mode)}`;
+        hot = true;
+      } else if (rawReady && pipelineStarted && String(st.status || "") === "running") {
+        title = "Raw images in elaborazione";
+        main = `${cleanVal(rawReady.count)} raw images in elaborazione dalla copia/riferimento input`;
+        meta = `cartella input copia: ${cleanVal(rawReady.input_copy_folder)} | modo: ${cleanVal(rawReady.mode)}`;
+        hot = true;
+      } else if (copyStarted && !copyDone) {
+        title = "Copia cartella input in corso";
+        main = "Preparazione della cartella input per la pipeline";
+        meta = `${cleanVal(copyStarted.src)} -> ${cleanVal(copyStarted.dst)}`;
+        hot = true;
+      } else if (latestName === "pipeline_started") {
+        title = "Pipeline principale in corso";
+        main = "Le immagini raw sono entrate nella pipeline";
+        meta = latestLog || cleanVal(latest.command);
+        hot = true;
+      } else if (latestName) {
+        const count = latest.items ?? latest.count ?? latest.checks_count ?? latest.created_total ?? "";
+        const suffix = count !== "" ? ` | n=${cleanVal(count)}` : "";
+        main = `${latestName}${suffix}`;
+        if (latest.counts && typeof latest.counts === "object") meta = eventCountsText(latest.counts);
+        else if (latest.reason) meta = `reason=${cleanVal(latest.reason)}`;
+        else if (latest.path) meta = cleanVal(latest.path);
+      }
+      const recent = events.slice(-5).map((ev) => `<span class="activity-event">${esc(eventName(ev))}</span>`).join("");
+      monitorActivityEl.hidden = false;
+      monitorActivityEl.classList.toggle("is-hot", !!hot);
+      monitorActivityEl.innerHTML = `
+        <div class="activity-title">${esc(title)}</div>
+        <div class="activity-main">${esc(main)}</div>
+        <div class="activity-meta">${esc(meta || "-")}</div>
+        ${recent ? `<div class="activity-events">${recent}</div>` : ""}
+      `;
+    }
+
     function inferDecisionTreeNodes(statusObj, summary) {
       const st = (statusObj && typeof statusObj === "object") ? statusObj : {};
       const sm = (summary && typeof summary === "object") ? summary : {};
@@ -5631,14 +6327,19 @@ HTML_PAGE = """<!doctype html>
       const stage = String(st.stage || "");
       const runStatus = String(st.status || "");
       const logs = Array.isArray(st.logs_tail) ? st.logs_tail.join("\\n").toLowerCase() : "";
+      const latest = latestEvent(st);
+      const latestName = eventName(latest);
+      const rawReady = eventByName(st, "raw_images_ready_for_input_copy");
+      const rowDecision = eventByName(st, "pipeline_row_decisions");
 
+      const copyStarted = completed.has("copy_started") || stage === "copy_started" || !!eventByName(st, "copy_started");
       const pipelineStarted = completed.has("pipeline_started") || completed.has("pipeline_finished") || completed.has("checks_built") || stage === "pipeline_started" || stage === "pipeline_finished";
       const pipelineFinished = completed.has("pipeline_finished") || completed.has("checks_built") || completed.has("review_html_built") || completed.has("run_completed") || stage === "pipeline_finished";
       const dedupSeen = /dedup|duplicat/.test(logs) || Object.prototype.hasOwnProperty.call(sm, "duplicates_removed_count_recomputed");
-      const rotationSeen = /rotaz|rotation/.test(logs) || (sm.rotation_evidence && typeof sm.rotation_evidence === "object" && Object.keys(sm.rotation_evidence).length > 0);
-      const vendorName = String(vendorObj.predicted_name || row.vendor_predicted || "").trim();
-      const vendorConf = formatConfidence((vendorObj.confidence !== undefined && vendorObj.confidence !== null) ? vendorObj.confidence : row.vendor_confidence);
-      const rectName = String(row.line_11_rect_echo || "").trim();
+      const rotationSeen = /rotaz|rotation/.test(logs) || !!(rowDecision && rowDecision.rotation_deg_clockwise !== undefined) || (sm.rotation_evidence && typeof sm.rotation_evidence === "object" && Object.keys(sm.rotation_evidence).length > 0);
+      const vendorName = String(vendorObj.predicted_name || row.vendor_predicted || (rowDecision || {}).vendor || "").trim();
+      const vendorConf = formatConfidence((vendorObj.confidence !== undefined && vendorObj.confidence !== null) ? vendorObj.confidence : (row.vendor_confidence !== undefined ? row.vendor_confidence : (rowDecision || {}).vendor_confidence));
+      const rectName = String(row.line_11_rect_echo || (rowDecision || {}).rect_echo || "").trim();
       const suCount = Number(suGiuCountsObj.su || 0);
       const giuCount = Number(suGiuCountsObj.giu || 0);
       const otherCount = Number(suGiuCountsObj.other || 0);
@@ -5654,9 +6355,10 @@ HTML_PAGE = """<!doctype html>
       const probeLabel = [String(probeObj.predicted_id || row.line_03_id_probe || "").trim(), String(probeObj.predicted_name || row.line_03_probe_name || "").trim()]
         .filter(Boolean)
         .join(" - ");
-      const probeConf = formatConfidence((probeObj.confidence !== undefined && probeObj.confidence !== null) ? probeObj.confidence : row.line_03_probe_confidence);
-      const l13 = String(row.line_13_rect_name_echo || "").trim();
-      const l14 = String(row.line_14_rect_name_probe || "").trim();
+      const probeLabelLive = probeLabel || String((rowDecision || {}).probe_id || "").trim();
+      const probeConf = formatConfidence((probeObj.confidence !== undefined && probeObj.confidence !== null) ? probeObj.confidence : (row.line_03_probe_confidence !== undefined ? row.line_03_probe_confidence : (rowDecision || {}).probe_confidence));
+      const l13 = String(row.line_13_rect_name_echo || (rowDecision || {}).line13 || "").trim();
+      const l14 = String(row.line_14_rect_name_probe || (rowDecision || {}).line14 || "").trim();
 
       const copyDone = completed.has("copy_completed");
       const vendorDone = !!vendorName;
@@ -5664,14 +6366,40 @@ HTML_PAGE = """<!doctype html>
       const suGiuDone = suGiuFrames > 0 || (suCount + giuCount + otherCount) > 0;
       const lrMarkerDone = lrMarkerFrames > 0 || !!lrMarkerBest || !!lrMarkerMajority;
       const ltDone = ltFrames > 0 || (lCount + tCount + ltOtherCount) > 0;
-      const probeDone = !!probeLabel && probeLabel !== "-";
+      const probeDone = !!probeLabelLive && probeLabelLive !== "-";
       const line13Done = !!(l13 && l13 !== "-");
       const line14Done = !!(l14 && l14 !== "-");
       const exportDone = runStatus === "completed" || runStatus === "ok" || completed.has("run_completed");
       const hasFailed = runStatus === "failed" || runStatus === "error";
 
       let currentId = "copy";
-      if (!copyDone) currentId = "copy";
+      const liveEventNode = {
+        copy_started: "copy",
+        copy_completed: "copy",
+        raw_images_ready_for_input_copy: "copy",
+        pipeline_started: "dedup",
+        pipeline_finished: "vendor",
+        pipeline_row_decisions: "rect",
+        checks_built: "export",
+        rect_red_built: "rect",
+        rect_red_skipped: "rect",
+        rect_per_image_built: "rect",
+        rect_per_image_skipped: "rect",
+        su_giu_per_image_built: "su_giu",
+        su_giu_per_image_skipped: "su_giu",
+        su_giu_split_folders_built: "su_giu",
+        su_giu_split_folders_skipped: "su_giu",
+        lr_marker_per_image_built: "lr_marker",
+        lr_marker_per_image_skipped: "lr_marker",
+        lt_per_image_built: "lt",
+        lt_per_image_skipped: "lt",
+        lt_split_folders_built: "lt",
+        lt_split_folders_skipped: "lt",
+        review_html_built: "export",
+        run_completed: "export",
+      }[latestName] || "";
+      if (liveEventNode) currentId = liveEventNode;
+      else if (!copyDone) currentId = "copy";
       else if (!pipelineStarted) currentId = "dedup";
       else if (!dedupSeen) currentId = "dedup";
       else if (!rotationSeen) currentId = "rotation";
@@ -5686,7 +6414,13 @@ HTML_PAGE = """<!doctype html>
       else currentId = "export";
 
       const nodes = [
-        {id: "copy", title: "Copia Cartella Input", meta: copyDone ? `OK (${cleanVal(st.input_folder)} -> ${cleanVal(st.run_dir)})` : "In attesa"},
+        {
+          id: "copy",
+          title: "Copia Cartella Input + Raw Images",
+          meta: rawReady
+            ? `${cleanVal(rawReady.count)} raw images pronte in copia/riferimento input | ${cleanVal(rawReady.input_copy_folder)}`
+            : (copyDone ? `OK (${cleanVal(st.input_folder)} -> ${cleanVal(st.run_dir)})` : (copyStarted ? "Preparazione riferimento input in corso" : "In attesa")),
+        },
         {id: "dedup", title: "Deduplicazione Frame", meta: dedupSeen ? `Eseguita | rimossi=${cleanVal(sm.duplicates_removed_count_recomputed)}` : "In attesa / in corso"},
         {id: "rotation", title: "Valutazione Rotazione", meta: rotationSeen ? `Rotazione=${cleanVal((sm.rotation_evidence || {}).rotation_deg_clockwise)}°` : "In attesa / in corso"},
         {id: "vendor", title: "Decisione Vendor", meta: vendorDone ? `${vendorName}${vendorConf ? ` | conf=${vendorConf}` : ""}` : "In attesa / in corso"},
@@ -5694,7 +6428,7 @@ HTML_PAGE = """<!doctype html>
         {id: "su_giu", title: "Smistamento frame SU/GIU", meta: suGiuDone ? `su=${cleanVal(suCount)} | giu=${cleanVal(giuCount)} | other=${cleanVal(otherCount)} | n=${cleanVal(suGiuFrames)}` : "In attesa / in corso"},
         {id: "lr_marker", title: "LR marker classico", meta: lrMarkerDone ? `majority=${cleanVal(lrMarkerMajority)} | best=${cleanVal(lrMarkerBest)} | score=${cleanVal(lrMarkerBestScore)} | n=${cleanVal(lrMarkerFrames)}` : "In attesa / in corso"},
         {id: "lt", title: "Classificazione frame L/T", meta: ltDone ? `L=${cleanVal(lCount)} | T=${cleanVal(tCount)} | other=${cleanVal(ltOtherCount)} | n=${cleanVal(ltFrames)}` : "In attesa / in corso"},
-        {id: "probe", title: "Decisione Probe", meta: probeDone ? `${probeLabel}${probeConf ? ` | conf=${probeConf}` : ""}` : "In attesa / in corso"},
+        {id: "probe", title: "Decisione Probe", meta: probeDone ? `${probeLabelLive}${probeConf ? ` | conf=${probeConf}` : ""}` : "In attesa / in corso"},
         {id: "template13", title: "Template linea 13", meta: line13Done ? `line13=${cleanVal(l13)}` : "In attesa / in corso"},
         {id: "template14", title: "Template linea 14", meta: line14Done ? `line14=${cleanVal(l14)}` : "In attesa / in corso"},
         {id: "export", title: "Export & QA", meta: exportDone ? `Completata (${cleanVal(runStatus)})` : (pipelineFinished ? "Post-processing" : "In attesa")},
@@ -5718,6 +6452,7 @@ HTML_PAGE = """<!doctype html>
         let state = "pending";
         if (done) state = "done";
         else if (node.id === currentId && !exportDone) state = "running";
+        if (node.id === currentId && !exportDone && latestName && latestName !== "run_completed") state = "running";
         if (hasFailed && node.id === currentId) state = "error";
         return {...node, state};
       });
@@ -5974,7 +6709,7 @@ HTML_PAGE = """<!doctype html>
       put(12, src.line_12_group_orientation);
       put(13, src.line_13_rect_name_echo);
       put(14, src.line_14_rect_name_probe);
-      put(16, src.line_16_rect_orientation || buildPendingLine16FromSummary(summary));
+      put(16, buildPendingLine16FromSummary(summary) || src.line_16_rect_orientation);
       return out;
     }
 
@@ -6310,8 +7045,8 @@ HTML_PAGE = """<!doctype html>
     function setPredictionSummaryHtml(html) {
       const safeHtml = String(html || "<div class='small'>Nessun riepilogo predizioni disponibile.</div>");
       if (predictionSummaryEl) {
-        predictionSummaryEl.style.display = "block";
-        predictionSummaryEl.innerHTML = safeHtml;
+        predictionSummaryEl.style.display = "none";
+        predictionSummaryEl.innerHTML = "";
       }
       if (predictionSummaryRailEl) {
         predictionSummaryRailEl.innerHTML = safeHtml;
@@ -7733,6 +8468,55 @@ HTML_PAGE = """<!doctype html>
       return {rectData, items};
     }
 
+    function normalizeSuGiuPredictionLabel(value) {
+      const txt = String(value || "")
+        .trim()
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+      if (txt === "su" || txt === "up" || txt === "alto") return "su";
+      if (txt === "giu" || txt === "down" || txt === "basso") return "giu";
+      return "other";
+    }
+
+    function predictionScoreNumber(value, fallback = NaN) {
+      const direct = Number(value);
+      if (Number.isFinite(direct)) return direct;
+      const parsed = Number.parseFloat(String(value || "").replace(",", "."));
+      return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function suGiuPredictionConfidence(item) {
+      const it = (item && typeof item === "object") ? item : {};
+      const exported = predictionScoreNumber(it.confidence, NaN);
+      if (Number.isFinite(exported)) return exported;
+      const label = normalizeSuGiuPredictionLabel(it.pred_label || it.su_giu_pred);
+      if (label === "su") return predictionScoreNumber(it.prob_su, -1);
+      if (label === "giu") return predictionScoreNumber(it.prob_giu, -1);
+      return Math.max(
+        predictionScoreNumber(it.prob_su, -1),
+        predictionScoreNumber(it.prob_giu, -1),
+      );
+    }
+
+    function compareSuGiuByLabelAndConfidence(a, b) {
+      const order = {su: 0, giu: 1, other: 2};
+      const al = normalizeSuGiuPredictionLabel((a && a.pred_label) || (a && a.su_giu_pred));
+      const bl = normalizeSuGiuPredictionLabel((b && b.pred_label) || (b && b.su_giu_pred));
+      const ar = Object.prototype.hasOwnProperty.call(order, al) ? order[al] : order.other;
+      const br = Object.prototype.hasOwnProperty.call(order, bl) ? order[bl] : order.other;
+      if (ar !== br) return ar - br;
+      const ac = suGiuPredictionConfidence(a);
+      const bc = suGiuPredictionConfidence(b);
+      if (ac !== bc) return bc - ac;
+      const ai = Number((a && a.image_index) || 0);
+      const bi = Number((b && b.image_index) || 0);
+      if (Number.isFinite(ai) && Number.isFinite(bi) && ai !== bi) return ai - bi;
+      const ap = String((a && a.image_rel) || "");
+      const bp = String((b && b.image_rel) || "");
+      return ap.localeCompare(bp);
+    }
+
     function getSuGiuPerImagePayload(summary) {
       const rec = (summary && summary.recognition_evidence && typeof summary.recognition_evidence === "object")
         ? summary.recognition_evidence
@@ -7743,14 +8527,7 @@ HTML_PAGE = """<!doctype html>
       const itemsRaw = sgData && Array.isArray(sgData.items) ? sgData.items : [];
       const items = itemsRaw
         .slice()
-        .sort((a, b) => {
-          const ai = Number(a && a.image_index ? a.image_index : 0);
-          const bi = Number(b && b.image_index ? b.image_index : 0);
-          if (ai !== bi) return ai - bi;
-          const ap = String((a && a.image_rel) || "");
-          const bp = String((b && b.image_rel) || "");
-          return ap.localeCompare(bp);
-        });
+        .sort(compareSuGiuByLabelAndConfidence);
       const labelCounts = (sgData && sgData.label_counts && typeof sgData.label_counts === "object")
         ? sgData.label_counts
         : {su: 0, giu: 0, other: 0};
@@ -7759,7 +8536,7 @@ HTML_PAGE = """<!doctype html>
         : {};
       const groups = {su: [], giu: [], other: []};
       items.forEach((it) => {
-        const label = String((it && it.pred_label) || "").trim().toLowerCase();
+        const label = normalizeSuGiuPredictionLabel((it && it.pred_label) || (it && it.su_giu_pred));
         if (label === "su") groups.su.push(it);
         else if (label === "giu") groups.giu.push(it);
         else groups.other.push(it);
@@ -7769,6 +8546,11 @@ HTML_PAGE = """<!doctype html>
 
     function inferLrOrientationGroup(item) {
       const it = (item && typeof item === "object") ? item : {};
+      const qGroup = String(it.quadrant_group || "").trim().toUpperCase();
+      const qStatus = String(it.quadrant_status || "").trim().toLowerCase();
+      const qValidRaw = String(it.quadrant_valid ?? "").trim().toLowerCase();
+      const quadrantUsable = qStatus === "ok" && !["0", "false", "no"].includes(qValidRaw);
+      if (quadrantUsable && ["NF", "LR", "UD", "LRUD"].includes(qGroup)) return qGroup;
       const pathTxt = String(it.image_rel || it.image_path || "").trim();
       const parts = pathTxt.split(/[\\/]+/).filter(Boolean);
       const candidates = [];
@@ -7799,6 +8581,191 @@ HTML_PAGE = """<!doctype html>
     }
 
     const LR_MARKER_RELIABLE_MATCH_SCORE = 0.62;
+    const LR_MARKER_DEFAULT_EXPANDED_STEPS = [0.03, 0.06, 0.10, 0.15, 0.20];
+
+    function lrMarkerThresholds(model) {
+      const m = (model && typeof model === "object") ? model : {};
+      const minMatch = asNumber(m.lr_marker_min_match_score, LR_MARKER_RELIABLE_MATCH_SCORE);
+      const stepsRaw = Array.isArray(m.lr_marker_expanded_search_steps) && m.lr_marker_expanded_search_steps.length
+        ? m.lr_marker_expanded_search_steps
+        : LR_MARKER_DEFAULT_EXPANDED_STEPS;
+      return {
+        minMatch,
+        reliableBox: Math.max(LR_MARKER_RELIABLE_MATCH_SCORE, minMatch),
+        fullCropFallback: asNumber(m.lr_marker_full_crop_fallback_threshold, 0.55),
+        expandedSearch: asNumber(m.lr_marker_expanded_search_threshold, 0.66),
+        expandedSteps: stepsRaw.map((x) => asNumber(x, NaN)).filter((x) => Number.isFinite(x)),
+        minSuGiuConfidence: asNumber(m.lr_marker_min_sugiu_confidence, 0.80),
+        blankTemplateMaxValue: asNumber(m.lr_marker_blank_template_max_value, 3),
+      };
+    }
+
+    function formatLrStepPct(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return cleanVal(value);
+      return `${Math.round(n * 100)}%`;
+    }
+
+    function lrMarkerHasValidBox(item) {
+      const it = (item && typeof item === "object") ? item : {};
+      const t = Number(it.marker_top_abs);
+      const l = Number(it.marker_left_abs);
+      const b = Number(it.marker_bottom_abs);
+      const r = Number(it.marker_right_abs);
+      return Number.isFinite(t) && Number.isFinite(l) && Number.isFinite(b) && Number.isFinite(r) && b > t && r > l;
+    }
+
+    function lrMarkerBoxContributionSummary(items, threshold, targetWidth, targetHeight) {
+      const order = ["NF", "LR", "UD", "LRUD", "OTHER"];
+      const blockKeys = new Set(["NF", "LR", "UD", "LRUD"]);
+      const byGroup = {};
+      order.forEach((key) => {
+        byGroup[key] = {total: 0, used: 0, excluded: 0, low_score: 0, noncanonical: 0, blank: 0, forced: 0, quadrant: 0, no_box: 0, other_group: 0};
+      });
+      const reasons = {low_score: 0, noncanonical: 0, blank: 0, forced: 0, quadrant: 0, no_box: 0, other_group: 0};
+      let total = 0;
+      let used = 0;
+      let excluded = 0;
+      (Array.isArray(items) ? items : []).forEach((it) => {
+        total += 1;
+        const groupKeyRaw = inferLrOrientationGroup(it);
+        const groupKey = byGroup[groupKeyRaw] ? groupKeyRaw : "OTHER";
+        const rel = lrMarkerReliability(it, threshold, targetWidth, targetHeight);
+        const validBox = lrMarkerHasValidBox(it);
+        const inBlock = blockKeys.has(groupKey);
+        byGroup[groupKey].total += 1;
+        if (inBlock && rel.reliable && validBox) {
+          used += 1;
+          byGroup[groupKey].used += 1;
+          return;
+        }
+        excluded += 1;
+        byGroup[groupKey].excluded += 1;
+        if (!inBlock) {
+          reasons.other_group += 1;
+          byGroup[groupKey].other_group += 1;
+        }
+        if (rel.lowScore) {
+          reasons.low_score += 1;
+          byGroup[groupKey].low_score += 1;
+        }
+        if (!rel.canonicalSize) {
+          reasons.noncanonical += 1;
+          byGroup[groupKey].noncanonical += 1;
+        }
+        if (rel.blankMatch) {
+          reasons.blank += 1;
+          byGroup[groupKey].blank += 1;
+        }
+        if (rel.forced) {
+          reasons.forced += 1;
+          byGroup[groupKey].forced += 1;
+        }
+        if (!rel.quadrantValid) {
+          reasons.quadrant += 1;
+          byGroup[groupKey].quadrant += 1;
+        }
+        if (!validBox) {
+          reasons.no_box += 1;
+          byGroup[groupKey].no_box += 1;
+        }
+      });
+      return {total, used, excluded, reasons, byGroup, targetWidth, targetHeight, threshold};
+    }
+
+    function orientationTemplateDecisionHtml(payload) {
+      const p = (payload && typeof payload === "object") ? payload : {};
+      const requested = String(p.requested || "").trim() || "historical_best_then_derived";
+      const effective = String(p.effective || "").trim();
+      const fixedPolicy = String(p.fixedPolicy || "").trim();
+      const fallbackReason = String(p.fallbackReason || "").trim();
+      const thresholds = (p.thresholds && typeof p.thresholds === "object") ? p.thresholds : lrMarkerThresholds({});
+      const effectiveLabel = effective === "derived_folder" || fixedPolicy === "fixed_derived_folder_template"
+        ? "Derived"
+        : "Best historical";
+      let decision = "Usato il template storico best-match della libreria vendor.";
+      if (requested === "derived_folder") {
+        decision = "Policy richiesta: Derived. La pipeline crea subito un template dalla cartella corrente.";
+      } else if (effective === "derived_folder" || fixedPolicy === "fixed_derived_folder_template") {
+        decision = "Best historical provato, poi sostituito con Derived per questa cartella.";
+      } else if (requested === "historical_best") {
+        decision = "Policy richiesta: solo Best historical. Nessun fallback Derived.";
+      } else if (requested === "historical_best_then_derived") {
+        decision = "Best historical mantenuto: i controlli di affidabilita non hanno richiesto Derived.";
+      }
+      const fallbackRule = `Fallback a Derived se score storico < ${formatNum(thresholds.minMatch, 2)} oppure se i marker affidabili sono troppo pochi: con almeno 8 frame comparabili serve max(2, 25%), sotto 8 ne serve almeno 1.`;
+      const stepTxt = thresholds.expandedSteps.length ? thresholds.expandedSteps.map(formatLrStepPct).join(", ") : "-";
+      return `
+        <div class="orientation-decision-grid">
+          <div class="orientation-decision-card">
+            <b>Decisione template: ${esc(effectiveLabel)}</b>
+            <div class="meta">${esc(decision)}</div>
+            <div class="meta">requested=${esc(requested)}${effective ? ` | effective=${esc(effective)}` : ""}${fixedPolicy ? ` | output=${esc(fixedPolicy)}` : ""}</div>
+            ${fallbackReason ? `<div class="meta"><span class="tag tag-warn">fallback</span> ${esc(fallbackReason)}</div>` : ""}
+          </div>
+          <div class="orientation-decision-card">
+            <b>Parametri considerati</b>
+            <div class="meta">score match marker, size frame canonica, patch non nera, strategia di ricerca e coordinate marker valide.</div>
+            <div class="meta">Derived usa un crop del marker dal miglior match storico su un frame campione, evitando patch blank/troppo piccole.</div>
+          </div>
+          <div class="orientation-decision-card">
+            <b>Soglie operative</b>
+            <div class="meta">min_match=${esc(formatNum(thresholds.minMatch, 2))} | box=${esc(formatNum(thresholds.reliableBox, 2))} | SU/GIU min=${esc(formatNum(thresholds.minSuGiuConfidence, 2))}</div>
+            <div class="meta">full-crop se score &lt; ${esc(formatNum(thresholds.fullCropFallback, 2))}; search espansa se score &lt; ${esc(formatNum(thresholds.expandedSearch, 2))}; step=${esc(stepTxt)}.</div>
+          </div>
+          <div class="orientation-decision-card">
+            <b>Regola fallback</b>
+            <div class="meta">${esc(fallbackRule)}</div>
+            <div class="meta">Template blank esclusi se max pixel &lt;= ${esc(cleanVal(thresholds.blankTemplateMaxValue))}.</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function orientationBoxSummaryHtml(summary) {
+      const s = (summary && typeof summary === "object") ? summary : lrMarkerBoxContributionSummary([], LR_MARKER_RELIABLE_MATCH_SCORE, 0, 0);
+      const reasons = (s.reasons && typeof s.reasons === "object") ? s.reasons : {};
+      const byGroup = (s.byGroup && typeof s.byGroup === "object") ? s.byGroup : {};
+      const groups = ["NF", "LR", "UD", "LRUD"];
+      const reasonTxt = [
+        ["score basso", reasons.low_score],
+        ["size diversa", reasons.noncanonical],
+        ["match nero", reasons.blank],
+        ["consenso forzato", reasons.forced],
+        ["quadrante", reasons.quadrant],
+        ["box assente", reasons.no_box],
+        ["OTHER", reasons.other_group],
+      ].filter(([, v]) => Number(v || 0) > 0).map(([k, v]) => `${k}:${v}`).join(" | ") || "-";
+      const tableRows = groups.map((key) => {
+        const row = byGroup[key] ? byGroup[key] : {};
+        return `
+          <div>${esc(key)}</div>
+          <div>${esc(cleanVal(row.total || 0))}</div>
+          <div>${esc(cleanVal(row.used || 0))}</div>
+          <div>${esc(cleanVal(row.excluded || 0))}</div>
+          <div>${esc(cleanVal(row.low_score || 0))}</div>
+        `;
+      }).join("");
+      const targetTxt = Number(s.targetWidth) > 0 && Number(s.targetHeight) > 0
+        ? `${cleanVal(s.targetWidth)}x${cleanVal(s.targetHeight)}`
+        : "-";
+      return `
+        <div class="orientation-summary-strip">
+          <span class="tag tag-data">marker totali ${esc(cleanVal(s.total))}</span>
+          <span class="tag tag-ok">usati nei box ${esc(cleanVal(s.used))}</span>
+          <span class="tag tag-warn">esclusi ${esc(cleanVal(s.excluded))}</span>
+          <span class="tag tag-data">size target ${esc(targetTxt)}</span>
+        </div>
+        <div class="small" style="margin-top:6px;">
+          I marker esclusi non contribuiscono ai rettangoli NF/LR/UD/LRUD della riga #16; restano solo per review/audit.
+          Motivi: ${esc(reasonTxt)}.
+        </div>
+        <div class="orientation-mini-table">
+          <div class="head">Gruppo</div><div class="head">tot</div><div class="head">usati</div><div class="head">esclusi</div><div class="head">low</div>
+          ${tableRows}
+        </div>
+      `;
+    }
 
     function lrMarkerReliability(item, minMatchScoreRaw, targetWidthRaw, targetHeightRaw) {
       const it = (item && typeof item === "object") ? item : {};
@@ -7819,12 +8786,21 @@ HTML_PAGE = """<!doctype html>
       const blankMatch = Number(it.match_patch_is_blank) === 1 || reviewReason.split(";").includes("blank_marker_match");
       const lowScore = !(Number.isFinite(score) && score >= minMatchScore);
       const forced = strategy === "spatial_consensus_forced";
+      const qStatus = String(it.quadrant_status || "").trim().toLowerCase();
+      const qValidRaw = String(it.quadrant_valid ?? "").trim().toLowerCase();
+      const quadrantValid = !(
+        qStatus === "invalid" ||
+        qValidRaw === "0" ||
+        qValidRaw === "false" ||
+        qValidRaw === "no"
+      );
       return {
-        reliable: !lowScore && !forced && canonicalSize && !blankMatch,
+        reliable: !lowScore && !forced && canonicalSize && !blankMatch && quadrantValid,
         lowScore,
         forced,
         canonicalSize,
         blankMatch,
+        quadrantValid,
       };
     }
 
@@ -7853,11 +8829,12 @@ HTML_PAGE = """<!doctype html>
           forced_count: 0,
           noncanonical_count: 0,
           blank_match_count: 0,
+          quadrant_invalid_count: 0,
         };
       });
       (Array.isArray(items) ? items : []).forEach((it) => {
         const key = inferLrOrientationGroup(it);
-        if (!groups[key]) groups[key] = {key, items: [], envelope: null, min_score: null, max_score: null, avg_score: null, label_counts: {}, strategy_counts: {}, reliable_count: 0, unreliable_count: 0, low_score_count: 0, forced_count: 0, noncanonical_count: 0, blank_match_count: 0};
+        if (!groups[key]) groups[key] = {key, items: [], envelope: null, min_score: null, max_score: null, avg_score: null, label_counts: {}, strategy_counts: {}, reliable_count: 0, unreliable_count: 0, low_score_count: 0, forced_count: 0, noncanonical_count: 0, blank_match_count: 0, quadrant_invalid_count: 0};
         groups[key].items.push(it);
       });
       Object.values(groups).forEach((group) => {
@@ -7889,6 +8866,7 @@ HTML_PAGE = """<!doctype html>
             if (reliability.forced) group.forced_count = Number(group.forced_count || 0) + 1;
             if (!reliability.canonicalSize) group.noncanonical_count = Number(group.noncanonical_count || 0) + 1;
             if (reliability.blankMatch) group.blank_match_count = Number(group.blank_match_count || 0) + 1;
+            if (!reliability.quadrantValid) group.quadrant_invalid_count = Number(group.quadrant_invalid_count || 0) + 1;
           }
           const t = Number(it && it.marker_top_abs);
           const l = Number(it && it.marker_left_abs);
@@ -7983,6 +8961,8 @@ HTML_PAGE = """<!doctype html>
         lr_label: cleanVal(it.lr_label || ""),
         search_strategy: cleanVal(it.search_strategy || ""),
         review_reason: cleanVal(it.review_reason || ""),
+        quadrant_status: cleanVal(it.quadrant_status || ""),
+        quadrant_reason: cleanVal(it.quadrant_reason || ""),
         original_rect: `${cleanVal(it.marker_top_abs)},${cleanVal(it.marker_left_abs)},${cleanVal(it.marker_bottom_abs)},${cleanVal(it.marker_right_abs)}`,
       };
     }
@@ -7999,9 +8979,38 @@ HTML_PAGE = """<!doctype html>
       }
       if (rel.blankMatch) reasons.push("match nero/quasi nero");
       if (rel.forced) reasons.push("forzato da consenso spaziale");
+      if (rel.quadrantValid === false) {
+        const qReason = String(it.quadrant_reason || "").trim();
+        reasons.push(qReason ? `quadrante incoerente: ${qReason}` : "quadrante incoerente");
+      }
       const reviewReason = String(it.review_reason || "").trim();
       if (reviewReason) reasons.push(reviewReason);
       return reasons.length ? reasons.join(" | ") : "da rivedere";
+    }
+
+    function lrMarkerQuadrantText(item) {
+      const it = (item && typeof item === "object") ? item : {};
+      const status = String(it.quadrant_status || "").trim().toLowerCase();
+      const expected = String(it.quadrant_expected || "").trim();
+      const center = String(it.quadrant_center || "").trim();
+      const group = String(it.quadrant_group || "").trim();
+      const reason = String(it.quadrant_reason || "").trim();
+      const statusTxt = status || "unknown";
+      const parts = [
+        `quadrante=${statusTxt}`,
+        expected ? `atteso=${expected}` : "",
+        center ? `centro=${center}` : "",
+        group ? `gruppo=${group}` : "",
+        reason ? `motivo=${reason}` : "",
+      ].filter(Boolean);
+      return parts.join(" | ");
+    }
+
+    function lrMarkerQuadrantTagHtml(item) {
+      const status = String((item && item.quadrant_status) || "").trim().toLowerCase();
+      if (status === "invalid") return `<span class="tag tag-warn">quadrante incoerente</span>`;
+      if (status === "ok") return `<span class="tag tag-ok">quadrante ok</span>`;
+      return `<span class="tag tag-data">quadrante unknown</span>`;
     }
 
     function lrMarkerReviewControlsHtml(key) {
@@ -8047,7 +9056,9 @@ HTML_PAGE = """<!doctype html>
       `;
     }
 
-    function renderLrLowScoreReviewSection(items, orientationGroups, threshold, targetWidth, targetHeight) {
+    function renderLrLowScoreReviewSection(items, orientationGroups, threshold, targetWidth, targetHeight, options) {
+      const opts = (options && typeof options === "object") ? options : {};
+      const compact = !!opts.compact;
       const rows = (Array.isArray(items) ? items : [])
         .filter((it) => !lrMarkerReliability(it, threshold, targetWidth, targetHeight).reliable)
         .sort((a, b) => {
@@ -8064,6 +9075,21 @@ HTML_PAGE = """<!doctype html>
       const savedCount = Object.values((annotationsState && annotationsState.lr_marker_reviews && typeof annotationsState.lr_marker_reviews === "object") ? annotationsState.lr_marker_reviews : {})
         .filter((ann) => ann && typeof ann === "object" && Object.values(ann).some((v) => String(v || "").trim()))
         .length;
+      if (compact) {
+        const summary = lrMarkerBoxContributionSummary(items, threshold, targetWidth, targetHeight);
+        const compactSummaryHtml = opts.includeBoxSummary === false
+          ? `<div class="small" style="margin-top:6px;">I marker esclusi sono conteggiati nel riepilogo blocchi sopra e non entrano nei rettangoli NF/LR/UD/LRUD.</div>`
+          : orientationBoxSummaryHtml(summary);
+        return `
+          <div class="evidence-title" style="margin-top:12px;">Marker esclusi dai box <span class="tag tag-warn">${esc(cleanVal(summary.excluded))}</span></div>
+          ${compactSummaryHtml}
+          <div class="dup-actions" style="margin-top:6px;">
+            <button type="button" class="btn secondary mini" data-open-evidence-gallery="lr_marker_low">Apri galleria review marker esclusi</button>
+            <button type="button" class="btn secondary mini" onclick="saveAnnotations(); return false;">Salva review marker</button>
+            <span class="small">annotazioni gia compilate: ${esc(cleanVal(savedCount))}</span>
+          </div>
+        `;
+      }
       const cardsHtml = rows.length
         ? rows.map((it) => {
             const reliability = lrMarkerReliability(it, threshold, targetWidth, targetHeight);
@@ -8075,6 +9101,7 @@ HTML_PAGE = """<!doctype html>
                 ${lrMarkerImageOverlayHtml(it, selectedRunId, orientationGroups)}
                 <div class="meta"><b>frame=${esc(cleanVal(it && it.image_index))}</b> | score=${esc(formatNum(it && it.match_score, 4))} | gruppo=${esc(inferLrOrientationGroup(it))}</div>
                 <div class="meta">motivo=${esc(reason)}</div>
+                <div class="meta">${lrMarkerQuadrantTagHtml(it)} ${esc(lrMarkerQuadrantText(it))}</div>
                 <div class="meta">marker_abs=${esc(marker)} | ${esc(cleanVal(it && it.search_strategy))}</div>
                 <div class="meta">${esc(String((it && it.image_rel) || "-"))}</div>
                 ${lrMarkerReviewControlsHtml(key)}
@@ -8083,9 +9110,9 @@ HTML_PAGE = """<!doctype html>
           }).join("")
         : `<div class="small">Nessun caso sotto soglia o escluso dai box orientamento.</div>`;
       return `
-        <div class="evidence-title" style="margin-top:12px;">Review marker LR a punteggio basso <span class="tag tag-warn">${esc(cleanVal(rows.length))}</span></div>
+        <div class="evidence-title" style="margin-top:12px;">Review marker LR esclusi <span class="tag tag-warn">${esc(cleanVal(rows.length))}</span></div>
         <div class="small">
-          Casi esclusi dai box per score &lt; ${esc(formatNum(threshold, 2))}, size non canonica, match nero/quasi nero o consenso spaziale forzato.
+          Casi esclusi dai box per score &lt; ${esc(formatNum(threshold, 2))}, size non canonica, match nero/quasi nero, consenso spaziale forzato o quadrante incoerente.
           Qui puoi commentare e correggere manualmente; salva con il pulsante sotto o da "Analisi Step".
         </div>
         <div class="dup-actions" style="margin-top:6px;">
@@ -8124,6 +9151,9 @@ HTML_PAGE = """<!doctype html>
       const statusCounts = (lrData && lrData.status_counts && typeof lrData.status_counts === "object")
         ? lrData.status_counts
         : {ok: 0, review: 0, other: 0};
+      const quadrantCounts = (lrData && lrData.quadrant_counts && typeof lrData.quadrant_counts === "object")
+        ? lrData.quadrant_counts
+        : {ok: 0, invalid: 0, unknown: 0};
       const strategyCounts = (lrData && lrData.search_strategy_counts && typeof lrData.search_strategy_counts === "object")
         ? lrData.search_strategy_counts
         : {};
@@ -8144,7 +9174,7 @@ HTML_PAGE = """<!doctype html>
       const targetWidth = Number(row.line_09_video_x_size || row.line_07_video_input_size_x || 0) || 0;
       const targetHeight = Number(row.line_10_video_y_size || row.line_08_video_input_size_y || 0) || 0;
       const orientationGroups = buildLrOrientationGroups(items, model.lr_marker_min_match_score, targetWidth, targetHeight);
-      return {lrData, items, labelCounts, statusCounts, strategyCounts, templatePathCounts, best, orientationGroups, targetWidth, targetHeight};
+      return {lrData, items, labelCounts, statusCounts, quadrantCounts, strategyCounts, templatePathCounts, best, orientationGroups, targetWidth, targetHeight};
     }
 
     function markerOrientationGroupFromItem(item) {
@@ -8180,9 +9210,9 @@ HTML_PAGE = """<!doctype html>
       const orientationHelp = helpTipHtml(
         "Orientamento",
         [
-          "Step 1: rete SU/GIU per separare NF e UD.",
-          "Step 2: marker LR classico; se contraddice SU/GIU, vince la posizione del marker.",
-          "Il campione scuro serve a scegliere un riferimento più stabile per il marker del vendor/cartella.",
+          "Step 1: rete SU/GIU separa la parte alta dalla parte bassa.",
+          "Step 2: marker LR completa il flip: alto/sinistra=NF, alto/destra=LR, basso/sinistra=UD, basso/destra=LRUD.",
+          "I box NF/LR/UD/LRUD usano solo marker affidabili: score sufficiente, size canonica, patch non nera e coordinate valide.",
         ],
       );
       const rec = (summary && summary.recognition_evidence && typeof summary.recognition_evidence === "object")
@@ -8199,13 +9229,14 @@ HTML_PAGE = """<!doctype html>
       const sgCounts = sgPayload.labelCounts || {};
       const lrCounts = lrPayload.labelCounts || {};
       const statusCounts = lrPayload.statusCounts || {};
+      const quadrantCounts = lrPayload.quadrantCounts || {};
       const strategyCounts = lrPayload.strategyCounts || {};
       const orientationGroups = Array.isArray(lrPayload.orientationGroups) ? lrPayload.orientationGroups : [];
-      const lrReliableThreshold = Math.max(
-        LR_MARKER_RELIABLE_MATCH_SCORE,
-        Number.isFinite(Number(model.lr_marker_min_match_score)) ? Number(model.lr_marker_min_match_score) : LR_MARKER_RELIABLE_MATCH_SCORE,
-      );
+      const thresholds = lrMarkerThresholds(model);
+      const lrReliableThreshold = thresholds.reliableBox;
       const fixedTemplatePath = String((lrData && lrData.fixed_template_path) || (lrPayload.best && lrPayload.best.folder_fixed_template_path) || row.lr_marker_best_template_path || "").trim();
+      const templatePolicyRequested = String((lrData && lrData.template_policy_requested) || (lrPayload.best && lrPayload.best.template_policy_requested) || (model && model.lr_marker_template_policy) || "").trim();
+      const fixedTemplatePolicy = String((lrData && lrData.template_policy) || (lrPayload.best && lrPayload.best.template_policy) || "").trim();
       const templatePolicyEffective = String((lrData && lrData.template_policy_effective) || (lrPayload.best && lrPayload.best.template_policy_effective) || row.lr_marker_template_policy_effective || "").trim();
       const templateFallbackReason = String((lrData && lrData.template_fallback_reason) || (lrPayload.best && lrPayload.best.template_fallback_reason) || row.lr_marker_template_fallback_reason || "").trim();
       const templateFallbackHtml = templateFallbackReason
@@ -8219,6 +9250,14 @@ HTML_PAGE = """<!doctype html>
         ? lrData.vendor_template_library
         : {};
       const vendorLibraryItems = Array.isArray(vendorLibrary.items) ? vendorLibrary.items : [];
+      const boxSummary = lrMarkerBoxContributionSummary(lrItems, lrReliableThreshold, lrPayload.targetWidth, lrPayload.targetHeight);
+      const templateDecisionHtml = orientationTemplateDecisionHtml({
+        requested: templatePolicyRequested,
+        effective: templatePolicyEffective,
+        fixedPolicy: fixedTemplatePolicy,
+        fallbackReason: templateFallbackReason,
+        thresholds,
+      });
 
       if (!sgData && !lrData) {
         suGiuEvidenceEl.innerHTML = `
@@ -8300,13 +9339,14 @@ HTML_PAGE = """<!doctype html>
                 <button type="button" class="btn secondary mini" data-open-evidence-gallery="lr_marker" data-lr-marker-group="${esc(group.key)}">Apri gruppo</button>
               </div>
               <div class="box">${esc(formatLrEnvelope(group.envelope))}</div>
-              <div class="meta">box da frame validi >= ${esc(formatNum(lrReliableThreshold, 2))}: ${esc(cleanVal(group.envelope && group.envelope.boxes))}/${esc(cleanVal(group.items.length))} | esclusi low-score=${esc(cleanVal(group.low_score_count || 0))}, non-canonici=${esc(cleanVal(group.noncanonical_count || 0))}, neri=${esc(cleanVal(group.blank_match_count || 0))}</div>
+              <div class="meta">usati nel box=${esc(cleanVal(group.envelope && group.envelope.boxes))} | tot=${esc(cleanVal(group.items.length))} | esclusi=${esc(cleanVal(group.unreliable_count || 0))}</div>
+              <div class="meta">motivi esclusione: low=${esc(cleanVal(group.low_score_count || 0))}, size=${esc(cleanVal(group.noncanonical_count || 0))}, blank=${esc(cleanVal(group.blank_match_count || 0))}, forced=${esc(cleanVal(group.forced_count || 0))}, quadrante=${esc(cleanVal(group.quadrant_invalid_count || 0))}</div>
               <div class="meta">score min=${esc(formatNum(group.min_score, 4))} avg=${esc(formatNum(group.avg_score, 4))} max=${esc(formatNum(group.max_score, 4))}</div>
             </div>
           `).join("")
         : `<div class="small">Nessun gruppo NF/LR/UD/LRUD ricavabile dai nomi immagine.</div>`;
       const lowScoreReviewHtml = lrAvailable
-        ? renderLrLowScoreReviewSection(lrItems, orientationGroups, lrReliableThreshold, lrPayload.targetWidth, lrPayload.targetHeight)
+        ? renderLrLowScoreReviewSection(lrItems, orientationGroups, lrReliableThreshold, lrPayload.targetWidth, lrPayload.targetHeight, {compact: true, includeBoxSummary: false})
         : "";
 
       suGiuEvidenceEl.innerHTML = `
@@ -8325,10 +9365,15 @@ HTML_PAGE = """<!doctype html>
             <div>
               <b>2. Marker LR</b><br>
               frame=${esc(cleanVal(lrItems.length))} | non flipped=${esc(cleanVal(lrCounts.not_lr_flipped))} | LR flipped=${esc(cleanVal(lrCounts.lr_flipped))} | review=${esc(cleanVal(statusCounts.review))}<br>
+              quadranti ok=${esc(cleanVal(quadrantCounts.ok))} | invalid=${esc(cleanVal(quadrantCounts.invalid))}<br>
               strategie=${esc(lrCountsToText(strategyCounts))}
             </div>
           </div>
           ${(!sgAvailable || !lrAvailable) ? `<div class="small" style="margin-top:8px;color:#b45309;">Run incompleta per questa vista: SU/GIU disponibile=${sgAvailable ? "SI" : "NO"}, LR marker disponibile=${lrAvailable ? "SI" : "NO"}.</div>` : ""}
+          <div class="evidence-title" style="margin-top:10px;">Decisioni prese <span class="tag tag-data">best historical / derived</span></div>
+          ${templateDecisionHtml}
+          <div class="evidence-title" style="margin-top:10px;">Blocchi NF/LR/UD/LRUD <span class="tag tag-data">contributi</span></div>
+          ${orientationBoxSummaryHtml(boxSummary)}
           <div class="evidence-title" style="margin-top:10px;">Campione scuro e template <span class="tag tag-data">sample</span></div>
           <div class="detail-list" style="margin-top:8px;">
             <div>
@@ -8339,16 +9384,20 @@ HTML_PAGE = """<!doctype html>
             <div>
               <b>Template marker usato</b><br>
               score=${esc(cleanVal(templateSelectionScore || "-"))}<br>
-              policy=${esc(cleanVal((model && model.lr_marker_template_policy) || "-"))}${templatePolicyEffective ? ` | effective=${esc(cleanVal(templatePolicyEffective))}` : ""}<br>
+              policy=${esc(cleanVal(templatePolicyRequested || (model && model.lr_marker_template_policy) || "-"))}${templatePolicyEffective ? ` | effective=${esc(cleanVal(templatePolicyEffective))}` : ""}<br>
               <span class="path">${esc(fixedTemplatePath || "-")}</span>
               ${darkSample && darkSample.folder_template_seed_db_template_path ? `<br><span class="small">DB seed: <span class="path">${esc(String(darkSample.folder_template_seed_db_template_path || ""))}</span></span>` : ""}
               ${templateFallbackHtml}
             </div>
           </div>
           ${darkSample ? `<div class="sugiu-folder-card" style="margin-top:8px;">${lrMarkerVisualHtml(darkSample, selectedRunId)}</div>` : ""}
-          <div class="evidence-title" style="margin-top:10px;">Template conosciuti vendor <span class="tag tag-data">${esc(sampleTemplateRank.length ? "rank campione" : "library")}</span></div>
-          <div class="small">Ordinati per sovrapposizione sul frame campione quando la run contiene il ranking; altrimenti mostra la libreria deduplicata del vendor.</div>
-          <div class="lr-orientation-groups" style="margin-top:8px;">${templateRows}</div>
+          <details class="toggle-block" style="margin-top:8px;">
+            <summary>Template conosciuti vendor (${esc(sampleTemplateRank.length ? "rank campione" : "library")})</summary>
+            <div class="toggle-content">
+              <div class="small">Ordinati per sovrapposizione sul frame campione quando la run contiene il ranking; altrimenti mostra la libreria deduplicata del vendor.</div>
+              <div class="lr-orientation-groups" style="margin-top:8px;">${templateRows}</div>
+            </div>
+          </details>
           ${darkRankRows ? `<details class="toggle-block" style="margin-top:8px;"><summary>Score scurita altri frame</summary><div class="toggle-content">${darkRankRows}</div></details>` : ""}
           <div class="evidence-title" style="margin-top:10px;">Box marker per orientamento <span class="tag tag-data">NF | LR | UD | LRUD</span></div>
           <div class="lr-orientation-groups">${groupCardsHtml}</div>
@@ -9471,7 +10520,7 @@ HTML_PAGE = """<!doctype html>
             rete usata: <span class="path">${esc(suGiuModelPath || "-")}</span>
           </div>
           <div class="small">
-            Visualizzazione a due cartelle separate (SU/GIU). Nessun giudizio globale sulla cartella sorgente.
+            Visualizzazione a due cartelle separate (SU/GIU), ordinate per confidence decrescente. Nessun giudizio globale sulla cartella sorgente.
           </div>
           <div class="sugiu-folders">
             ${suFolderHtml}
@@ -9503,6 +10552,7 @@ HTML_PAGE = """<!doctype html>
       const items = payload.items || [];
       const counts = payload.labelCounts || {};
       const statusCounts = payload.statusCounts || {};
+      const quadrantCounts = payload.quadrantCounts || {};
       const strategyCounts = payload.strategyCounts || {};
       const best = payload.best || {};
       const orientationGroups = Array.isArray(payload.orientationGroups) ? payload.orientationGroups : [];
@@ -9569,7 +10619,7 @@ HTML_PAGE = """<!doctype html>
                   <button type="button" class="btn secondary mini" data-open-evidence-gallery="lr_marker" data-lr-marker-group="${esc(group.key)}">Apri gruppo</button>
                 </div>
                 <div class="box">${esc(formatLrEnvelope(env))}</div>
-                <div class="meta">box da frame validi >= ${esc(formatNum(lrReliableThreshold, 2))}: ${esc(cleanVal(env && env.boxes))}/${esc(cleanVal(group.items.length))} | esclusi low-score=${esc(cleanVal(group.low_score_count || 0))}, non-canonici=${esc(cleanVal(group.noncanonical_count || 0))}, neri=${esc(cleanVal(group.blank_match_count || 0))}</div>
+                <div class="meta">box da frame validi >= ${esc(formatNum(lrReliableThreshold, 2))}: ${esc(cleanVal(env && env.boxes))}/${esc(cleanVal(group.items.length))} | esclusi low-score=${esc(cleanVal(group.low_score_count || 0))}, non-canonici=${esc(cleanVal(group.noncanonical_count || 0))}, neri=${esc(cleanVal(group.blank_match_count || 0))}, quadrante=${esc(cleanVal(group.quadrant_invalid_count || 0))}</div>
                 <div class="meta">score ${esc(scoreTxt)}</div>
                 <div class="meta">label: ${esc(lrCountsToText(group.label_counts))}</div>
                 <div class="meta">strategie: ${esc(lrCountsToText(group.strategy_counts))}</div>
@@ -9586,11 +10636,14 @@ HTML_PAGE = """<!doctype html>
         const side = String((it && it.detected_marker_side) || "-");
         const idx = cleanVal(it && it.image_index);
         const marker = `${cleanVal(it && it.marker_top_abs)}|${cleanVal(it && it.marker_left_abs)}|${cleanVal(it && it.marker_bottom_abs)}|${cleanVal(it && it.marker_right_abs)}|`;
+        const quadrantTag = lrMarkerQuadrantTagHtml(it);
+        const quadrantText = lrMarkerQuadrantText(it);
         return `
           <div class="sugiu-folder-card">
             ${lrMarkerVisualHtml(it, selectedRunId)}
             <div class="meta">frame=${esc(String(idx))} | score=${esc(score)} | ${esc(strategy)} | ${esc(scope)}</div>
             <div class="meta">label=${esc(label)}${labelIt ? ` (${esc(labelIt)})` : ""} | marker=${esc(side)}</div>
+            <div class="meta">${quadrantTag} ${esc(quadrantText)}</div>
             <div class="meta">marker_abs=${esc(marker)}</div>
           </div>
         `;
@@ -9625,7 +10678,7 @@ HTML_PAGE = """<!doctype html>
           </div>
           ${templatePathsSeen.length > 1 ? `<div class="small" style="color:#b45309;">Questa run usa ancora piu template (${templatePathsSeen.length}). Riesegui la pipeline per applicare la nuova regola: un solo template fisso per tutta la cartella.</div>` : ""}
           <div class="small">
-            status ok=${esc(cleanVal(statusCounts.ok))} | review=${esc(cleanVal(statusCounts.review))} | strategie=${esc(strategyTxt || "-")}
+            status ok=${esc(cleanVal(statusCounts.ok))} | review=${esc(cleanVal(statusCounts.review))} | quadranti ok=${esc(cleanVal(quadrantCounts.ok))} invalid=${esc(cleanVal(quadrantCounts.invalid))} | strategie=${esc(strategyTxt || "-")}
           </div>
           <div class="small">
             template mode: ${esc(cleanVal(model.lr_marker_template_policy || "-"))} | roots template: ${esc(Array.isArray(model.lr_marker_template_roots) ? model.lr_marker_template_roots.join(" | ") : "-")}
@@ -9843,22 +10896,222 @@ HTML_PAGE = """<!doctype html>
       `;
     }
 
-    function renderRawEvidence(summary) {
-      galleryEl.innerHTML = "";
-      const imgList = Array.isArray(summary.raw_images_rel) && summary.raw_images_rel.length
-        ? summary.raw_images_rel
-        : (Array.isArray(summary.preview_images_rel) ? summary.preview_images_rel : []);
-      if (!imgList.length) {
-        galleryEl.innerHTML = "<div class='small'>Nessuna immagine grezza disponibile.</div>";
+    function currentSelectedRunRecord() {
+      const rid = String(selectedRunId || "").trim();
+      if (!rid) return {};
+      return runs.find((run) => String(run && run.run_id || "") === rid) || {};
+    }
+
+    function rawInputFolderForSummary(summary) {
+      const sm = (summary && typeof summary === "object") ? summary : {};
+      const runRecord = currentSelectedRunRecord();
+      const candidates = [
+        selectedRunStatus && selectedRunStatus.input_folder,
+        runRecord && runRecord.input_folder,
+        sm.input_original_folder,
+        sm.input_folder,
+        (document.getElementById("inputFolder") || {}).value,
+      ];
+      for (const value of candidates) {
+        const txt = String(value || "").trim();
+        if (txt) return txt;
+      }
+      return "";
+    }
+
+    function joinPreviewPath(basePath, relPath) {
+      const rel = String(relPath || "").trim();
+      if (!rel) return "";
+      if (new RegExp("^([A-Za-z]:[\\\\/]|[\\\\/])").test(rel)) return rel;
+      const base = String(basePath || "").trim().replace(/[\\/]+$/g, "");
+      const cleanRel = rel.replace(/^[\\/]+/g, "");
+      return base ? `${base}/${cleanRel}` : cleanRel;
+    }
+
+    function rawRowsFromSummary(summary) {
+      const sm = (summary && typeof summary === "object") ? summary : {};
+      const imgList = Array.isArray(sm.raw_images_rel) && sm.raw_images_rel.length
+        ? sm.raw_images_rel
+        : (Array.isArray(sm.preview_images_rel) ? sm.preview_images_rel : []);
+      return imgList
+        .map((rel, idx) => ({
+          idx,
+          rel: String(rel || ""),
+          displayRel: String(rel || ""),
+          previewPath: String(rel || ""),
+          sizeBytes: 0,
+          excluded: false,
+          canExclude: false,
+        }))
+        .filter((row) => row.rel);
+    }
+
+    function selectedRawExcludedImages() {
+      return rawExclusionRows
+        .filter((row) => row && row.canExclude !== false && !!row.excluded)
+        .map((row) => String(row.rel || "").trim())
+        .filter(Boolean);
+    }
+
+    function updateRawExclusionStatus(inputFolder, totalOverride) {
+      if (!rawExclusionStatusEl) return;
+      const total = Number.isFinite(Number(totalOverride)) ? Number(totalOverride) : rawExclusionRows.length;
+      const excluded = selectedRawExcludedImages().length;
+      const folderName = String(inputFolder || "").split(/[\\/]/).filter(Boolean).pop() || "-";
+      rawExclusionStatusEl.textContent = `${excluded} escluse su ${total} immagini | ${folderName}`;
+    }
+
+    function setRawExcluded(relValue, checkedValue) {
+      const rel = String(relValue || "").trim();
+      if (!rel) return;
+      const checked = !!checkedValue;
+      rawExclusionRows.forEach((row) => {
+        if (String(row && row.rel || "") === rel) row.excluded = checked;
+      });
+      document.querySelectorAll("input[data-raw-image-rel]").forEach((input) => {
+        if (String(input.getAttribute("data-raw-image-rel") || "") === rel) {
+          input.checked = checked;
+          const tile = input.closest(".raw-tile, .gallery-modal-item");
+          if (tile) tile.classList.toggle("excluded", checked);
+        }
+      });
+      updateRawExclusionStatus(rawInputFolderForSummary(selectedRunData && selectedRunData.summary));
+    }
+
+    function bindRawExclusionInputs(rootEl) {
+      const scope = (rootEl && typeof rootEl.querySelectorAll === "function") ? rootEl : document;
+      scope.querySelectorAll("input[data-raw-image-rel]").forEach((input) => {
+        if (input.dataset.rawExclusionBound === "1") return;
+        input.dataset.rawExclusionBound = "1";
+        input.addEventListener("change", () => {
+          setRawExcluded(input.getAttribute("data-raw-image-rel"), input.checked);
+        });
+      });
+    }
+
+    function renderRawGalleryRows(rows, inputFolder) {
+      const normalized = (Array.isArray(rows) ? rows : [])
+        .map((row, idx) => {
+          const rel = String(row && row.rel || row && row.image_rel || "").trim();
+          const previewPath = String(row && row.previewPath || row && row.preview_path || "").trim()
+            || joinPreviewPath(inputFolder, rel);
+          return {
+            idx: Number.isFinite(Number(row && row.idx)) ? Number(row.idx) : idx,
+            rel,
+            displayRel: String(row && row.displayRel || rel),
+            previewPath,
+            sizeBytes: Number(row && row.sizeBytes !== undefined ? row.sizeBytes : row && row.size_bytes) || 0,
+            excluded: !!(row && row.excluded),
+            canExclude: row && row.canExclude === false ? false : true,
+          };
+        })
+        .filter((row) => row.rel && row.previewPath);
+
+      rawExclusionRows = normalized;
+      if (!galleryEl) return;
+      if (!normalized.length) {
+        galleryEl.innerHTML = "<div class='small'>Nessuna immagine raw disponibile.</div>";
+        updateRawExclusionStatus(inputFolder, 0);
         return;
       }
-      imgList.forEach((rel) => {
-        const div = document.createElement("div");
-        div.className = "tile";
-        const src = imgUrl(rel);
-        div.innerHTML = `<img src="${src}" loading="lazy" decoding="async"><div class="p">${rel}</div>`;
-        galleryEl.appendChild(div);
+      galleryEl.innerHTML = normalized.map((row, idx) => {
+        const src = imgUrlForRun(selectedRunId, row.previewPath);
+        const checked = row.excluded ? " checked" : "";
+        const excludeHtml = row.canExclude
+          ? `<label class="raw-exclude-toggle"><input type="checkbox" data-raw-image-rel="${esc(row.rel)}"${checked}> Escludi</label>`
+          : "";
+        return `
+          <div class="tile raw-tile${row.excluded ? " excluded" : ""}">
+            <button type="button" class="raw-image-button" data-open-evidence-gallery="raw" data-raw-gallery-index="${idx}">
+              <img src="${src}" loading="lazy" decoding="async">
+            </button>
+            ${excludeHtml}
+            <div class="p">${esc(row.displayRel || row.rel)}</div>
+          </div>
+        `;
+      }).join("");
+      bindRawExclusionInputs(galleryEl);
+      updateRawExclusionStatus(inputFolder, normalized.length);
+    }
+
+    async function saveRawExclusions() {
+      const summary = selectedRunData && selectedRunData.summary ? selectedRunData.summary : null;
+      const inputFolder = rawInputFolderForSummary(summary);
+      if (!inputFolder) {
+        if (rawExclusionStatusEl) rawExclusionStatusEl.textContent = "Cartella input non disponibile.";
+        return;
+      }
+      const excluded = selectedRawExcludedImages();
+      const out = await apiPost("/api/input/exclusions", {
+        input_folder: inputFolder,
+        excluded_images_rel: excluded,
       });
+      if (summary && typeof summary === "object") {
+        summary.excluded_images_rel = excluded.slice();
+        summary.excluded_images_count = excluded.length;
+      }
+      if (rawExclusionStatusEl) {
+        rawExclusionStatusEl.textContent = `${Number(out.excluded_count || excluded.length)} esclusioni salvate.`;
+      }
+    }
+
+    function clearRawExclusions() {
+      rawExclusionRows.forEach((row) => {
+        if (row && row.canExclude !== false) row.excluded = false;
+      });
+      document.querySelectorAll("input[data-raw-image-rel]").forEach((input) => {
+        input.checked = false;
+        const tile = input.closest(".raw-tile, .gallery-modal-item");
+        if (tile) tile.classList.remove("excluded");
+      });
+      updateRawExclusionStatus(rawInputFolderForSummary(selectedRunData && selectedRunData.summary));
+    }
+
+    function renderRawEvidence(summary) {
+      const inputFolder = rawInputFolderForSummary(summary);
+      const fallbackRows = rawRowsFromSummary(summary);
+      rawEvidenceLoadToken += 1;
+      const token = rawEvidenceLoadToken;
+      renderRawGalleryRows(fallbackRows, inputFolder);
+      if (!inputFolder) return;
+      if (rawExclusionStatusEl) rawExclusionStatusEl.textContent = "Caricamento immagini raw...";
+      apiPost("/api/input/images", {input_folder: inputFolder})
+        .then((out) => {
+          if (token !== rawEvidenceLoadToken || String(activeEvidenceSection || "") !== "raw") return;
+          const rows = Array.isArray(out.images) ? out.images.map((img, idx) => ({
+            idx,
+            rel: String(img && img.rel || ""),
+            displayRel: String(img && img.rel || ""),
+            previewPath: joinPreviewPath(inputFolder, String(img && img.rel || "")),
+            sizeBytes: Number(img && img.size_bytes) || 0,
+            excluded: !!(img && img.excluded),
+            canExclude: true,
+          })) : [];
+          renderRawGalleryRows(rows, inputFolder);
+        })
+        .catch((err) => {
+          if (token !== rawEvidenceLoadToken || String(activeEvidenceSection || "") !== "raw") return;
+          if (rawExclusionStatusEl) rawExclusionStatusEl.textContent = `Errore caricamento raw: ${String(err && err.message ? err.message : err)}`;
+        });
+    }
+
+    function renderScaleEvidence(summary) {
+      if (!scaleEvidenceEl) return;
+      scaleEvidenceEl.innerHTML = `
+        <div class="evidence-card">
+          <div class="evidence-title">Scala <span class="tag tag-data">scale</span></div>
+        </div>
+      `;
+    }
+
+    function renderDepthEvidence(summary) {
+      if (!depthEvidenceEl) return;
+      depthEvidenceEl.innerHTML = `
+        <div class="evidence-card">
+          <div class="evidence-title">Depth <span class="tag tag-data">depth</span></div>
+          <div class="small">Nessuna evidenza depth disponibile.</div>
+        </div>
+      `;
     }
 
     function bindImageErrorFallback(rootEl) {
@@ -9884,6 +11137,38 @@ HTML_PAGE = """<!doctype html>
       });
     }
 
+    function setEvidenceStatusForSection(summary, sectionRaw) {
+      if (!evidenceStatusEl) return;
+      const sm = (summary && typeof summary === "object") ? summary : {};
+      const rec = (sm.recognition_evidence && typeof sm.recognition_evidence === "object") ? sm.recognition_evidence : {};
+      const section = String(sectionRaw || "raw");
+      if (section === "raw") {
+        evidenceStatusEl.textContent = `Immagini raw: ${cleanVal(sm.raw_images_count)}`;
+      } else if (section === "duplicates") {
+        evidenceStatusEl.textContent = `Duplicati: ${cleanVal(sm.duplicates_removed_count_recomputed)}`;
+      } else if (section === "rotation") {
+        const rot = (sm.rotation_evidence && typeof sm.rotation_evidence === "object") ? sm.rotation_evidence : {};
+        evidenceStatusEl.textContent = `Rotazione: ${cleanVal(rot.rotation_deg_clockwise)} deg`;
+      } else if (section === "rect") {
+        const rect = (rec.rect_per_image && typeof rec.rect_per_image === "object") ? rec.rect_per_image : {};
+        evidenceStatusEl.textContent = `Rect: ${cleanVal(rect.images_total || sm.raw_images_count)} frame`;
+      } else if (section === "template") {
+        evidenceStatusEl.textContent = "Template";
+      } else if (section === "orientation") {
+        const lr = (rec.lr_marker_per_image && typeof rec.lr_marker_per_image === "object") ? rec.lr_marker_per_image : {};
+        evidenceStatusEl.textContent = `Orientamento: ${cleanVal(lr.images_total || sm.raw_images_count)} frame`;
+      } else if (section === "lt") {
+        const lt = (rec.lt_per_image && typeof rec.lt_per_image === "object") ? rec.lt_per_image : {};
+        evidenceStatusEl.textContent = `L/T: ${cleanVal(lt.images_total || sm.raw_images_count)} frame`;
+      } else if (section === "scale") {
+        evidenceStatusEl.textContent = "Scala";
+      } else if (section === "depth") {
+        evidenceStatusEl.textContent = "Depth";
+      } else {
+        evidenceStatusEl.textContent = "Evidenze";
+      }
+    }
+
     function renderActiveEvidenceSection(summary) {
       decisionEvidenceEl.innerHTML = "";
       if (templateEvidenceEl) templateEvidenceEl.innerHTML = "";
@@ -9892,12 +11177,15 @@ HTML_PAGE = """<!doctype html>
       if (suGiuEvidenceEl) suGiuEvidenceEl.innerHTML = "";
       if (lrMarkerEvidenceEl) lrMarkerEvidenceEl.innerHTML = "";
       if (ltEvidenceEl) ltEvidenceEl.innerHTML = "";
+      if (scaleEvidenceEl) scaleEvidenceEl.innerHTML = "";
+      if (depthEvidenceEl) depthEvidenceEl.innerHTML = "";
       dupEvidenceEl.innerHTML = "";
       galleryEl.innerHTML = "";
       if (rawEvidenceBlockEl) rawEvidenceBlockEl.hidden = true;
       if (evidenceRectSideHostEl) evidenceRectSideHostEl.innerHTML = "";
 
       const section = String(activeEvidenceSection || "raw");
+      setEvidenceStatusForSection(summary, section);
       if (section === "raw") {
         if (rawEvidenceBlockEl) rawEvidenceBlockEl.hidden = false;
         renderRawEvidence(summary);
@@ -9915,6 +11203,10 @@ HTML_PAGE = """<!doctype html>
         renderLrMarkerEvidence(summary);
       } else if (section === "lt") {
         renderLtEvidence(summary);
+      } else if (section === "scale") {
+        renderScaleEvidence(summary);
+      } else if (section === "depth") {
+        renderDepthEvidence(summary);
       } else if (section === "rect") {
         renderRectPerImageEvidence(summary);
       } else if (section === "template") {
@@ -9926,7 +11218,7 @@ HTML_PAGE = """<!doctype html>
     function setActiveEvidenceSection(name) {
       const requested = String(name || "");
       const normalized = (requested === "su_giu" || requested === "lr_marker") ? "orientation" : requested;
-      const valid = ["raw", "decision", "duplicates", "rotation", "orientation", "lt", "rect", "template"];
+      const valid = ["raw", "duplicates", "rotation", "rect", "template", "orientation", "lt", "scale", "depth"];
       const next = valid.includes(normalized) ? normalized : "raw";
       activeEvidenceSection = next;
       evidenceSectionButtons.forEach((btn) => {
@@ -10014,7 +11306,7 @@ HTML_PAGE = """<!doctype html>
       if (evidenceGalleryCardEl) evidenceGalleryCardEl.classList.add("lr-marker-mode");
       evidenceGalleryGridEl.className = "lr-marker-viewer";
       if (evidenceGalleryTitleEl) evidenceGalleryTitleEl.textContent = mode === "low_score"
-        ? "Galleria review LR marker - punteggio basso"
+        ? "Galleria review LR marker - esclusi dai box"
         : (groupFilter ? `Galleria LR marker - ${groupFilter}` : "Galleria LR marker - verifica grande");
       renderLrMarkerGalleryViewer();
       evidenceGalleryModalEl.classList.remove("hidden");
@@ -10044,6 +11336,8 @@ HTML_PAGE = """<!doctype html>
       const sug = cleanVal(it.su_giu_pred || "-");
       const sugConf = formatNum(it.su_giu_conf, 4);
       const marker = `${cleanVal(it.marker_top_abs)}|${cleanVal(it.marker_left_abs)}|${cleanVal(it.marker_bottom_abs)}|${cleanVal(it.marker_right_abs)}|`;
+      const quadrantText = lrMarkerQuadrantText(it);
+      const quadrantTag = lrMarkerQuadrantTagHtml(it);
       const imageRel = String(it.image_rel || "");
       const templatePath = String(it.template_path || "");
       const templatePolicyEffective = String(it.template_policy_effective || "").trim();
@@ -10065,7 +11359,7 @@ HTML_PAGE = """<!doctype html>
       }
       if (evidenceGalleryStatusEl) {
         evidenceGalleryStatusEl.textContent = lrMarkerGalleryMode === "low_score"
-          ? `Modalita review: solo casi esclusi dai box, con score sotto ${formatNum(lrMarkerGalleryReliableThreshold, 2)} o altri motivi di affidabilita. Correggi e salva direttamente da qui.`
+          ? `Modalita review: solo casi esclusi dai box, con score sotto ${formatNum(lrMarkerGalleryReliableThreshold, 2)}, quadrante incoerente o altri motivi di affidabilita. Correggi e salva direttamente da qui.`
           : (lrMarkerGalleryGroup
           ? `Box colorato = rettangolo unico del gruppo; box rosso = marker trovato nel frame. Mostro solo match validi (score >= ${formatNum(lrMarkerGalleryReliableThreshold, 2)}).`
           : "Box rosso = marker trovato nel frame; i box colorati sono i rettangoli unici dei gruppi.");
@@ -10074,8 +11368,9 @@ HTML_PAGE = """<!doctype html>
         const rel = String((row && row.image_rel) || "");
         const active = idx === lrMarkerGalleryIndex ? " active" : "";
         const thumbScore = formatNum(row && row.match_score, 3);
+        const qStatus = cleanVal(row && row.quadrant_status);
         return `
-          <button type="button" class="lr-marker-thumb-btn${active}" data-lr-marker-index="${idx}" title="frame ${esc(cleanVal(row && row.image_index))} | score ${esc(thumbScore)}">
+          <button type="button" class="lr-marker-thumb-btn${active}" data-lr-marker-index="${idx}" title="frame ${esc(cleanVal(row && row.image_index))} | score ${esc(thumbScore)} | quadrante ${esc(qStatus || "-")}">
             ${rel ? `<img src="${imgUrlForRun(lrMarkerGalleryRunId, rel)}" loading="lazy" decoding="async">` : ""}
             <span>${esc(thumbScore)}</span>
           </button>
@@ -10097,6 +11392,7 @@ HTML_PAGE = """<!doctype html>
             ${lrMarkerGalleryMode === "low_score" ? `<div class="lr-marker-viewer-kv"><div class="k">Motivo review</div><div class="v">${esc(reviewReason)}</div></div>` : ""}
             <div class="lr-marker-viewer-kv"><div class="k">Marker trovato</div><div class="v">${esc(side)} | ${esc(marker)}</div></div>
             <div class="lr-marker-viewer-kv"><div class="k">SU/GIU usato</div><div class="v">${esc(sug)} | conf=${esc(sugConf)}</div></div>
+            <div class="lr-marker-viewer-kv"><div class="k">Quadrante</div><div class="v">${quadrantTag}<br>${esc(quadrantText)}</div></div>
             <div class="lr-marker-viewer-kv"><div class="k">Template</div><div class="v">${esc(templatePath || "-")}</div></div>
             ${templateFallbackReason ? `<div class="lr-marker-viewer-kv"><div class="k">Fallback template</div><div class="v"><span class="tag tag-warn">attivo</span> ${esc(templatePolicyEffective || "derived_folder")}<br>${esc(templateFallbackReason)}</div></div>` : ""}
             <div class="lr-marker-viewer-kv"><div class="k">Immagine</div><div class="v">${esc(imageRel || "-")}</div></div>
@@ -10273,9 +11569,9 @@ HTML_PAGE = """<!doctype html>
       const runForPreview = String(selectedRunId || "").trim();
       if (!summary || !runForPreview) return;
       const rawKind = String(kindRaw || "").trim();
-      const kind = (rawKind === "rect" || rawKind === "rect_red" || rawKind === "duplicates" || rawKind === "su_giu" || rawKind === "lr_marker" || rawKind === "lr_marker_low" || rawKind === "lt")
+      const kind = (rawKind === "raw" || rawKind === "rect" || rawKind === "rect_red" || rawKind === "duplicates" || rawKind === "su_giu" || rawKind === "lr_marker" || rawKind === "lr_marker_low" || rawKind === "lt")
         ? rawKind
-        : "duplicates";
+        : "raw";
       const maxItems = 240;
       const lrMarkerGroup = String(lrMarkerGroupRaw || "").trim().toUpperCase();
       const openSig = `evidence|${runForPreview}|${kind}|${lrMarkerGroup}`;
@@ -10294,7 +11590,44 @@ HTML_PAGE = """<!doctype html>
       if (evidenceGalleryCardEl) evidenceGalleryCardEl.classList.remove("lr-marker-mode");
       evidenceGalleryGridEl.className = "gallery-modal-grid";
 
-      if (kind === "duplicates") {
+      if (kind === "raw") {
+        const inputFolder = rawInputFolderForSummary(summary);
+        const rows = rawExclusionRows.length ? rawExclusionRows : rawRowsFromSummary(summary);
+        const shown = rows.slice(0, maxItems);
+        const excludedCount = rows.filter((row) => row && row.canExclude !== false && row.excluded).length;
+        if (evidenceGalleryTitleEl) evidenceGalleryTitleEl.textContent = "Galleria Raw";
+        if (evidenceGalleryMetaEl) {
+          evidenceGalleryMetaEl.textContent = `run=${runForPreview} | totale=${rows.length} | escluse=${excludedCount}`;
+        }
+        if (evidenceGalleryStatusEl) {
+          evidenceGalleryStatusEl.textContent = shown.length < rows.length
+            ? `Mostrate ${shown.length}/${rows.length} immagini per performance.`
+            : (rows.length ? "Immagini raw disponibili." : "Nessuna immagine raw disponibile.");
+        }
+        evidenceGalleryGridEl.innerHTML = shown.map((row, i) => {
+          const rel = String((row && row.rel) || "");
+          const displayRel = String((row && row.displayRel) || rel || "-");
+          const previewPath = String((row && row.previewPath) || joinPreviewPath(inputFolder, rel));
+          const checked = row && row.excluded ? " checked" : "";
+          const excludeHtml = row && row.canExclude !== false
+            ? `<label class="raw-exclude-toggle"><input type="checkbox" data-raw-image-rel="${esc(rel)}"${checked}> Escludi</label>`
+            : "";
+          return `
+            <div class="gallery-modal-item${row && row.excluded ? " excluded" : ""}">
+              <div class="head">
+                <div class="t">Raw #${i + 1}</div>
+                <div class="m">${esc(formatBytes(row && row.sizeBytes))}</div>
+              </div>
+              <div class="img-single">
+                <img src="${imgUrlForRun(runForPreview, previewPath)}" loading="lazy" decoding="async">
+              </div>
+              ${excludeHtml}
+              <div class="meta">${esc(displayRel)}</div>
+            </div>
+          `;
+        }).join("");
+        bindRawExclusionInputs(evidenceGalleryGridEl);
+      } else if (kind === "duplicates") {
         const dups = Array.isArray(summary.duplicate_examples) ? summary.duplicate_examples : [];
         const shown = dups.slice(0, maxItems);
         if (evidenceGalleryTitleEl) evidenceGalleryTitleEl.textContent = "Galleria Duplicati";
@@ -10349,8 +11682,8 @@ HTML_PAGE = """<!doctype html>
         }
         if (evidenceGalleryStatusEl) {
           evidenceGalleryStatusEl.textContent = shown.length < rows.length
-            ? `Mostrati ${shown.length}/${rows.length} frame per performance.`
-            : (rows.length ? "Classificazione frame-by-frame disponibile." : "Nessun frame etichettato.");
+            ? `Mostrati ${shown.length}/${rows.length} frame per performance. Ordine: SU, poi GIU, confidence decrescente.`
+            : (rows.length ? "Ordine: SU, poi GIU, confidence decrescente." : "Nessun frame etichettato.");
         }
         evidenceGalleryGridEl.innerHTML = shown.map((it, i) => {
           const rel = String((it && it.image_rel) || "");
@@ -10648,7 +11981,7 @@ HTML_PAGE = """<!doctype html>
     function buildRunPayload(inputFolderOverride) {
       const inputOverride = String(inputFolderOverride || "").trim();
       const inputCurrent = String((document.getElementById("inputFolder") || {}).value || "").trim();
-      return {
+      const payload = {
         input_folder: inputOverride || inputCurrent,
         batch_size: Number(document.getElementById("batchSize").value || 32),
         sample_per_folder: Number(document.getElementById("samplePerFolder").value || 80),
@@ -10657,7 +11990,14 @@ HTML_PAGE = """<!doctype html>
         vendor_min_confidence: Number(document.getElementById("vendorMinConf").value || 0.5),
         probe_min_confidence: Number(document.getElementById("probeMinConf").value || 0.5),
         lr_marker_template_policy: document.getElementById("lrMarkerTemplatePolicy").value,
+        no_generated_images: !!(noGeneratedImagesEl && noGeneratedImagesEl.checked),
+        no_split_symlinks: !!(noSplitSymlinksEl && noSplitSymlinksEl.checked),
+        remember_exclusions: true,
       };
+      if (Array.isArray(inputImageRows) && inputImageRows.length > 0) {
+        payload.excluded_images_rel = selectedExcludedImages();
+      }
+      return payload;
     }
 
     async function startRunWithPayload(payload, contextLabel) {
@@ -10755,6 +12095,116 @@ HTML_PAGE = """<!doctype html>
       await startRunWithPayload(payload, "rerun");
     }
 
+    function selectedRunRecord() {
+      const rid = String(selectedRunId || "").trim();
+      if (!rid) return null;
+      return runs.find((run) => String(run.run_id || "") === rid) || null;
+    }
+
+    const RERUN_TARGET_PRESETS = {
+      orientation: ["su_giu", "lr_marker"],
+      rect: ["rect_red", "rect_per_image", "rect_compare"],
+      all_evidence: ["rect_red", "rect_per_image", "rect_compare", "su_giu", "lr_marker", "lt", "line13"],
+    };
+
+    function activeRerunRoot() {
+      const workspaceRoot = document.getElementById("workspaceRerunPanel");
+      if (document.body.classList.contains("workspace-mode") && workspaceRoot) return workspaceRoot;
+      return document.querySelector(".rerun-box") || document;
+    }
+
+    function rerunTargetCheckboxes() {
+      const root = activeRerunRoot();
+      return Array.from(root.querySelectorAll("[data-rerun-target]"));
+    }
+
+    function selectedRerunTargets() {
+      return rerunTargetCheckboxes()
+        .filter((el) => !!el.checked)
+        .map((el) => String(el.getAttribute("data-rerun-target") || "").trim())
+        .filter(Boolean);
+    }
+
+    function setRerunTargets(targets) {
+      const wanted = new Set((Array.isArray(targets) ? targets : []).map((x) => String(x || "").trim()).filter(Boolean));
+      rerunTargetCheckboxes().forEach((el) => {
+        el.checked = wanted.has(String(el.getAttribute("data-rerun-target") || "").trim());
+      });
+    }
+
+    function applyRerunPreset(name) {
+      const key = String(name || "").trim();
+      if (key === "selected") return;
+      setRerunTargets(RERUN_TARGET_PRESETS[key] || []);
+    }
+
+    function setRerunStatusText(text) {
+      const msg = String(text || "");
+      if (rerunStatusEl) rerunStatusEl.textContent = msg;
+      if (workspaceRerunStatusEl) workspaceRerunStatusEl.textContent = msg;
+    }
+
+    async function runSelectedRerunAction() {
+      const targets = selectedRerunTargets();
+      if (!targets.length) {
+        setRerunStatusText("Spunta almeno un punto da ricalcolare.");
+        alert("Spunta almeno un punto da ricalcolare.");
+        return;
+      }
+      const run = selectedRunRecord();
+      const selectedInputFolder = String((run && run.input_folder) || "").trim();
+      if (targets.includes("full_pipeline")) {
+        const inputFolder = selectedInputFolder || String((document.getElementById("inputFolder") || {}).value || "").trim();
+        if (!inputFolder) {
+          setRerunStatusText("Scegli una run dallo storico o inserisci una cartella input.");
+          alert("Scegli una run dallo storico o inserisci una cartella input.");
+          return;
+        }
+        if (!confirm(`Rifare una run completa con i parametri correnti?\n\ninput=${inputFolder}`)) return;
+        setRerunStatusText("Avvio rerun completa...");
+        await startRunWithPayload(buildRunPayload(inputFolder), "rerun completa");
+        setRerunStatusText("Rerun completa avviata.");
+        return;
+      }
+
+      if (!selectedRunId) {
+        setRerunStatusText("Per ricalcolare punti specifici devi selezionare una run completata.");
+        alert("Seleziona prima una run dallo storico.");
+        return;
+      }
+      if (!confirm(`Ricalcolare sulla run selezionata questi punti?\n\n${targets.join(", ")}`)) return;
+      setRerunStatusText(`Ricalcolo: ${targets.join(", ")}...`);
+      const payload = {
+        targets,
+        force: !!(rerunForceEvidenceEl && rerunForceEvidenceEl.checked),
+        margin_pct: Number((rerunRectMarginPctEl && rerunRectMarginPctEl.value) || 5),
+        bright_thr: Number((rerunRectBrightThrEl && rerunRectBrightThrEl.value) || 70),
+        batch_size: Number(document.getElementById("batchSize").value || 32),
+        no_generated_images: !!(noGeneratedImagesEl && noGeneratedImagesEl.checked),
+        no_split_symlinks: !!(noSplitSymlinksEl && noSplitSymlinksEl.checked),
+      };
+      const out = await apiPost(`/api/runs/${encodeURIComponent(selectedRunId)}/recompute`, payload);
+      if (out.rect_vendor_compare && typeof out.rect_vendor_compare === "object" && Object.keys(out.rect_vendor_compare).length) {
+        setRectVendorCompareState(selectedRunId, {
+          status: "done",
+          payload: out.rect_vendor_compare,
+          error: "",
+          updated_at: new Date().toISOString(),
+        });
+      }
+      if (out.summary && selectedRunData && selectedRunId === out.run_id) {
+        selectedRunData.summary = out.summary;
+        renderPredictionSummary(out.summary);
+        renderFssFromSummary(out.summary);
+        renderChecksAndAnalysis();
+        renderActiveEvidenceSection(out.summary);
+        renderDecisionTreeLive(selectedRunStatus, out.summary);
+      } else if (selectedRunId) {
+        await refreshSelectedRun(true);
+      }
+      setRerunStatusText(`Ricalcolo completato: ${(out.completed_targets || targets).join(", ")}`);
+    }
+
     function renderRunsList() {
       runsListEl.innerHTML = "";
       if (!runs.length) {
@@ -10769,6 +12219,7 @@ HTML_PAGE = """<!doctype html>
           <div class="t">${run.run_id}</div>
           <div class="s">${run.input_folder || "-"}</div>
           <div class="s"><span class="status-pill ${statusClass(run.status)}">${run.status || "-"}</span> ${fmtTs(run.created_at)}</div>
+          <div class="s">tempo: ${fmtRunElapsed(run)}</div>
           <div class="run-actions">
             <button type="button" class="btn secondary mini" data-act="rerun">Rerun</button>
             <button type="button" class="btn danger mini" data-act="delete">Elimina</button>
@@ -11040,6 +12491,8 @@ HTML_PAGE = """<!doctype html>
       if (suGiuEvidenceEl) suGiuEvidenceEl.innerHTML = "";
       if (lrMarkerEvidenceEl) lrMarkerEvidenceEl.innerHTML = "";
       if (ltEvidenceEl) ltEvidenceEl.innerHTML = "";
+      if (scaleEvidenceEl) scaleEvidenceEl.innerHTML = "";
+      if (depthEvidenceEl) depthEvidenceEl.innerHTML = "";
       dupEvidenceEl.innerHTML = "";
       if (evidenceRectSideHostEl) evidenceRectSideHostEl.innerHTML = "";
       if (rawEvidenceBlockEl) rawEvidenceBlockEl.hidden = true;
@@ -11067,8 +12520,7 @@ HTML_PAGE = """<!doctype html>
       checksActionsEl.style.display = "flex";
       checksStatusEl.textContent = `Step disponibili: ${checks.length} | run_dir: ${summary.run_dir || "-"}`;
       const rawCount = Number(summary.raw_images_count || 0);
-      const dupCount = Number(summary.duplicates_removed_count_recomputed || 0);
-      evidenceStatusEl.textContent = `Raw immagini: ${rawCount} | Duplicati rimossi: ${dupCount}`;
+      evidenceStatusEl.textContent = `Immagini raw: ${rawCount}`;
       renderPredictionSummary(summary);
       renderAnalysisReviewSummary(summary);
 
@@ -11233,6 +12685,7 @@ HTML_PAGE = """<!doctype html>
         setActiveFolderTitle(document.getElementById("inputFolder").value || "");
         setHistoryFinderPath(resolveHistoryFinderPath());
         renderTimeline(null);
+        renderMonitorActivity(null);
         renderDecisionTreeLive(null, selectedRunData ? selectedRunData.summary : null);
         return;
       }
@@ -11244,6 +12697,7 @@ HTML_PAGE = """<!doctype html>
       kpiStatusEl.textContent = statusObj.status || "-";
       kpiStageEl.textContent = statusObj.stage || "-";
       kpiUpdatedEl.textContent = fmtTs(statusObj.updated_at);
+      renderMonitorActivity(statusObj);
       renderDecisionTreeLive(statusObj, selectedRunData ? selectedRunData.summary : null);
     }
 
@@ -11477,11 +12931,85 @@ HTML_PAGE = """<!doctype html>
     }
     if (startBulkBtnEl) startBulkBtnEl.addEventListener("click", startBulkAcquisitionRun);
     if (refreshBulkBtnEl) refreshBulkBtnEl.addEventListener("click", refreshBulkStatus);
+    const startFormEl = document.getElementById("startForm");
+    if (startFormEl) {
+      startFormEl.addEventListener("submit", () => {
+        syncExcludedImagesHidden();
+      });
+    }
+    if (loadExclusionsBtnEl) {
+      loadExclusionsBtnEl.addEventListener("click", async () => {
+        try {
+          await loadInputExclusions();
+        } catch (err) {
+          if (exclusionStatusEl) exclusionStatusEl.textContent = "Errore caricamento esclusioni: " + err.message;
+        }
+      });
+    }
+    if (saveExclusionsBtnEl) {
+      saveExclusionsBtnEl.addEventListener("click", async () => {
+        try {
+          await saveInputExclusions();
+        } catch (err) {
+          if (exclusionStatusEl) exclusionStatusEl.textContent = "Errore salvataggio esclusioni: " + err.message;
+        }
+      });
+    }
+    if (clearExclusionsBtnEl) clearExclusionsBtnEl.addEventListener("click", clearInputExclusions);
+    if (rerunPresetEl) rerunPresetEl.addEventListener("change", () => applyRerunPreset(rerunPresetEl.value));
+    if (rerunSelectAllBtnEl) {
+      rerunSelectAllBtnEl.addEventListener("click", () => {
+        setRerunTargets(rerunTargetCheckboxes().map((el) => el.getAttribute("data-rerun-target")));
+      });
+    }
+    if (rerunClearBtnEl) rerunClearBtnEl.addEventListener("click", () => setRerunTargets([]));
+    if (rerunOnlyOrientationBtnEl) rerunOnlyOrientationBtnEl.addEventListener("click", () => setRerunTargets(RERUN_TARGET_PRESETS.orientation));
+    if (rerunOnlyRectBtnEl) rerunOnlyRectBtnEl.addEventListener("click", () => setRerunTargets(RERUN_TARGET_PRESETS.rect));
+    document.querySelectorAll("[data-rerun-action]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const action = String(btn.getAttribute("data-rerun-action") || "");
+        if (action === "all") {
+          setRerunTargets(rerunTargetCheckboxes().map((el) => el.getAttribute("data-rerun-target")));
+          return;
+        }
+        if (action === "clear") {
+          setRerunTargets([]);
+          return;
+        }
+        if (action === "orientation") {
+          setRerunTargets(RERUN_TARGET_PRESETS.orientation);
+          return;
+        }
+        if (action === "rect") {
+          setRerunTargets(RERUN_TARGET_PRESETS.rect);
+          return;
+        }
+        if (action === "execute") {
+          try {
+            await runSelectedRerunAction();
+          } catch (err) {
+            setRerunStatusText("Errore rerun: " + err.message);
+          }
+        }
+      });
+    });
+    if (rerunSelectedBtnEl) {
+      rerunSelectedBtnEl.addEventListener("click", async () => {
+        try {
+          await runSelectedRerunAction();
+        } catch (err) {
+          setRerunStatusText("Errore rerun: " + err.message);
+        }
+      });
+    }
     const inputFolderEl = document.getElementById("inputFolder");
     if (inputFolderEl) {
       inputFolderEl.addEventListener("change", () => {
         setActiveFolderTitle(inputFolderEl.value || "");
         if (!selectedRunId) setHistoryFinderPath(resolveHistoryFinderPath());
+        inputImageRows = [];
+        if (imageExclusionListEl) imageExclusionListEl.innerHTML = "";
+        syncExcludedImagesHidden();
       });
       inputFolderEl.addEventListener("blur", () => {
         setActiveFolderTitle(inputFolderEl.value || "");
@@ -11554,6 +13082,19 @@ HTML_PAGE = """<!doctype html>
     window.addEventListener("blur", hideFssTooltip);
     window.addEventListener("scroll", hideFssTooltip, true);
     document.addEventListener("click", (ev) => {
+      const rawActionBtn = findActionTarget(ev, "[data-raw-exclusion-action]");
+      if (rawActionBtn) {
+        ev.preventDefault();
+        const action = String(rawActionBtn.getAttribute("data-raw-exclusion-action") || "").trim();
+        if (action === "save") {
+          saveRawExclusions().catch((err) => {
+            if (rawExclusionStatusEl) rawExclusionStatusEl.textContent = "Errore salvataggio esclusioni: " + err.message;
+          });
+        } else if (action === "clear") {
+          clearRawExclusions();
+        }
+        return;
+      }
       const galleryBtn = findActionTarget(ev, '[data-open-evidence-gallery]');
       if (galleryBtn) {
         ev.preventDefault();
@@ -11924,6 +13465,77 @@ BROWSE_PAGE = """<!doctype html>
 """
 
 
+def _parse_iso_dt(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _format_elapsed(seconds: float) -> str:
+    total = max(0, int(round(float(seconds))))
+    if total < 60:
+        return f"{total}s"
+    minutes, sec = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {sec:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h {minutes:02d}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}g {hours:02d}h"
+
+
+def _run_duration_payload(*, row: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+    status = str((state or {}).get("status") or (row or {}).get("status") or "").strip()
+    started_at = (
+        (state or {}).get("started_at")
+        or (row or {}).get("started_at")
+        or (row or {}).get("created_at")
+    )
+    finished_at = (
+        (state or {}).get("finished_at")
+        or (row or {}).get("finished_at")
+    )
+    start_dt = _parse_iso_dt(started_at)
+    end_dt = _parse_iso_dt(finished_at)
+    running = status in {"queued", "running"} and start_dt is not None and end_dt is None
+    if start_dt is None:
+        return {
+            "elapsed_seconds": None,
+            "elapsed_text": "-",
+            "started_at": str(started_at or ""),
+            "finished_at": str(finished_at or ""),
+        }
+    if end_dt is None:
+        end_dt = datetime.now(timezone.utc) if running else _parse_iso_dt((state or {}).get("updated_at"))
+    if end_dt is None:
+        return {
+            "elapsed_seconds": None,
+            "elapsed_text": "-",
+            "started_at": str(started_at or ""),
+            "finished_at": str(finished_at or ""),
+        }
+    elapsed = max(0.0, (end_dt - start_dt).total_seconds())
+    text = _format_elapsed(elapsed)
+    if running:
+        text = f"{text} in corso"
+    return {
+        "elapsed_seconds": float(elapsed),
+        "elapsed_text": text,
+        "started_at": str(started_at or ""),
+        "finished_at": str(finished_at or ""),
+    }
+
+
 class WorkbenchStore:
     def __init__(self, data_root: Path) -> None:
         self.data_root = data_root
@@ -11950,7 +13562,15 @@ class WorkbenchStore:
             runs = data.get("runs", [])
             if not isinstance(runs, list):
                 return []
-            return list(runs)
+            out: List[Dict[str, Any]] = []
+            for row_raw in runs:
+                row = dict(row_raw) if isinstance(row_raw, dict) else {}
+                run_id = str(row.get("run_id", "") or "").strip()
+                state = self.load_state(run_id) if run_id else {}
+                duration = _run_duration_payload(row=row, state=state)
+                row.update(duration)
+                out.append(row)
+            return out
 
     def create_run_record(self, record: Dict[str, Any]) -> None:
         with self.lock:
@@ -12519,6 +14139,364 @@ def _ensure_line13_template_crop(summary: Dict[str, Any], run_dir: Path) -> None
         return
 
 
+def _lr_marker_evidence_truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    try:
+        return bool(int(value))
+    except Exception:
+        return bool(value)
+
+
+def _recompute_line16_from_lr_marker_evidence(summary: Dict[str, Any], evidence: Dict[str, Any]) -> None:
+    items = evidence.get("items", [])
+    if not isinstance(items, list):
+        return
+    rec = summary.get("recognition_evidence", {})
+    if not isinstance(rec, dict):
+        rec = {}
+    model = rec.get("model_evidence", {})
+    if not isinstance(model, dict):
+        model = {}
+    row = summary.get("pipeline_row", {})
+    if not isinstance(row, dict):
+        row = {}
+
+    min_score = max(0.62, _safe_float(model.get("lr_marker_min_match_score"), 0.62))
+    target_w = _safe_int(row.get("line_09_video_x_size") or row.get("line_07_video_input_size_x"), 0)
+    target_h = _safe_int(row.get("line_10_video_y_size") or row.get("line_08_video_input_size_y"), 0)
+    order = ("NF", "LR", "UD", "LRUD")
+    groups: Dict[str, Dict[str, Any]] = {
+        key: {"top": None, "left": None, "bottom": None, "right": None, "boxes": 0}
+        for key in order
+    }
+    boxes_count = 0
+    for item_raw in items:
+        item = dict(item_raw) if isinstance(item_raw, dict) else {}
+        group_key = str(item.get("quadrant_group", "") or "").strip().upper()
+        if group_key not in groups:
+            continue
+        if str(item.get("quadrant_status", "") or "").strip().lower() == "invalid":
+            continue
+        if str(item.get("quadrant_valid", "") or "").strip() and not _lr_marker_evidence_truthy(item.get("quadrant_valid")):
+            continue
+        score = _safe_float(item.get("match_score"), 0.0)
+        if score < min_score:
+            continue
+        if str(item.get("search_strategy", "") or "") == "spatial_consensus_forced":
+            continue
+        review_reason = str(item.get("review_reason", "") or "")
+        if _lr_marker_evidence_truthy(item.get("match_patch_is_blank")) or "blank_marker_match" in review_reason.split(";"):
+            continue
+        image_w = _safe_int(item.get("image_width"), 0)
+        image_h = _safe_int(item.get("image_height"), 0)
+        if target_w > 0 and target_h > 0 and image_w > 0 and image_h > 0 and (image_w != target_w or image_h != target_h):
+            continue
+        top = _safe_int(item.get("marker_top_abs"), 0)
+        left = _safe_int(item.get("marker_left_abs"), 0)
+        bottom = _safe_int(item.get("marker_bottom_abs"), 0)
+        right = _safe_int(item.get("marker_right_abs"), 0)
+        if bottom <= top or right <= left:
+            continue
+        env = groups[group_key]
+        env["top"] = top if env["top"] is None else min(int(env["top"]), top)
+        env["left"] = left if env["left"] is None else min(int(env["left"]), left)
+        env["bottom"] = bottom if env["bottom"] is None else max(int(env["bottom"]), bottom)
+        env["right"] = right if env["right"] is None else max(int(env["right"]), right)
+        env["boxes"] = int(env["boxes"]) + 1
+        boxes_count += 1
+
+    groups_json = json.dumps(
+        {
+            "min_match_score": float(min_score),
+            "target_image_width": int(target_w or 0),
+            "target_image_height": int(target_h or 0),
+            "grouping": "quadrant_marker_sugiu",
+            "groups": groups,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    if any(int(groups[key]["boxes"]) <= 0 for key in order):
+        line16 = ""
+        source = "lr_marker_quadrant_envelope_missing_groups"
+    else:
+        line16 = "".join(
+            f"{int(groups[key]['top'])}|{int(groups[key]['left'])}|{int(groups[key]['bottom'])}|{int(groups[key]['right'])}|"
+            "1|0:0.000000:0:0:0:0:0|0|;"
+            for key in order
+        )
+        source = "lr_marker_quadrant_orientation_envelopes_pending_thresholds"
+    row["line_16_rect_orientation"] = line16
+    row["line_16_source"] = source
+    row["line_16_marker_boxes_count"] = int(boxes_count)
+    row["line_16_groups_json"] = groups_json
+    summary["pipeline_row"] = row
+
+
+def _refresh_lr_marker_evidence_from_csv(summary: Dict[str, Any], run_dir: Path) -> None:
+    if not isinstance(summary, dict):
+        return
+    csv_path = run_dir / "pipeline_output" / "lr_marker_per_image_predictions.csv"
+    if not csv_path.is_file():
+        return
+    try:
+        evidence = _runner_build_lr_marker_per_image_evidence(
+            run_dir=run_dir,
+            pipeline_output=run_dir / "pipeline_output",
+        )
+    except Exception:
+        return
+    if not isinstance(evidence, dict) or not bool(evidence.get("available", False)):
+        return
+    rec = summary.get("recognition_evidence", {})
+    if not isinstance(rec, dict):
+        rec = {}
+    rec["lr_marker_per_image"] = evidence
+    summary["recognition_evidence"] = rec
+    _recompute_line16_from_lr_marker_evidence(summary, evidence)
+
+
+def _pipeline_output_dir_for_summary(summary: Dict[str, Any], run_dir: Path) -> Path:
+    path_txt = str(summary.get("pipeline_output_dir", "") or "").strip() if isinstance(summary, dict) else ""
+    if path_txt:
+        p = Path(path_txt).expanduser()
+        if not p.is_absolute():
+            p = run_dir / p
+        if p.is_dir():
+            return p
+    return run_dir / "pipeline_output"
+
+
+def _row_as_str_dict(summary: Dict[str, Any]) -> Dict[str, str]:
+    row = summary.get("pipeline_row", {}) if isinstance(summary, dict) else {}
+    if not isinstance(row, dict):
+        row = {}
+    return {str(k): str(v) for k, v in row.items()}
+
+
+def _input_copy_folder_for_summary(summary: Dict[str, Any], run_dir: Path) -> Path:
+    for key in ("input_copy_folder", "input_reference_folder", "input_folder"):
+        txt = str(summary.get(key, "") or "").strip() if isinstance(summary, dict) else ""
+        if not txt:
+            continue
+        p = Path(txt).expanduser()
+        if not p.is_absolute():
+            p = run_dir / p
+        if p.exists():
+            return p
+    candidate = run_dir / "input"
+    return candidate if candidate.exists() else run_dir
+
+
+def _recompute_run_targets(
+    *,
+    run_dir: Path,
+    summary: Dict[str, Any],
+    targets: List[str],
+    payload: Dict[str, Any],
+    python_bin: str,
+) -> Dict[str, Any]:
+    allowed = {
+        "rect_red",
+        "rect_per_image",
+        "rect_compare",
+        "su_giu",
+        "su_giu_split",
+        "lr_marker",
+        "line16",
+        "lt",
+        "lt_split",
+        "line13",
+    }
+    normalized: List[str] = []
+    for target in targets:
+        t = str(target or "").strip().lower()
+        if t == "orientation":
+            for item in ("su_giu", "lr_marker"):
+                if item not in normalized:
+                    normalized.append(item)
+            continue
+        if t == "rect":
+            for item in ("rect_red", "rect_per_image", "rect_compare"):
+                if item not in normalized:
+                    normalized.append(item)
+            continue
+        if t == "all_evidence":
+            for item in ("rect_red", "rect_per_image", "rect_compare", "su_giu", "lr_marker", "lt", "line13"):
+                if item not in normalized:
+                    normalized.append(item)
+            continue
+        if t in allowed and t not in normalized:
+            normalized.append(t)
+    if not normalized:
+        raise RuntimeError("nessun target ricalcolabile selezionato")
+
+    pipeline_output = _pipeline_output_dir_for_summary(summary, run_dir)
+    rec = summary.get("recognition_evidence", {})
+    if not isinstance(rec, dict):
+        rec = {}
+    model = rec.get("model_evidence", {})
+    if not isinstance(model, dict):
+        model = {}
+    row_obj = summary.get("pipeline_row", {})
+    if not isinstance(row_obj, dict):
+        row_obj = {}
+    results: Dict[str, Any] = {}
+    completed: List[str] = []
+    errors: Dict[str, str] = {}
+    generate_images = not bool(payload.get("no_generated_images", False))
+    no_split_symlinks = bool(payload.get("no_split_symlinks", False))
+
+    def _remember_error(target: str, exc: Exception) -> None:
+        errors[target] = str(exc)
+
+    if "rect_red" in normalized:
+        try:
+            out = _build_rect_red_recompute_payload(
+                run_dir=run_dir,
+                summary=summary,
+                margin_pct=_safe_float(payload.get("margin_pct"), 5.0),
+                bright_thr=_safe_float(payload.get("bright_thr"), 70.0),
+            )
+            if isinstance(out.get("rect_red_evidence"), dict):
+                rec["rect_red"] = out["rect_red_evidence"]
+            if out.get("line11_text"):
+                row_obj["line_11_rect_echo"] = str(out.get("line11_text", ""))
+            for key_out, key_row in (
+                ("line11_top", "line_11_top"),
+                ("line11_left", "line_11_left"),
+                ("line11_bottom", "line_11_bottom"),
+                ("line11_right", "line_11_right"),
+            ):
+                if str(out.get(key_out, "") or "").strip():
+                    row_obj[key_row] = str(out.get(key_out, ""))
+            row_obj["line_11_method"] = "segment_top_red_rect"
+            row_obj["line_11_rect_red_margin_pct"] = f"{_safe_float(out.get('margin_pct'), 0.0):.4f}"
+            row_obj["line_11_rect_red_winner_group"] = str(out.get("line11_winner_group", "") or "")
+            results["rect_red"] = out
+            completed.append("rect_red")
+        except Exception as exc:
+            _remember_error("rect_red", exc)
+
+    if "rect_per_image" in normalized:
+        try:
+            image_root = _input_copy_folder_for_summary(summary, run_dir)
+            images = _runner_collect_acquisition_images(image_root)
+            rect_per = _runner_build_rect_per_image_evidence(
+                run_dir=run_dir,
+                row={str(k): str(v) for k, v in row_obj.items()},
+                unique_images=images,
+                acquisition_images=images,
+                batch_size=_safe_int(payload.get("batch_size"), 32),
+                rotation_deg_clockwise=_safe_int(row_obj.get("rotation_deg_clockwise"), 0),
+                python_bin=python_bin,
+                generate_images=generate_images,
+            )
+            rec["rect_per_image"] = rect_per
+            results["rect_per_image"] = {"available": bool(rect_per.get("available", False)), "items": rect_per.get("images_total", 0)}
+            completed.append("rect_per_image")
+        except Exception as exc:
+            _remember_error("rect_per_image", exc)
+
+    if "rect_compare" in normalized:
+        try:
+            compare_json = run_dir / "analysis" / "rect_vendor_compare" / "rect_vendor_compare.json"
+            if bool(payload.get("force", False)) and compare_json.is_file():
+                compare_json.unlink()
+            if compare_json.is_file() and not bool(payload.get("force", False)):
+                compare = json.loads(compare_json.read_text(encoding="utf-8"))
+                if isinstance(compare, dict):
+                    compare["cached"] = True
+                else:
+                    compare = {}
+            else:
+                compare = _build_rect_vendor_compare_payload(
+                    run_dir=run_dir,
+                    summary=summary,
+                    python_bin=python_bin,
+                )
+                compare["cached"] = False
+                compare_json.parent.mkdir(parents=True, exist_ok=True)
+                compare_json.write_text(json.dumps(compare, ensure_ascii=False, indent=2), encoding="utf-8")
+            results["rect_compare"] = compare
+            completed.append("rect_compare")
+        except Exception as exc:
+            _remember_error("rect_compare", exc)
+
+    if "su_giu" in normalized or "su_giu_split" in normalized:
+        try:
+            su_giu = _runner_build_su_giu_per_image_evidence(run_dir=run_dir, pipeline_output=pipeline_output)
+            rec["su_giu_per_image"] = su_giu
+            if (not no_split_symlinks) and (bool(su_giu.get("available", False))):
+                rec["su_giu_split_folders"] = _runner_build_su_giu_split_folders(
+                    run_dir=run_dir,
+                    su_giu_per_image_evidence=su_giu,
+                )
+            results["su_giu"] = {"available": bool(su_giu.get("available", False)), "items": su_giu.get("images_total", 0)}
+            completed.append("su_giu")
+        except Exception as exc:
+            _remember_error("su_giu", exc)
+
+    if "lr_marker" in normalized or "line16" in normalized:
+        try:
+            lr_marker = _runner_build_lr_marker_per_image_evidence(run_dir=run_dir, pipeline_output=pipeline_output)
+            rec["lr_marker_per_image"] = lr_marker
+            summary["recognition_evidence"] = rec
+            summary["pipeline_row"] = row_obj
+            _recompute_line16_from_lr_marker_evidence(summary, lr_marker)
+            row_obj = summary.get("pipeline_row", row_obj) if isinstance(summary.get("pipeline_row"), dict) else row_obj
+            results["lr_marker"] = {
+                "available": bool(lr_marker.get("available", False)),
+                "items": lr_marker.get("images_total", 0),
+                "quadrant_counts": lr_marker.get("quadrant_counts", {}),
+                "line16": row_obj.get("line_16_rect_orientation", ""),
+            }
+            completed.append("lr_marker")
+        except Exception as exc:
+            _remember_error("lr_marker", exc)
+
+    if "lt" in normalized or "lt_split" in normalized:
+        try:
+            lt = _runner_build_lt_per_image_evidence(run_dir=run_dir, pipeline_output=pipeline_output)
+            rec["lt_per_image"] = lt
+            if (not no_split_symlinks) and bool(lt.get("available", False)):
+                rec["lt_split_folders"] = _runner_build_lt_split_folders(
+                    run_dir=run_dir,
+                    lt_per_image_evidence=lt,
+                )
+            results["lt"] = {"available": bool(lt.get("available", False)), "items": lt.get("images_total", 0)}
+            completed.append("lt")
+        except Exception as exc:
+            _remember_error("lt", exc)
+
+    summary["recognition_evidence"] = rec
+    summary["pipeline_row"] = row_obj
+    if "line13" in normalized:
+        try:
+            _ensure_line13_template_crop(summary, run_dir)
+            results["line13"] = {"available": True}
+            completed.append("line13")
+        except Exception as exc:
+            _remember_error("line13", exc)
+
+    recompute_log = summary.get("manual_recompute_log", [])
+    if not isinstance(recompute_log, list):
+        recompute_log = []
+    recompute_log.append(
+        {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "targets": normalized,
+            "completed": completed,
+            "errors": errors,
+        }
+    )
+    summary["manual_recompute_log"] = recompute_log[-50:]
+    if errors and not completed:
+        raise RuntimeError("; ".join(f"{k}: {v}" for k, v in errors.items()))
+    return {"completed": completed, "errors": errors, "results": results}
+
+
 def _build_rect_vendor_compare_payload(
     *,
     run_dir: Path,
@@ -12995,6 +14973,7 @@ def _run_safe_runner(
     lr_marker_template_policy: str,
     no_generated_images: bool = False,
     no_split_symlinks: bool = False,
+    excluded_images_rel: Optional[List[str]] = None,
 ) -> None:
     run_dir = store.run_dir(run_id)
     safe_runner = (SCRIPT_DIR / "run_pipeline_single_folder_safe.py").resolve()
@@ -13030,6 +15009,22 @@ def _run_safe_runner(
         "--lr-marker-template-policy",
         str(lr_marker_template_policy),
     ]
+    excluded_images = [str(x).strip() for x in (excluded_images_rel or []) if str(x).strip()]
+    if excluded_images:
+        exclude_path = run_dir / "excluded_images.json"
+        exclude_path.write_text(
+            json.dumps(
+                {
+                    "input_folder": input_folder.as_posix(),
+                    "excluded_images_rel": excluded_images,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        cmd.extend(["--exclude-images-file", exclude_path.as_posix()])
     if bool(no_generated_images):
         cmd.append("--no-generated-images")
     if bool(no_split_symlinks):
@@ -13043,6 +15038,8 @@ def _run_safe_runner(
             "run_id": run_id,
             "run_dir": run_dir.as_posix(),
             "input_folder": input_folder.as_posix(),
+            "excluded_images_rel": excluded_images,
+            "excluded_images_count": int(len(excluded_images)),
             "started_at": datetime.now(timezone.utc).isoformat(),
             "command": " ".join(cmd),
             "events": [],
@@ -13052,7 +15049,10 @@ def _run_safe_runner(
         }
     )
     store.save_state(run_id, state)
-    store.update_run_record(run_id, {"status": "running", "run_dir": run_dir.as_posix()})
+    store.update_run_record(
+        run_id,
+        {"status": "running", "run_dir": run_dir.as_posix(), "started_at": str(state.get("started_at", "") or "")},
+    )
 
     proc = subprocess.Popen(
         cmd,
@@ -13088,12 +15088,18 @@ def _run_safe_runner(
     if int(proc.returncode) == 0:
         state["status"] = "completed"
         state["stage"] = "run_completed"
-        store.update_run_record(run_id, {"status": "completed", "run_dir": run_dir.as_posix()})
+        store.update_run_record(
+            run_id,
+            {"status": "completed", "run_dir": run_dir.as_posix(), "finished_at": str(state.get("finished_at", "") or "")},
+        )
     else:
         state["status"] = "failed"
         state["stage"] = "failed"
         state["error"] = f"safe_runner_returncode_{proc.returncode}"
-        store.update_run_record(run_id, {"status": "failed", "run_dir": run_dir.as_posix()})
+        store.update_run_record(
+            run_id,
+            {"status": "failed", "run_dir": run_dir.as_posix(), "finished_at": str(state.get("finished_at", "") or "")},
+        )
     try:
         store.save_state(run_id, state)
     except Exception as exc:
@@ -13152,6 +15158,91 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
     fss_template_lines = _load_fss_template_lines(fss_template_path_obj, max_lines=40)
     models_metrics_csv_obj = _pick_models_metrics_csv_path(models_metrics_csv)
     encoding_struct_catalog = _load_encoding_struct_fss_catalog(_pick_encoding_struct_xlsx_path())
+    exclusions_memory_path = data_root / "folder_image_exclusions.json"
+
+    def _read_exclusions_memory() -> Dict[str, Any]:
+        if not exclusions_memory_path.is_file():
+            return {"version": 1, "folders": {}}
+        try:
+            payload = json.loads(exclusions_memory_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {"version": 1, "folders": {}}
+        if not isinstance(payload, dict):
+            return {"version": 1, "folders": {}}
+        folders = payload.get("folders", {})
+        if not isinstance(folders, dict):
+            folders = {}
+        payload["folders"] = folders
+        payload["version"] = int(payload.get("version", 1) or 1)
+        return payload
+
+    def _write_exclusions_memory(payload: Dict[str, Any]) -> None:
+        exclusions_memory_path.parent.mkdir(parents=True, exist_ok=True)
+        exclusions_memory_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _folder_memory_key(folder: Path) -> str:
+        try:
+            return folder.expanduser().resolve().as_posix()
+        except Exception:
+            return folder.expanduser().as_posix()
+
+    def _normalize_exclusion_items(raw_items: Any, input_folder: Path) -> List[str]:
+        if isinstance(raw_items, str):
+            txt = raw_items.strip()
+            if not txt:
+                items: Any = []
+            else:
+                try:
+                    items = json.loads(txt)
+                except Exception:
+                    items = [line.strip() for line in txt.splitlines() if line.strip()]
+        else:
+            items = raw_items
+        if isinstance(items, dict):
+            items = items.get("excluded_images_rel", items.get("excluded", []))
+        if not isinstance(items, list):
+            return []
+        out: List[str] = []
+        seen = set()
+        for item in items:
+            rel_txt = str(item or "").strip()
+            if not rel_txt:
+                continue
+            try:
+                p = Path(rel_txt).expanduser()
+                if p.is_absolute():
+                    rel_txt = p.resolve().relative_to(input_folder).as_posix()
+            except Exception:
+                rel_txt = rel_txt.replace("\\", "/")
+            rel_txt = rel_txt.replace("\\", "/").lstrip("/")
+            if not rel_txt or rel_txt.startswith("../") or "/../" in rel_txt:
+                continue
+            if rel_txt not in seen:
+                seen.add(rel_txt)
+                out.append(rel_txt)
+        return out
+
+    def _load_saved_exclusions(input_folder: Path) -> List[str]:
+        memory = _read_exclusions_memory()
+        entry = memory.get("folders", {}).get(_folder_memory_key(input_folder), {})
+        if not isinstance(entry, dict):
+            return []
+        return _normalize_exclusion_items(entry.get("excluded_images_rel", []), input_folder)
+
+    def _save_exclusions(input_folder: Path, excluded_images_rel: List[str]) -> Dict[str, Any]:
+        memory = _read_exclusions_memory()
+        folders = memory.setdefault("folders", {})
+        if not isinstance(folders, dict):
+            folders = {}
+            memory["folders"] = folders
+        key = _folder_memory_key(input_folder)
+        folders[key] = {
+            "input_folder": key,
+            "excluded_images_rel": _normalize_exclusion_items(excluded_images_rel, input_folder),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _write_exclusions_memory(memory)
+        return folders[key]
 
     def _start_run_common(payload: Dict[str, Any]) -> Dict[str, Any]:
         input_folder_raw = str(payload.get("input_folder", "")).strip()
@@ -13163,6 +15254,15 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
         lr_marker_template_policy = str(payload.get("lr_marker_template_policy", "historical_best_then_derived")).strip()
         if lr_marker_template_policy not in {"historical_best_then_derived", "historical_best", "derived_folder"}:
             lr_marker_template_policy = "historical_best_then_derived"
+        excluded_json_raw = str(payload.get("excluded_images_rel_json", "") or "").strip()
+        if "excluded_images_rel" in payload:
+            excluded_images_rel = _normalize_exclusion_items(payload.get("excluded_images_rel"), input_folder)
+        elif "excluded_images_rel_json" in payload and excluded_json_raw not in {"", "__use_saved__"}:
+            excluded_images_rel = _normalize_exclusion_items(payload.get("excluded_images_rel_json"), input_folder)
+        else:
+            excluded_images_rel = _load_saved_exclusions(input_folder)
+        if bool(payload.get("remember_exclusions", True)):
+            _save_exclusions(input_folder, excluded_images_rel)
 
         run_id = "run_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
         run_dir = store.run_dir(run_id)
@@ -13171,6 +15271,7 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
         record = {
             "run_id": run_id,
             "input_folder": input_folder.as_posix(),
+            "excluded_images_count": int(len(excluded_images_rel)),
             "status": "queued",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "run_dir": run_dir.as_posix(),
@@ -13180,6 +15281,8 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
         init_state = {
             "run_id": run_id,
             "input_folder": input_folder.as_posix(),
+            "excluded_images_rel": excluded_images_rel,
+            "excluded_images_count": int(len(excluded_images_rel)),
             "run_dir": run_dir.as_posix(),
             "status": "queued",
             "stage": "queued",
@@ -13207,6 +15310,7 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
                 "lr_marker_template_policy": lr_marker_template_policy,
                 "no_generated_images": bool(payload.get("no_generated_images", False)),
                 "no_split_symlinks": bool(payload.get("no_split_symlinks", False)),
+                "excluded_images_rel": excluded_images_rel,
             },
             daemon=True,
         )
@@ -13309,6 +15413,7 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
                     lr_marker_template_policy=lr_policy,
                     no_generated_images=True,
                     no_split_symlinks=True,
+                    excluded_images_rel=_load_saved_exclusions(folder),
                 )
                 run_state = store.load_state(run_id)
                 with batch_lock:
@@ -13420,7 +15525,7 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
                 dup_count = int(summary_obj.get("duplicates_removed_count_recomputed", 0) or 0)
                 fallback_raw_images_count = raw_count
                 fallback_duplicates_removed_count = dup_count
-                fallback_evidence_status = f"Raw immagini: {raw_count} | Duplicati rimossi: {dup_count}"
+                fallback_evidence_status = f"Immagini raw: {raw_count}"
                 row_obj = summary_obj.get("pipeline_row", {})
                 if isinstance(row_obj, dict):
                     fallback_line11_rect = str(row_obj.get("line_11_rect_echo", "") or "")
@@ -13659,6 +15764,71 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
             return jsonify({"error": str(out.get("error", "impossibile aprire il file manager"))}), 400
         return jsonify(out)
 
+    @app.post("/api/input/images")
+    def api_input_images():
+        payload = request.get_json(silent=True) or {}
+        folder_raw = str(payload.get("input_folder", "")).strip()
+        if not folder_raw:
+            return jsonify({"error": "input_folder mancante"}), 400
+        folder = Path(folder_raw).expanduser().resolve()
+        if not folder.is_dir():
+            return jsonify({"error": f"input_folder non valida: {folder.as_posix()}"}), 400
+        saved = set(_load_saved_exclusions(folder))
+        images = []
+        try:
+            paths = _runner_collect_acquisition_images(folder)
+        except Exception as exc:
+            return jsonify({"error": f"errore lettura immagini: {exc}"}), 500
+        for idx, path in enumerate(paths):
+            try:
+                rel = path.relative_to(folder).as_posix()
+            except Exception:
+                rel = path.name
+            try:
+                size = int(path.stat().st_size)
+            except Exception:
+                size = 0
+            images.append(
+                {
+                    "idx": idx,
+                    "rel": rel,
+                    "name": path.name,
+                    "size_bytes": size,
+                    "excluded": rel in saved,
+                }
+            )
+        return jsonify(
+            {
+                "ok": True,
+                "input_folder": folder.as_posix(),
+                "images": images,
+                "count": int(len(images)),
+                "excluded_images_rel": sorted(saved),
+                "memory_path": exclusions_memory_path.as_posix(),
+            }
+        )
+
+    @app.post("/api/input/exclusions")
+    def api_input_exclusions_save():
+        payload = request.get_json(silent=True) or {}
+        folder_raw = str(payload.get("input_folder", "")).strip()
+        if not folder_raw:
+            return jsonify({"error": "input_folder mancante"}), 400
+        folder = Path(folder_raw).expanduser().resolve()
+        if not folder.is_dir():
+            return jsonify({"error": f"input_folder non valida: {folder.as_posix()}"}), 400
+        excluded = _normalize_exclusion_items(payload.get("excluded_images_rel", []), folder)
+        saved = _save_exclusions(folder, excluded)
+        return jsonify(
+            {
+                "ok": True,
+                "input_folder": folder.as_posix(),
+                "excluded_images_rel": saved.get("excluded_images_rel", []),
+                "excluded_count": len(saved.get("excluded_images_rel", [])),
+                "memory_path": exclusions_memory_path.as_posix(),
+            }
+        )
+
     @app.get("/api/runs")
     def api_runs():
         store.prune_missing_run_records()
@@ -13773,6 +15943,7 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
             except Exception:
                 summary = {}
         _ensure_line13_template_crop(summary, run_dir)
+        _refresh_lr_marker_evidence_from_csv(summary, run_dir)
         annotations_path = store.annotations_path(run_id)
         if annotations_path.exists():
             try:
@@ -13789,6 +15960,85 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
                 "annotations": annotations,
                 "fss_template_path": fss_template_path,
                 "fss_template_lines": fss_template_lines,
+            }
+        )
+
+    @app.post("/api/runs/<run_id>/recompute")
+    def api_run_recompute(run_id: str):
+        run_dir = store.run_dir(run_id)
+        if not run_dir.exists():
+            return jsonify({"error": f"run non trovata: {run_id}"}), 404
+        summary_path = run_dir / "step_checks.json"
+        if not summary_path.exists():
+            return jsonify({"error": "step_checks.json non trovato"}), 404
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return jsonify({"error": f"step_checks.json non valido: {exc}"}), 500
+        if not isinstance(summary, dict):
+            return jsonify({"error": "summary non valido"}), 500
+
+        payload = request.get_json(silent=True) or {}
+        raw_targets = payload.get("targets", [])
+        if isinstance(raw_targets, str):
+            raw_targets = [part.strip() for part in raw_targets.split(",") if part.strip()]
+        if not isinstance(raw_targets, list):
+            return jsonify({"error": "targets deve essere una lista"}), 400
+        targets = [str(x or "").strip() for x in raw_targets if str(x or "").strip()]
+        if not targets:
+            return jsonify({"error": "nessun target selezionato"}), 400
+
+        backup_dir = run_dir / "analysis" / "manual_recompute"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"step_checks_before_{stamp}.json"
+        try:
+            if not backup_path.exists():
+                backup_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+        started = time.time()
+        try:
+            recompute = _recompute_run_targets(
+                run_dir=run_dir,
+                summary=summary,
+                targets=targets,
+                payload=payload if isinstance(payload, dict) else {},
+                python_bin=python_bin,
+            )
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        summary["manual_recompute_updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            return jsonify({"error": f"ricalcolo completato ma salvataggio summary fallito: {exc}"}), 500
+        state = store.load_state(run_id)
+        logs = state.get("logs", [])
+        if not isinstance(logs, list):
+            logs = []
+        logs.append(
+            f"[{datetime.now(timezone.utc).isoformat()}] manual_recompute targets={','.join(targets)} completed={','.join(recompute.get('completed', []))}"
+        )
+        state["logs"] = logs[-1200:]
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            store.save_state(run_id, state)
+        except Exception:
+            pass
+        return jsonify(
+            {
+                "ok": True,
+                "run_id": run_id,
+                "requested_targets": targets,
+                "completed_targets": recompute.get("completed", []),
+                "errors": recompute.get("errors", {}),
+                "results": recompute.get("results", {}),
+                "rect_vendor_compare": recompute.get("results", {}).get("rect_compare", {}),
+                "elapsed_sec": float(max(0.0, time.time() - started)),
+                "backup_path": backup_path.as_posix(),
+                "summary": summary,
             }
         )
 
