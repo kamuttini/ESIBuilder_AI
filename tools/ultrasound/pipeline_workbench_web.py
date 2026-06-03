@@ -8715,7 +8715,7 @@ HTML_PAGE = """<!doctype html>
           summary.pipeline_row.line_11_rect_red_margin_pct = String(formatNum(out.margin_pct, 4));
           summary.pipeline_row.line_11_rect_red_winner_group = String(out.line11_winner_group || "");
           renderPredictionSummary(summary);
-          renderFssFromSummary(summary);
+          renderFssPreview(summary);
           renderActiveEvidenceSection(summary);
         }
       } catch (err) {
@@ -12508,7 +12508,7 @@ HTML_PAGE = """<!doctype html>
       if (out.summary && selectedRunData && selectedRunId === out.run_id) {
         selectedRunData.summary = out.summary;
         renderPredictionSummary(out.summary);
-        renderFssFromSummary(out.summary);
+        renderFssPreview(out.summary);
         renderChecksAndAnalysis();
         renderActiveEvidenceSection(out.summary);
         renderDecisionTreeLive(selectedRunStatus, out.summary);

@@ -97,6 +97,9 @@ RECT_NAME_ECHO_PREFIX_RE = re.compile(r"^\s*(\d+)\|(\d+)\|(\d+)\|(\d+)\|")
 LINE13_DISABLED_TAIL = "0|0:0.000000:0:0:0:0:0|0|"
 LINE16_PENDING_MATCH_TAIL = "1|0:0.000000:0:0:0:0:0|0|"
 LR_MARKER_RELIABLE_MATCH_SCORE = 0.62
+LR_MARKER_MIN_TEXTURE_STD = 3.0
+LR_MARKER_MIN_HISTORICAL_TEMPLATE_AREA = 256
+LR_MARKER_MIN_HISTORICAL_TEMPLATE_SHORT_SIDE = 12
 # Expected acquisition filename pattern: timestamp_<vga|hdmi>_<WxH>[...]
 CAPTURE_FILENAME_PATTERN_RE = re.compile(
     r"^.+_(vga|hdmi)_(\d{3,5})[xX](\d{3,5})(?:[_\-].*)?$",
@@ -1650,6 +1653,106 @@ def _lr_marker_truthy_flag(value: object) -> bool:
         return bool(value)
 
 
+def _lr_marker_row_source_orientation_group(row: Dict[str, object]) -> str:
+    return _infer_lr_marker_orientation_group(str(row.get("image_path", "") or ""))
+
+
+def _lr_marker_row_has_textured_match(row: Dict[str, object]) -> bool:
+    if _lr_marker_truthy_flag(row.get("match_patch_is_blank", False)):
+        return False
+    try:
+        return float(row.get("match_patch_std", 0.0) or 0.0) >= float(LR_MARKER_MIN_TEXTURE_STD)
+    except (TypeError, ValueError):
+        return False
+
+
+def _lr_marker_template_size(template: object) -> Tuple[int, int]:
+    try:
+        width = int(getattr(template, "width", 0) or 0)
+        height = int(getattr(template, "height", 0) or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+    return max(0, width), max(0, height)
+
+
+def _lr_marker_preferred_historical_templates(templates: Sequence[object]) -> List[object]:
+    items = list(templates)
+    preferred: List[object] = []
+    for template in items:
+        width, height = _lr_marker_template_size(template)
+        if (
+            width * height >= int(LR_MARKER_MIN_HISTORICAL_TEMPLATE_AREA)
+            and min(width, height) >= int(LR_MARKER_MIN_HISTORICAL_TEMPLATE_SHORT_SIDE)
+        ):
+            preferred.append(template)
+    return preferred or items
+
+
+def _lr_marker_expected_label_for_orientation_group(group: str) -> str:
+    group_norm = str(group or "").strip().upper()
+    if group_norm in {"NF", "UD"}:
+        return "not_lr_flipped"
+    if group_norm in {"LR", "LRUD"}:
+        return "lr_flipped"
+    return ""
+
+
+def _lr_marker_expected_label_for_source_row(row: Dict[str, object]) -> str:
+    return _lr_marker_expected_label_for_orientation_group(_lr_marker_row_source_orientation_group(row))
+
+
+def _lr_marker_row_template_area(row: Dict[str, object]) -> int:
+    try:
+        width = int(row.get("template_width", 0) or 0)
+        height = int(row.get("template_height", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, width) * max(0, height)
+
+
+def _select_lr_marker_folder_template_candidate(rows: Sequence[Dict[str, object]]) -> Dict[str, object]:
+    grouped: Dict[str, List[Dict[str, object]]] = {}
+    for row in rows:
+        path = str(row.get("template_path", "") or "").strip()
+        if not path:
+            continue
+        grouped.setdefault(path, []).append(dict(row))
+    if not grouped:
+        return max(rows, key=lambda item: float(item.get("match_score", 0.0) or 0.0))
+
+    def _group_key(group_rows: List[Dict[str, object]]) -> Tuple[float, float, float, float, float, float]:
+        scores: List[float] = []
+        expected_total = 0
+        expected_correct = 0
+        max_area = 0
+        for item in group_rows:
+            try:
+                scores.append(float(item.get("match_score", 0.0) or 0.0))
+            except (TypeError, ValueError):
+                scores.append(0.0)
+            max_area = max(max_area, _lr_marker_row_template_area(item))
+            expected = _lr_marker_expected_label_for_source_row(item)
+            if expected:
+                expected_total += 1
+                if str(item.get("lr_label", "") or "").strip() == expected:
+                    expected_correct += 1
+        support = len(group_rows)
+        mean_score = sum(scores) / max(1, len(scores))
+        expected_ratio = expected_correct / max(1, expected_total) if expected_total else 0.0
+        if expected_total:
+            return (1.0, float(expected_correct), expected_ratio, float(support), mean_score, float(max_area))
+        return (0.0, float(support), mean_score, float(max_area), 0.0, 0.0)
+
+    best_group_rows = max(grouped.values(), key=_group_key)
+    return max(
+        best_group_rows,
+        key=lambda item: (
+            float(item.get("match_score", 0.0) or 0.0),
+            float(_lr_marker_row_template_area(item)),
+        ),
+    )
+
+
 def _lr_marker_orientation_group_from_quadrant(side: str, vertical: str) -> str:
     side_norm = str(side or "").strip().lower()
     vertical_norm = str(vertical or "").strip().lower()
@@ -1774,6 +1877,8 @@ def _lr_marker_reliable_rows(
         review_parts = set(str(row.get("review_reason", "") or "").split(";"))
         if _lr_marker_truthy_flag(row.get("match_patch_is_blank", False)) or "blank_marker_match" in review_parts:
             continue
+        if not _lr_marker_row_has_textured_match(row) or "low_texture_marker_match" in review_parts:
+            continue
         reliable.append(dict(row))
     return reliable
 
@@ -1861,9 +1966,10 @@ def _predict_lr_marker_on_su_giu_rows(
     selected_template_path = str(fixed_template_path or "").strip()
     selected_template_score = float(fixed_template_selection_score or 0.0)
     if bool(force_single_template) and not selected_template_path:
+        selection_templates = _lr_marker_preferred_historical_templates(templates)
         candidate_rows = _predict_lr_marker_on_su_giu_rows(
             su_giu_rows=su_giu_rows,
-            templates=templates,
+            templates=selection_templates,
             vendor_name=vendor_name,
             min_match_score=min_match_score,
             full_crop_fallback_threshold=full_crop_fallback_threshold,
@@ -1886,12 +1992,16 @@ def _predict_lr_marker_on_su_giu_rows(
                 target_image_width=int(target_image_width or 0),
                 target_image_height=int(target_image_height or 0),
             )
-            and not _lr_marker_truthy_flag(row.get("match_patch_is_blank", False))
+            and _lr_marker_row_has_textured_match(dict(row))
             and _lr_marker_row_quadrant_valid_or_unknown(dict(row))
         ]
         if not canonical_candidate_rows:
             return []
-        candidate_rows_for_selection = canonical_candidate_rows
+        orientation_candidate_rows = [
+            row for row in canonical_candidate_rows
+            if _lr_marker_row_source_orientation_group(dict(row)) in {"NF", "LR", "UD", "LRUD"}
+        ]
+        candidate_rows_for_selection = orientation_candidate_rows or canonical_candidate_rows
 
         def _sample_is_canonical(item: Dict[str, object]) -> bool:
             if int(target_image_width or 0) <= 0 or int(target_image_height or 0) <= 0:
@@ -1906,8 +2016,12 @@ def _predict_lr_marker_on_su_giu_rows(
             except Exception:
                 return False
 
+        orientation_sample_rows = [
+            row for row in su_giu_rows
+            if _lr_marker_row_source_orientation_group(dict(row)) in {"NF", "LR", "UD", "LRUD"}
+        ]
         sample_rows = sorted(
-            list(su_giu_rows),
+            list(orientation_sample_rows or su_giu_rows),
             key=lambda item: (
                 0 if _sample_is_canonical(dict(item)) else 1,
                 -_lr_marker_darkness_pct_for_sugiu_row(dict(item)),
@@ -1916,10 +2030,10 @@ def _predict_lr_marker_on_su_giu_rows(
         )
         sample_path = str(sample_rows[0].get("image_path", "") or "").strip() if sample_rows else ""
         sample_darkness = _lr_marker_darkness_pct_for_sugiu_row(dict(sample_rows[0])) if sample_rows else -1.0
-        best_candidate = max(candidate_rows_for_selection, key=lambda item: float(item.get("match_score", 0.0) or 0.0))
+        best_candidate = _select_lr_marker_folder_template_candidate(candidate_rows_for_selection)
         selected_template_path = str(best_candidate.get("template_path", "") or "").strip()
         selected_template_score = float(best_candidate.get("match_score", 0.0) or 0.0)
-        selected_templates = [t for t in templates if _template_path_text(t) == selected_template_path]
+        selected_templates = [t for t in selection_templates if _template_path_text(t) == selected_template_path]
         selected_template_policy = "fixed_historical_best_template" if selected_template_path else ""
         seed_candidate = best_candidate
         if derived_template_dir is not None:
@@ -1951,6 +2065,7 @@ def _predict_lr_marker_on_su_giu_rows(
                 sample_candidates = [
                     row for row in sample_candidates
                     if _lr_marker_row_quadrant_valid_or_unknown(dict(row))
+                    and _lr_marker_row_has_textured_match(dict(row))
                 ]
                 if not sample_candidates:
                     continue
@@ -2008,7 +2123,7 @@ def _predict_lr_marker_on_su_giu_rows(
             sample_rows[0] if sample_rows else None,
         )
         if sample_row_for_rank is not None:
-            for template in templates:
+            for template in selection_templates:
                 try:
                     ranked = _predict_lr_marker_on_su_giu_rows(
                         su_giu_rows=[sample_row_for_rank],
@@ -2175,6 +2290,8 @@ def _predict_lr_marker_on_su_giu_rows(
                     reasons.append("low_template_score")
                 if bool(patch_stats.get("blank", False)):
                     reasons.append("blank_marker_match")
+                if float(patch_stats.get("std", 0.0) or 0.0) < float(LR_MARKER_MIN_TEXTURE_STD):
+                    reasons.append("low_texture_marker_match")
                 row_lr: Dict[str, object] = {
                         "image_index": int(row_sg.get("image_index", 0) or 0),
                         "image_path": image_path.as_posix(),
