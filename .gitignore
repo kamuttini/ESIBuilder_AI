@@ -19,13 +19,8 @@ env/
 # Large local input datasets
 data/
 
-# Pipeline artifacts
-# Keep artifacts trackable so official models, maps, metadata, and references
-# can be committed. Only volatile run outputs stay local.
-artifacts/**/runs/
-artifacts/**/workbench_ui/
-artifacts/**/logs/
-artifacts/**/*.log
+# Generated pipeline artifacts, model outputs, datasets, previews, and reports
+artifacts/
 
 # Nested legacy application repository; manage it from its own git repo.
 OldSoftwareEsiBuilder/
@@ -34,5 +29,3 @@ OldSoftwareEsiBuilder/
 *.log
 tmp/
 temp/
-
-artifacts/50_smoke_tests/fss_head_smoke_policy_review/
