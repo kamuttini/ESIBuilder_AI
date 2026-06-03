@@ -2783,6 +2783,16 @@ HTML_PAGE = """<!doctype html>
       flex-direction: column;
       gap: 8px;
     }
+    .sugiu-folder.sugiu-folder-su {
+      border-color: #b9d7ff;
+      background: #f6fbff;
+      box-shadow: inset 4px 0 0 #2563eb;
+    }
+    .sugiu-folder.sugiu-folder-giu {
+      border-color: #badbcc;
+      background: #f7fff9;
+      box-shadow: inset 4px 0 0 #0f766e;
+    }
     .sugiu-folder-head {
       display: flex;
       align-items: center;
@@ -2973,6 +2983,90 @@ HTML_PAGE = """<!doctype html>
       font-size: 10px;
       color: #334155;
       font-weight: 700;
+    }
+    .orientation-hero {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      align-items: start;
+      margin-top: 10px;
+      padding: 10px 0 12px;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .orientation-hero-visual {
+      min-width: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background: #f8fafc;
+      border: 1px solid #d8e2ee;
+      border-radius: 8px;
+      padding: 8px;
+    }
+    .orientation-hero-visual .lr-marker-image-wrap {
+      display: block;
+      width: 100%;
+      max-width: 1040px;
+    }
+    .orientation-hero-visual .lr-marker-image-wrap img {
+      width: 100%;
+      max-height: 560px;
+      object-fit: contain;
+    }
+    .orientation-hero-visual .lr-marker-envelope-box {
+      border-width: 3px;
+      background: rgba(37, 99, 235, 0.04);
+      box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9), 0 0 12px rgba(15, 23, 42, 0.18);
+    }
+    .orientation-hero-panel {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+    .orientation-hero-title {
+      font-size: 14px;
+      font-weight: 850;
+      color: #0f172a;
+      line-height: 1.25;
+    }
+    .orientation-box-legend {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 6px;
+    }
+    .orientation-box-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      background: #fff;
+      padding: 7px 8px;
+    }
+    .orientation-box-chip {
+      min-width: 48px;
+      border-radius: 7px;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 850;
+      text-align: center;
+      padding: 4px 7px;
+      line-height: 1;
+    }
+    .orientation-box-chip.nf { background: #2563eb; }
+    .orientation-box-chip.lr { background: #b45309; }
+    .orientation-box-chip.ud { background: #0f766e; }
+    .orientation-box-chip.lrud { background: #6d28d9; }
+    .orientation-box-row .meta {
+      font-size: 11px;
+      color: #475569;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    @media (max-width: 980px) {
+      .orientation-hero { grid-template-columns: 1fr; }
+      .orientation-hero-visual .lr-marker-image-wrap img { max-height: 420px; }
     }
     .lr-orientation-groups {
       display: grid;
@@ -4248,6 +4342,72 @@ HTML_PAGE = """<!doctype html>
       align-content: start;
       padding-right: 2px;
     }
+    .gallery-modal-grid.sugiu-split-mode {
+      grid-template-columns: 1fr;
+      align-items: start;
+    }
+    .sugiu-gallery-sections {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+    .sugiu-gallery-section {
+      border: 1px solid #dbe4ef;
+      border-radius: 8px;
+      padding: 10px;
+      min-width: 0;
+    }
+    .sugiu-gallery-section.su {
+      border-color: #b9d7ff;
+      background: #f6fbff;
+      box-shadow: inset 5px 0 0 #2563eb;
+    }
+    .sugiu-gallery-section.giu {
+      border-color: #badbcc;
+      background: #f7fff9;
+      box-shadow: inset 5px 0 0 #0f766e;
+    }
+    .sugiu-gallery-section.other {
+      border-color: #e5e7eb;
+      background: #fafafa;
+      box-shadow: inset 5px 0 0 #64748b;
+    }
+    .sugiu-gallery-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .sugiu-gallery-section-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 15px;
+      font-weight: 850;
+      color: #0f172a;
+    }
+    .sugiu-gallery-badge {
+      border-radius: 999px;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 850;
+      padding: 4px 8px;
+      text-transform: uppercase;
+    }
+    .sugiu-gallery-section.su .sugiu-gallery-badge { background: #2563eb; }
+    .sugiu-gallery-section.giu .sugiu-gallery-badge { background: #0f766e; }
+    .sugiu-gallery-section.other .sugiu-gallery-badge { background: #64748b; }
+    .sugiu-gallery-section-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 8px;
+    }
+    @media (max-width: 980px) {
+      .sugiu-gallery-sections { grid-template-columns: 1fr; }
+    }
     .gallery-modal-item {
       border: 1px solid #d9e2ec;
       border-radius: 10px;
@@ -4834,6 +4994,62 @@ HTML_PAGE = """<!doctype html>
       }
       .orientation-mini-table > div {
         padding: 4px;
+      }
+    }
+    .history-column {
+      height: calc(100vh - 3rem) !important;
+      max-height: calc(100vh - 3rem) !important;
+      min-height: 0 !important;
+      overflow: hidden !important;
+    }
+    .history-column > .panel,
+    .history-panel-setup,
+    .history-panel-workspace {
+      min-height: 0 !important;
+      max-height: 100% !important;
+      overflow: hidden !important;
+      flex-direction: column !important;
+    }
+    body.setup-mode .history-panel-setup {
+      display: flex !important;
+    }
+    body.workspace-mode .history-panel-workspace {
+      display: flex !important;
+      overflow: auto !important;
+      overscroll-behavior: contain;
+    }
+    .history-panel-setup[hidden],
+    .history-panel-workspace[hidden],
+    body.setup-mode .history-panel-workspace,
+    body.workspace-mode .history-panel-setup {
+      display: none !important;
+    }
+    #runsList.run-list {
+      flex: 1 1 auto !important;
+      min-height: 0 !important;
+      max-height: none !important;
+      overflow-y: auto !important;
+      overflow-x: hidden !important;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+    .history-panel-workspace .workspace-rail {
+      min-height: 0 !important;
+    }
+    @media (max-width: 760px) {
+      .history-column {
+        height: auto !important;
+        max-height: none !important;
+        overflow: visible !important;
+      }
+      .history-column > .panel,
+      .history-panel-setup,
+      .history-panel-workspace {
+        height: auto !important;
+        max-height: none !important;
+      }
+      #runsList.run-list {
+        max-height: min(62vh, 520px) !important;
       }
     }
   </style>
@@ -6512,9 +6728,12 @@ HTML_PAGE = """<!doctype html>
       const it = (item && typeof item === "object") ? item : {};
       const opts = (options && typeof options === "object") ? options : {};
       const showCurrentMarker = opts.showCurrentMarker !== false;
+      const wrapClass = String(opts.wrapClass || "").trim();
       const rel = String(it.image_rel || "");
       const run = String(runIdValue || selectedRunId || "");
-      const groupKey = inferLrOrientationGroup(it);
+      const groupKey = Object.prototype.hasOwnProperty.call(opts, "currentGroupKey")
+        ? String(opts.currentGroupKey || "").trim().toUpperCase()
+        : inferLrOrientationGroup(it);
       const reviewKey = String(opts.reviewKey || "").trim();
       const manualRect = parseLrMarkerRectText(opts.manualRect || "");
       const markerAttrs = `
@@ -6532,7 +6751,7 @@ HTML_PAGE = """<!doctype html>
       const envelopeHtml = lrMarkerEnvelopeSpansHtml(orientationGroups, groupKey);
       const imageHtml = rel
         ? `
-          <div class="lr-marker-image-wrap" ${reviewKey ? `data-lr-marker-review-key="${esc(reviewKey)}"` : ""}>
+          <div class="lr-marker-image-wrap${wrapClass ? ` ${esc(wrapClass)}` : ""}" ${reviewKey ? `data-lr-marker-review-key="${esc(reviewKey)}"` : ""}>
             <img src="${imgUrlForRun(run, rel)}" loading="eager" decoding="async" ${markerAttrs} onload="window.__fitLrMarkerBox && window.__fitLrMarkerBox(this)">
             ${envelopeHtml}
             ${showCurrentMarker ? `<span class="lr-marker-box" ${markerAttrs}></span>` : ""}
@@ -6561,6 +6780,57 @@ HTML_PAGE = """<!doctype html>
 
     function lrMarkerVisualHtml(item, runIdValue) {
       return `<div class="lr-marker-visual-grid">${lrMarkerImageOverlayHtml(item, runIdValue)}${lrMarkerTemplateHtml(item, runIdValue)}</div>`;
+    }
+
+    function orientationHeroBoxPreviewHtml(item, orientationGroups, runIdValue) {
+      const it = (item && typeof item === "object") ? item : {};
+      const groups = Array.isArray(orientationGroups) ? orientationGroups : [];
+      const orderedKeys = ["NF", "LR", "UD", "LRUD"];
+      const byKey = {};
+      groups.forEach((group) => {
+        const key = String((group && group.key) || "").trim().toUpperCase();
+        if (key) byKey[key] = group;
+      });
+      const rel = String(it.image_rel || "").trim();
+      const frameLabel = rel
+        ? `${shortImageName(rel)} | frame=${cleanVal(it.image_index)} | score=${formatNum(it.match_score, 4)}`
+        : "Nessun frame disponibile.";
+      const availableBoxes = orderedKeys
+        .map((key) => byKey[key])
+        .filter((group) => group && group.envelope).length;
+      const legendHtml = orderedKeys.map((key) => {
+        const group = byKey[key] || {key, envelope: null};
+        const env = group.envelope || null;
+        const used = env ? cleanVal(env.boxes) : "0";
+        const total = cleanVal(group.items && group.items.length);
+        const meta = env
+          ? `${formatLrEnvelope(env)} | usati=${used}/${total}`
+          : `box non disponibile | frame=${total}`;
+        return `
+          <div class="orientation-box-row">
+            <div class="orientation-box-chip ${esc(key.toLowerCase())}">${esc(key)}</div>
+            <div class="meta">${esc(meta)}</div>
+          </div>
+        `;
+      }).join("");
+      const visualHtml = rel
+        ? lrMarkerImageOverlayHtml(it, runIdValue, groups, {
+            showCurrentMarker: false,
+            currentGroupKey: "",
+            wrapClass: "orientation-hero-image",
+          })
+        : `<div class="small">Nessuna immagine disponibile per la preview orientamento.</div>`;
+      return `
+        <div class="orientation-hero">
+          <div class="orientation-hero-visual">${visualHtml}</div>
+          <div class="orientation-hero-panel">
+            <div class="orientation-hero-title">Box orientamento NF / LR / UD / LRUD</div>
+            <div class="small">Preview su: <span class="path">${esc(frameLabel)}</span></div>
+            <div class="small">Box visibili: ${esc(String(availableBoxes))}/4. I rettangoli mostrano le aree marker usate per costruire la riga orientation.</div>
+            <div class="orientation-box-legend">${legendHtml}</div>
+          </div>
+        </div>
+      `;
     }
 
     function lrMarkerEnvelopeLegendHtml(orientationGroups) {
@@ -9278,6 +9548,8 @@ HTML_PAGE = """<!doctype html>
         && orientationDiscrepancyFromMarker(it)
       ));
       const darkSample = (lrData && lrData.dark_sample && typeof lrData.dark_sample === "object") ? lrData.dark_sample : null;
+      const orientationHeroFrame = darkSample || bestFrame || (lrItems.length ? lrItems[0] : {});
+      const orientationHeroHtml = orientationHeroBoxPreviewHtml(orientationHeroFrame, orientationGroups, selectedRunId);
       const darknessRank = (lrData && Array.isArray(lrData.darkness_rank)) ? lrData.darkness_rank : [];
       const darkRankRows = darknessRank.slice(0, 10).map((it, idx) => {
         const pct = formatNum(it && it.darkness_pct, 2);
@@ -9356,6 +9628,7 @@ HTML_PAGE = """<!doctype html>
             <button type="button" class="btn secondary mini" data-open-evidence-gallery="su_giu" onclick="return window.__openEvidenceGalleryFromBtn ? window.__openEvidenceGalleryFromBtn(this) : false;">Galleria SU/GIU</button>
             <button type="button" class="btn secondary mini" data-open-evidence-gallery="lr_marker" onclick="return window.__openEvidenceGalleryFromBtn ? window.__openEvidenceGalleryFromBtn(this) : false;">Galleria marker</button>
           </div>
+          ${orientationHeroHtml}
           <div class="detail-list" style="margin-top:8px;">
             <div>
               <b>1. Rete NF/UD</b><br>
@@ -10472,8 +10745,9 @@ HTML_PAGE = """<!doctype html>
         const shownNote = rows.length > shown.length
           ? `<div class="small">Mostrate ${shown.length}/${rows.length} immagini. Usa la galleria per vederle tutte.</div>`
           : "";
+        const keyClass = String(key || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "");
         return `
-          <div class="sugiu-folder">
+          <div class="sugiu-folder${keyClass ? ` sugiu-folder-${esc(keyClass)}` : ""}">
             <div class="sugiu-folder-head">
               <div class="sugiu-folder-title">${esc(title)} <span class="tag ${esc(tagClass)}">${esc(key)}</span></div>
               ${finderBtn}
@@ -10774,8 +11048,9 @@ HTML_PAGE = """<!doctype html>
         const shownNote = rows.length > shown.length
           ? `<div class="small">Mostrate ${shown.length}/${rows.length} immagini. Usa la galleria per vederle tutte.</div>`
           : "";
+        const keyClass = String(key || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "");
         return `
-          <div class="sugiu-folder">
+          <div class="sugiu-folder${keyClass ? ` sugiu-folder-${esc(keyClass)}` : ""}">
             <div class="sugiu-folder-head">
               <div class="sugiu-folder-title">${esc(title)} <span class="tag ${esc(tagClass)}">${esc(key)}</span></div>
               ${finderBtn}
@@ -11674,21 +11949,30 @@ HTML_PAGE = """<!doctype html>
       } else if (kind === "su_giu") {
         const payload = getSuGiuPerImagePayload(summary);
         const rows = Array.isArray(payload.items) ? payload.items : [];
-        const shown = rows.slice(0, maxItems);
+        const groups = (payload.groups && typeof payload.groups === "object") ? payload.groups : {};
+        const suRows = Array.isArray(groups.su) ? groups.su : rows.filter((it) => normalizeSuGiuPredictionLabel((it && it.pred_label) || (it && it.su_giu_pred)) === "su");
+        const giuRows = Array.isArray(groups.giu) ? groups.giu : rows.filter((it) => normalizeSuGiuPredictionLabel((it && it.pred_label) || (it && it.su_giu_pred)) === "giu");
+        const otherRows = Array.isArray(groups.other) ? groups.other : rows.filter((it) => normalizeSuGiuPredictionLabel((it && it.pred_label) || (it && it.su_giu_pred)) === "other");
+        const primaryLimit = Math.max(1, Math.ceil(maxItems / 2));
+        const suShown = suRows.slice(0, primaryLimit);
+        const giuShown = giuRows.slice(0, primaryLimit);
+        const otherShown = otherRows.slice(0, Math.max(0, maxItems - suShown.length - giuShown.length));
         const counts = payload.labelCounts || {};
         if (evidenceGalleryTitleEl) evidenceGalleryTitleEl.textContent = "Galleria Orientamento SU/GIU per frame";
         if (evidenceGalleryMetaEl) {
           evidenceGalleryMetaEl.textContent = `run=${runForPreview} | totale=${rows.length} | su=${counts.su || 0} | giu=${counts.giu || 0}`;
         }
         if (evidenceGalleryStatusEl) {
-          evidenceGalleryStatusEl.textContent = shown.length < rows.length
-            ? `Mostrati ${shown.length}/${rows.length} frame per performance. Ordine: SU, poi GIU, confidence decrescente.`
-            : (rows.length ? "Ordine: SU, poi GIU, confidence decrescente." : "Nessun frame etichettato.");
+          const shownCount = suShown.length + giuShown.length + otherShown.length;
+          evidenceGalleryStatusEl.textContent = shownCount < rows.length
+            ? `Mostrati ${shownCount}/${rows.length} frame per performance. Sezioni separate: SU e GIU, confidence decrescente.`
+            : (rows.length ? "Sezioni separate: SU e GIU, confidence decrescente." : "Nessun frame etichettato.");
         }
-        evidenceGalleryGridEl.innerHTML = shown.map((it, i) => {
+        evidenceGalleryGridEl.className = "gallery-modal-grid sugiu-split-mode";
+        const renderSuGiuCard = (it, i, sectionLabel) => {
           const rel = String((it && it.image_rel) || "");
-          const label = String((it && it.pred_label) || "-");
-          const conf = formatNum(it && it.confidence, 4);
+          const label = String((it && it.pred_label) || sectionLabel || "-");
+          const conf = formatNum(suGiuPredictionConfidence(it), 4);
           const pSu = formatNum(it && it.prob_su, 4);
           const pGiu = formatNum(it && it.prob_giu, 4);
           const idx = cleanVal(it && it.image_index);
@@ -11697,7 +11981,7 @@ HTML_PAGE = """<!doctype html>
           return `
             <div class="gallery-modal-item">
               <div class="head">
-                <div class="t">Frame #${esc(String(idx || (i + 1)))}</div>
+                <div class="t">${esc(String(sectionLabel || label).toUpperCase())} #${i + 1} · frame ${esc(String(idx || "-"))}</div>
                 <div class="m">label=${esc(label)}</div>
               </div>
               <div class="img-pair" style="grid-template-columns:1fr;">
@@ -11708,7 +11992,36 @@ HTML_PAGE = """<!doctype html>
               <div class="meta"><b>img</b>: ${esc(rel || "-")}</div>
             </div>
           `;
-        }).join("");
+        };
+        const renderSuGiuSection = (key, title, sectionRows, shownRows) => {
+          const total = Array.isArray(sectionRows) ? sectionRows.length : 0;
+          const shownLocal = Array.isArray(shownRows) ? shownRows : [];
+          const omitted = Math.max(0, total - shownLocal.length);
+          const cards = shownLocal.length
+            ? shownLocal.map((it, i) => renderSuGiuCard(it, i, key)).join("")
+            : `<div class="small">Nessun frame ${esc(title)}.</div>`;
+          return `
+            <section class="sugiu-gallery-section ${esc(key)}">
+              <div class="sugiu-gallery-section-head">
+                <div class="sugiu-gallery-section-title"><span class="sugiu-gallery-badge">${esc(key)}</span>${esc(title)}</div>
+                <div class="small">${shownLocal.length}/${total} frame</div>
+              </div>
+              <div class="small" style="margin-bottom:8px;">Ordinati per confidence decrescente.</div>
+              <div class="sugiu-gallery-section-grid">${cards}</div>
+              ${omitted ? `<div class="small" style="margin-top:8px;">Non mostrati ${omitted} frame per performance.</div>` : ""}
+            </section>
+          `;
+        };
+        const otherHtml = otherRows.length
+          ? `<div class="sugiu-gallery-sections" style="grid-template-columns:1fr;margin-top:12px;">${renderSuGiuSection("other", "Other", otherRows, otherShown)}</div>`
+          : "";
+        evidenceGalleryGridEl.innerHTML = `
+          <div class="sugiu-gallery-sections">
+            ${renderSuGiuSection("su", "SU", suRows, suShown)}
+            ${renderSuGiuSection("giu", "GIU", giuRows, giuShown)}
+          </div>
+          ${otherHtml}
+        `;
       } else if (kind === "lr_marker") {
         openLrMarkerGallery(summary, runForPreview, 0, lrMarkerGroup);
         return;
