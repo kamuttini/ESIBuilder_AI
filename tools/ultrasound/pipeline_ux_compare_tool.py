@@ -149,6 +149,7 @@ def _step_result(step: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
         "rect": "Rettangolo ecografico",
         "orientamento_su_giu_per_frame": "Orientamento SU/GIU",
         "orientamento_lr_marker_classico": "LR marker",
+        "orientamento_lr_marker_bundle": "LR marker bundle",
         "orientamento_lt_per_frame": "Classificazione L/T",
         "probe": "Probe",
         "probe_type_router_line4": "Probe type riga 04",
@@ -187,7 +188,7 @@ def _step_result(step: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
         result = f"{_as_text(row.get('su_giu_majority_label'))} ({_as_text(step.get('images_predicted'))} frame)"
         confidence = _format_conf(row.get("su_giu_mean_confidence"))
         source = _as_text(step.get("source", row.get("su_giu_source")), "")
-    elif key == "orientamento_lr_marker_classico":
+    elif key in {"orientamento_lr_marker_classico", "orientamento_lr_marker_bundle"}:
         result = _as_text(step.get("best_label", row.get("lr_marker_best_label")))
         confidence = _format_conf(step.get("best_score", row.get("lr_marker_best_score")))
         source = _as_text(step.get("source", row.get("lr_marker_source")), "")

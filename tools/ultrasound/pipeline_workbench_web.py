@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import shutil
+import statistics
 import subprocess
 import sys
 import threading
@@ -85,6 +86,13 @@ DEFAULT_LR_MARKER_TEMPLATE_ROOTS = [
     REPO_ROOT / "artifacts/10_active_pipeline/pipeline_fss_head/lr_marker_vendor_template_library",
     Path("/Volumes/SSD_esi1_n1"),
 ]
+DEFAULT_LR_MARKER_LIBRARY_ROOT = DEFAULT_LR_MARKER_TEMPLATE_ROOTS[0]
+DEFAULT_LR_MARKER_REVIEW_FILE = DEFAULT_LR_MARKER_LIBRARY_ROOT / "review_decisions.json"
+DEFAULT_ORIENTATION_MARKER_BUNDLE_ZIP = Path("/Users/Shared/41_orientation_marker_detector_bundle.zip")
+DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR = REPO_ROOT / "artifacts/41_orientation_marker_detector_bundle"
+DEFAULT_ORIENTATION_MARKER_BUNDLE_LIBRARY_ROOT = (
+    DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR / "orientation_marker_detector" / "templates"
+)
 DEFAULT_BULK_ACQUISITION_ROOT = Path("/Volumes/SSD_esi1_n3/ACQUISITION ELABORATION")
 
 
@@ -5118,6 +5126,7 @@ HTML_PAGE = """<!doctype html>
                       <option value="historical_best">solo storico</option>
                       <option value="derived_folder">derivato cartella</option>
                     </select>
+                    <a href="/lr-marker-library" class="btn secondary" style="margin-top:8px;display:inline-block;">Review marker storici</a>
                   </div>
                   <label class="check-line"><input id="noGeneratedImages" name="no_generated_images" type="checkbox" value="1"> evidenze leggere</label>
                   <label class="check-line"><input id="noSplitSymlinks" name="no_split_symlinks" type="checkbox" value="1"> senza split symlink</label>
@@ -6531,6 +6540,9 @@ HTML_PAGE = """<!doctype html>
       const suGiuPer = (rec.su_giu_per_image && typeof rec.su_giu_per_image === "object") ? rec.su_giu_per_image : {};
       const suGiuSplit = (rec.su_giu_split_folders && typeof rec.su_giu_split_folders === "object") ? rec.su_giu_split_folders : {};
       const lrMarker = (rec.lr_marker_per_image && typeof rec.lr_marker_per_image === "object") ? rec.lr_marker_per_image : {};
+      const model = (rec.model_evidence && typeof rec.model_evidence === "object") ? rec.model_evidence : {};
+      const lrMarkerMethod = String(model.lr_marker_method || row.lr_marker_method || lrMarker.lr_marker_method || "").trim().toLowerCase();
+      const lrMarkerTitle = lrMarkerMethod === "bundle" ? "LR marker bundle" : "LR marker classico";
       const suGiuCountsObj = (suGiuSplit.counts && typeof suGiuSplit.counts === "object")
         ? suGiuSplit.counts
         : ((suGiuPer.label_counts && typeof suGiuPer.label_counts === "object") ? suGiuPer.label_counts : {});
@@ -6642,7 +6654,7 @@ HTML_PAGE = """<!doctype html>
         {id: "vendor", title: "Decisione Vendor", meta: vendorDone ? `${vendorName}${vendorConf ? ` | conf=${vendorConf}` : ""}` : "In attesa / in corso"},
         {id: "rect", title: "Detection Rettangolo", meta: rectDone ? cleanVal(rectName) : "In attesa / in corso"},
         {id: "su_giu", title: "Smistamento frame SU/GIU", meta: suGiuDone ? `su=${cleanVal(suCount)} | giu=${cleanVal(giuCount)} | other=${cleanVal(otherCount)} | n=${cleanVal(suGiuFrames)}` : "In attesa / in corso"},
-        {id: "lr_marker", title: "LR marker classico", meta: lrMarkerDone ? `majority=${cleanVal(lrMarkerMajority)} | best=${cleanVal(lrMarkerBest)} | score=${cleanVal(lrMarkerBestScore)} | n=${cleanVal(lrMarkerFrames)}` : "In attesa / in corso"},
+        {id: "lr_marker", title: lrMarkerTitle, meta: lrMarkerDone ? `majority=${cleanVal(lrMarkerMajority)} | best=${cleanVal(lrMarkerBest)} | score=${cleanVal(lrMarkerBestScore)} | n=${cleanVal(lrMarkerFrames)}` : "In attesa / in corso"},
         {id: "lt", title: "Classificazione frame L/T", meta: ltDone ? `L=${cleanVal(lCount)} | T=${cleanVal(tCount)} | other=${cleanVal(ltOtherCount)} | n=${cleanVal(ltFrames)}` : "In attesa / in corso"},
         {id: "probe", title: "Decisione Probe", meta: probeDone ? `${probeLabelLive}${probeConf ? ` | conf=${probeConf}` : ""}` : "In attesa / in corso"},
         {id: "template13", title: "Template linea 13", meta: line13Done ? `line13=${cleanVal(l13)}` : "In attesa / in corso"},
@@ -7490,6 +7502,9 @@ HTML_PAGE = """<!doctype html>
       const ltConf = (ltPer.mean_confidence !== undefined && ltPer.mean_confidence !== null)
         ? ltPer.mean_confidence
         : row.lt_mean_confidence;
+      const lrMarkerMethod = String(model.lr_marker_method || row.lr_marker_method || lrMarker.lr_marker_method || "").trim().toLowerCase();
+      const lrMarkerIsBundle = lrMarkerMethod === "bundle";
+      const lrMarkerTitle = lrMarkerIsBundle ? "LR marker bundle" : "LR marker classico";
 
       const modelItems = [
         {
@@ -7518,9 +7533,9 @@ HTML_PAGE = """<!doctype html>
         },
         {
           name: "LR marker",
-          source: String(row.lr_marker_source || (model.lr_marker_classical_enabled ? "classical_vendor_template_library" : "disabled")),
+          source: String(row.lr_marker_source || (lrMarkerIsBundle ? "bundle_vendor_template_library" : (model.lr_marker_classical_enabled ? "classical_vendor_template_library" : "disabled"))),
           confidence: formatConfidence(row.lr_marker_best_score),
-          checkpoint: String(row.lr_marker_best_template_path || ""),
+          checkpoint: String(row.lr_marker_best_template_path || (lrMarkerIsBundle ? model.lr_marker_bundle_library_root : "") || ""),
         },
         {
           name: "L/T",
@@ -7730,14 +7745,23 @@ HTML_PAGE = """<!doctype html>
           "Le cartelle operative SU/GIU mostrano dove sono stati salvati i frame smistati.",
         ],
       );
-      const lrMarkerHelp = helpTipHtml(
-        "LR marker classico",
-        [
-          "Step finale dopo vendor, rettangolo eco e SU/GIU.",
-          "Cerca tutti i template DB_echo del vendor e tiene per ogni frame quello con score massimo.",
-          "Se lo score è basso prova full-crop e poi espansioni progressive fuori crop.",
-        ],
-      );
+      const lrMarkerHelp = lrMarkerIsBundle
+        ? helpTipHtml(
+            "LR marker bundle",
+            [
+              "Usa la logica del bundle orientation_marker_detector.",
+              "La rete ufficiale trova il rettangolo ecografico; gli assi mediani del rect dividono sinistra/destra e su/giu.",
+              "Il bundle trova i marker storici del vendor e assegna NF/LR/UD/LRUD in base al quadrante del marker.",
+            ],
+          )
+        : helpTipHtml(
+            "LR marker classico",
+            [
+              "Step finale dopo vendor, rettangolo eco e SU/GIU.",
+              "Cerca tutti i template DB_echo del vendor e tiene per ogni frame quello con score massimo.",
+              "Se lo score è basso prova full-crop e poi espansioni progressive fuori crop.",
+            ],
+          );
       const ltHelp = helpTipHtml(
         "L/T per frame",
         [
@@ -7819,7 +7843,7 @@ HTML_PAGE = """<!doctype html>
               ${giuFolderAbs ? `<button type="button" class="btn secondary mini" data-open-folder-path="${esc(giuFolderAbs)}" style="margin-top:6px; margin-left:6px;">Apri Finder GIU</button>` : ""}
             </div>
           </div>
-          <div class="evidence-title" style="margin-top:10px;">LR marker classico ${lrMarkerHelp} <span class="tag tag-rotation">lr</span></div>
+          <div class="evidence-title" style="margin-top:10px;">${esc(lrMarkerTitle)} ${lrMarkerHelp} <span class="tag tag-rotation">lr</span></div>
           <div class="detail-list">
             <div>
               <b>Risultato cartella</b><br>
@@ -7864,7 +7888,7 @@ HTML_PAGE = """<!doctype html>
             <div><b>Rect checkpoint (usato)</b><br><span class="path">${esc(String(model.rect_checkpoint_used || ((summary && summary.pipeline_row && summary.pipeline_row.line_11_model_checkpoint) || "-")))}</span><br>${modelSplitMock}</div>
             <div><b>Line13 checkpoint (usato)</b><br><span class="path">${esc(String(model.line13_checkpoint_used || model.line13_checkpoint_global || "-"))}</span><br>enabled=${esc(String(model.line13_model_enabled ? "SI" : "NO"))} | route=${esc(cleanVal(model.line13_model_route || l13.model_route || "-"))} | image_size=${esc(cleanVal(model.line13_image_size || "-"))}</div>
             <div><b>SU/GIU checkpoint (usato)</b><br><span class="path">${esc(String(model.su_giu_checkpoint_used || model.su_giu_checkpoint_global || "-"))}</span><br>enabled=${esc(String(model.su_giu_enabled ? "SI" : "NO"))} | image_size=${esc(cleanVal(model.su_giu_image_size))} | batch=${esc(cleanVal(model.su_giu_batch_size))} | classi=${esc(suGiuClassNamesTxt || "-")}</div>
-            <div><b>LR marker classico</b><br><span class="path">${esc(String(row.lr_marker_best_template_path || lrMarkerBest.template_path || "-"))}</span><br>enabled=${esc(String(model.lr_marker_classical_enabled ? "SI" : "NO"))} | template=${esc(cleanVal(model.lr_marker_template_policy || "-"))} | soglia_full_crop=${esc(cleanVal(model.lr_marker_full_crop_fallback_threshold || "-"))} | soglia_expand=${esc(cleanVal(model.lr_marker_expanded_search_threshold || "-"))}${lrMarkerFallbackHtml}</div>
+            <div><b>${esc(lrMarkerTitle)}</b><br><span class="path">${esc(String(row.lr_marker_best_template_path || lrMarkerBest.template_path || "-"))}</span><br>enabled=${esc(lrMarkerIsBundle ? (model.lr_marker_bundle_enabled ? "SI" : "NO") : (model.lr_marker_classical_enabled ? "SI" : "NO"))} | method=${esc(cleanVal(lrMarkerMethod || "-"))} | template=${esc(cleanVal(lrMarkerIsBundle ? model.lr_marker_bundle_library_root : model.lr_marker_template_policy || "-"))} | soglia_full_crop=${esc(cleanVal(model.lr_marker_full_crop_fallback_threshold || "-"))} | soglia_expand=${esc(cleanVal(model.lr_marker_expanded_search_threshold || "-"))}${lrMarkerFallbackHtml}</div>
             <div><b>L/T checkpoint (usato)</b><br><span class="path">${esc(String(model.lt_checkpoint_used || model.lt_checkpoint_global || "-"))}</span><br>enabled=${esc(String(model.lt_enabled ? "SI" : "NO"))} | image_size=${esc(cleanVal(model.lt_image_size))} | batch=${esc(cleanVal(model.lt_batch_size))} | classi=${esc(Array.isArray(model.lt_class_names) ? model.lt_class_names.join(", ") : "-")}</div>
           </div>
           <div class="small" style="margin-top:6px;">
@@ -8816,6 +8840,8 @@ HTML_PAGE = """<!doctype html>
 
     function inferLrOrientationGroup(item) {
       const it = (item && typeof item === "object") ? item : {};
+      const exportedGroup = String(it.orientation_group || "").trim().toUpperCase();
+      if (["NF", "LR", "UD", "LRUD"].includes(exportedGroup)) return exportedGroup;
       const qGroup = String(it.quadrant_group || "").trim().toUpperCase();
       const qStatus = String(it.quadrant_status || "").trim().toLowerCase();
       const qValidRaw = String(it.quadrant_valid ?? "").trim().toLowerCase();
@@ -9053,6 +9079,8 @@ HTML_PAGE = """<!doctype html>
       const hasDims = Number.isFinite(imageW) && Number.isFinite(imageH) && imageW > 0 && imageH > 0;
       const canonicalSize = !hasTarget || !hasDims || (imageW === targetWidth && imageH === targetHeight);
       const reviewReason = String(it.review_reason || "");
+      const method = String(it.lr_marker_method || "").trim().toLowerCase();
+      const bundleStatusOk = method !== "bundle" || String(it.status || "").trim().toLowerCase() === "ok";
       const blankMatch = Number(it.match_patch_is_blank) === 1 || reviewReason.split(";").includes("blank_marker_match");
       const lowScore = !(Number.isFinite(score) && score >= minMatchScore);
       const forced = strategy === "spatial_consensus_forced";
@@ -9065,7 +9093,7 @@ HTML_PAGE = """<!doctype html>
         qValidRaw === "no"
       );
       return {
-        reliable: !lowScore && !forced && canonicalSize && !blankMatch && quadrantValid,
+        reliable: bundleStatusOk && !lowScore && !forced && canonicalSize && !blankMatch && quadrantValid,
         lowScore,
         forced,
         canonicalSize,
@@ -10808,14 +10836,6 @@ HTML_PAGE = """<!doctype html>
     function renderLrMarkerEvidence(summary) {
       if (!lrMarkerEvidenceEl) return;
       lrMarkerEvidenceEl.innerHTML = "";
-      const lrMarkerHelp = helpTipHtml(
-        "LR marker classico",
-        [
-          "Usa i template orientation_* in DB_echo del vendor predetto.",
-          "Prima cerca nella metà suggerita da SU/GIU, poi full-crop se score < 0.55.",
-          "Se resta sotto 0.66 espande progressivamente fuori dal rettangolo eco.",
-        ],
-      );
       const row = (summary && summary.pipeline_row && typeof summary.pipeline_row === "object") ? summary.pipeline_row : {};
       const rec = (summary && summary.recognition_evidence && typeof summary.recognition_evidence === "object")
         ? summary.recognition_evidence
@@ -10824,6 +10844,26 @@ HTML_PAGE = """<!doctype html>
       const payload = getLrMarkerPerImagePayload(summary);
       const lrData = payload.lrData;
       const items = payload.items || [];
+      const lrMarkerMethod = String(model.lr_marker_method || row.lr_marker_method || (lrData && lrData.lr_marker_method) || "").trim().toLowerCase();
+      const lrMarkerIsBundle = lrMarkerMethod === "bundle";
+      const lrMarkerTitle = lrMarkerIsBundle ? "LR marker bundle" : "LR marker classico";
+      const lrMarkerHelp = lrMarkerIsBundle
+        ? helpTipHtml(
+            "LR marker bundle",
+            [
+              "Usa il detector del bundle con la libreria templates interna per vendor.",
+              "Rettangolo ecografico e classificazione SU/GIU restano quelli della pipeline ufficiale.",
+              "Gli assi mediani del rettangolo ufficiale dividono sinistra/destra e su/giu, poi il quadrante definisce NF/LR/UD/LRUD.",
+            ],
+          )
+        : helpTipHtml(
+            "LR marker classico",
+            [
+              "Usa i template orientation_* in DB_echo del vendor predetto.",
+              "Prima cerca nella metà suggerita da SU/GIU, poi full-crop se score < 0.55.",
+              "Se resta sotto 0.66 espande progressivamente fuori dal rettangolo eco.",
+            ],
+          );
       const counts = payload.labelCounts || {};
       const statusCounts = payload.statusCounts || {};
       const quadrantCounts = payload.quadrantCounts || {};
@@ -10841,7 +10881,7 @@ HTML_PAGE = """<!doctype html>
       if (!lrData) {
         lrMarkerEvidenceEl.innerHTML = `
           <div class="evidence-card">
-            <div class="evidence-title">LR marker classico ${lrMarkerHelp} <span class="tag tag-rotation">lr</span></div>
+            <div class="evidence-title">${esc(lrMarkerTitle)} ${lrMarkerHelp} <span class="tag tag-rotation">lr</span></div>
             <div class="small">Dati non presenti in questa run.</div>
           </div>
         `;
@@ -10853,17 +10893,17 @@ HTML_PAGE = """<!doctype html>
       const templatePolicy = String(lrData.template_policy || best.template_policy || "").trim();
       const templatePolicyEffective = String(lrData.template_policy_effective || best.template_policy_effective || row.lr_marker_template_policy_effective || "").trim();
       const templateFallbackReason = String(lrData.template_fallback_reason || best.template_fallback_reason || row.lr_marker_template_fallback_reason || "").trim();
-      const templateFallbackHtml = templateFallbackReason
+      const templateFallbackHtml = templateFallbackReason && !lrMarkerIsBundle
         ? `<div class="small" style="margin-top:8px;color:#b45309;"><span class="tag tag-warn">fallback attivo</span> historical_best -> derived_folder<br>motivo: ${esc(templateFallbackReason)}</div>`
         : "";
       const templateSelectionScore = lrData.fixed_template_selection_score || best.folder_fixed_template_selection_score || row.lr_marker_best_score || "";
       const available = !!lrData.available;
       const reason = cleanVal(lrData.error || "");
-      const note = cleanVal(lrData.note || "LR marker classico frame-by-frame.");
+      const note = cleanVal(lrData.note || (lrMarkerIsBundle ? "LR marker bundle frame-by-frame." : "LR marker classico frame-by-frame."));
       if (!available || !items.length) {
         lrMarkerEvidenceEl.innerHTML = `
           <div class="evidence-card">
-            <div class="evidence-title">LR marker classico ${lrMarkerHelp} <span class="tag tag-rotation">lr</span></div>
+            <div class="evidence-title">${esc(lrMarkerTitle)} ${lrMarkerHelp} <span class="tag tag-rotation">lr</span></div>
             <div class="small">${esc(note)}</div>
             <div class="small">Analisi non disponibile: ${esc(reason || "-")}</div>
             <div class="small">source=${esc(String(row.lr_marker_source || "-"))}</div>
@@ -10926,7 +10966,7 @@ HTML_PAGE = """<!doctype html>
 
       lrMarkerEvidenceEl.innerHTML = `
         <div class="evidence-card">
-          <div class="evidence-title">LR marker classico ${lrMarkerHelp} <span class="tag tag-rotation">lr</span></div>
+          <div class="evidence-title">${esc(lrMarkerTitle)} ${lrMarkerHelp} <span class="tag tag-rotation">lr</span></div>
           <div class="dup-actions">
             <button type="button" class="btn secondary mini" data-open-evidence-gallery="lr_marker" onclick="return window.__openEvidenceGalleryFromBtn ? window.__openEvidenceGalleryFromBtn(this) : false;">Apri galleria</button>
           </div>
@@ -10938,9 +10978,9 @@ HTML_PAGE = """<!doctype html>
               frame=${esc(cleanVal(row.lr_marker_images_predicted || lrData.images_total || "-"))} | source=${esc(cleanVal(row.lr_marker_source || "-"))}
             </div>
             <div>
-              <b>Template fisso cartella</b><br>
+              <b>${esc(lrMarkerIsBundle ? "Template bundle vendor" : "Template fisso cartella")}</b><br>
               <span class="path">${esc(fixedTemplatePath || "-")}</span><br>
-              policy=${esc(templatePolicy || "-")}${templatePolicyEffective ? ` | effective=${esc(templatePolicyEffective)}` : ""} | selection_score=${esc(cleanVal(templateSelectionScore || "-"))}
+              method=${esc(lrMarkerMethod || "-")} | policy=${esc(templatePolicy || "-")}${templatePolicyEffective ? ` | effective=${esc(templatePolicyEffective)}` : ""} | selection_score=${esc(cleanVal(templateSelectionScore || "-"))}
               ${templateFallbackHtml}
             </div>
           </div>
@@ -10950,12 +10990,12 @@ HTML_PAGE = """<!doctype html>
           <div class="small">
             Nota: la majority ha senso solo su una cartella/acquisizione omogenea. Se la cartella contiene NF/LR/UD/LRUD misti, questa sezione va letta come audit per-frame.
           </div>
-          ${templatePathsSeen.length > 1 ? `<div class="small" style="color:#b45309;">Questa run usa ancora piu template (${templatePathsSeen.length}). Riesegui la pipeline per applicare la nuova regola: un solo template fisso per tutta la cartella.</div>` : ""}
+          ${(!lrMarkerIsBundle && templatePathsSeen.length > 1) ? `<div class="small" style="color:#b45309;">Questa run usa ancora piu template (${templatePathsSeen.length}). Riesegui la pipeline per applicare la nuova regola: un solo template fisso per tutta la cartella.</div>` : ""}
           <div class="small">
             status ok=${esc(cleanVal(statusCounts.ok))} | review=${esc(cleanVal(statusCounts.review))} | quadranti ok=${esc(cleanVal(quadrantCounts.ok))} invalid=${esc(cleanVal(quadrantCounts.invalid))} | strategie=${esc(strategyTxt || "-")}
           </div>
           <div class="small">
-            template mode: ${esc(cleanVal(model.lr_marker_template_policy || "-"))} | roots template: ${esc(Array.isArray(model.lr_marker_template_roots) ? model.lr_marker_template_roots.join(" | ") : "-")}
+            template mode: ${esc(cleanVal(lrMarkerIsBundle ? "bundle" : (model.lr_marker_template_policy || "-")))} | roots template: ${esc(lrMarkerIsBundle ? cleanVal(model.lr_marker_bundle_library_root || "-") : (Array.isArray(model.lr_marker_template_roots) ? model.lr_marker_template_roots.join(" | ") : "-"))}
           </div>
           <div class="evidence-title" style="margin-top:10px;">Box marker per orientamento <span class="tag tag-data">envelope</span></div>
           <div class="small">Coordinate assolute del rettangolo che contiene tutte le posizioni marker trovate nel gruppo.</div>
@@ -12313,6 +12353,45 @@ HTML_PAGE = """<!doctype html>
       return payload;
     }
 
+    function lrMarkerManualSeedsFromAnnotations() {
+      const state = annotationsState && typeof annotationsState === "object" ? annotationsState : null;
+      const reviews = state && state.lr_marker_reviews && typeof state.lr_marker_reviews === "object" ? state.lr_marker_reviews : {};
+      const seeds = [];
+      Object.entries(reviews).forEach(([key, recRaw], idx) => {
+        const rec = recRaw && typeof recRaw === "object" ? recRaw : {};
+        const rect = parseLrMarkerRectText(rec.rect || "");
+        if (!rect) return;
+        const flag = String(rec.flag || "").trim().toLowerCase();
+        const correction = String(rec.correction || "").trim();
+        if (flag === "exclude" || correction.toLowerCase() === "exclude") return;
+        const ctx = rec.context && typeof rec.context === "object" ? rec.context : {};
+        const keyParts = String(key || "").split("|");
+        const imageRel = String(ctx.image_rel || (keyParts.length > 1 ? keyParts.slice(1).join("|") : "") || "").trim();
+        seeds.push({
+          seed_index: idx + 1,
+          review_key: String(key || ""),
+          image_rel: imageRel,
+          image_index: cleanVal(ctx.image_index || ""),
+          rect: `${rect.top},${rect.left},${rect.bottom},${rect.right}`,
+          flag,
+          correction,
+          comment: String(rec.comment || ""),
+        });
+      });
+      return seeds;
+    }
+
+    function attachManualLrSeeds(payload, sourceRunId) {
+      const out = payload && typeof payload === "object" ? payload : {};
+      const src = String(sourceRunId || "").trim();
+      if (src) out.source_run_id = src;
+      if (src && String(selectedRunId || "") === src && annotationsState) {
+        const seeds = lrMarkerManualSeedsFromAnnotations();
+        if (seeds.length) out.lr_marker_manual_seeds = seeds;
+      }
+      return out;
+    }
+
     async function startRunWithPayload(payload, contextLabel) {
       const ctx = String(contextLabel || "run");
       const inputFolder = String((payload && payload.input_folder) || "").trim();
@@ -12405,6 +12484,7 @@ HTML_PAGE = """<!doctype html>
         return;
       }
       const payload = buildRunPayload(inputFolder);
+      attachManualLrSeeds(payload, runId);
       await startRunWithPayload(payload, "rerun");
     }
 
@@ -12475,7 +12555,9 @@ HTML_PAGE = """<!doctype html>
         }
         if (!confirm(`Rifare una run completa con i parametri correnti?\n\ninput=${inputFolder}`)) return;
         setRerunStatusText("Avvio rerun completa...");
-        await startRunWithPayload(buildRunPayload(inputFolder), "rerun completa");
+        const payload = buildRunPayload(inputFolder);
+        attachManualLrSeeds(payload, selectedRunId || "");
+        await startRunWithPayload(payload, "rerun completa");
         setRerunStatusText("Rerun completa avviata.");
         return;
       }
@@ -13778,6 +13860,517 @@ BROWSE_PAGE = """<!doctype html>
 """
 
 
+LR_MARKER_LIBRARY_PAGE = """<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Review Marker LR Storici</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f8fa;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #637083;
+      --line: #d9e0e8;
+      --green: #0f766e;
+      --green-soft: #e6f4f1;
+      --red: #b42318;
+      --red-soft: #fff0ee;
+      --amber: #9a6700;
+      --amber-soft: #fff7df;
+      --blue: #2563eb;
+      --blue-soft: #eff6ff;
+      --shadow: 0 8px 24px rgba(20, 28, 38, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid var(--line);
+      background: rgba(247, 248, 250, 0.96);
+      backdrop-filter: blur(12px);
+    }
+    .topbar {
+      max-width: 1640px;
+      margin: 0 auto;
+      padding: 12px 16px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+    }
+    h1 { margin: 0; font-size: 22px; letter-spacing: 0; }
+    .path { color: var(--muted); font-size: 12px; word-break: break-all; margin-top: 4px; }
+    .toolbar {
+      max-width: 1640px;
+      margin: 0 auto;
+      padding: 0 16px 12px;
+      display: grid;
+      grid-template-columns: minmax(180px, 280px) minmax(180px, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }
+    @media (max-width: 880px) {
+      .topbar, .toolbar { grid-template-columns: 1fr; }
+    }
+    input, select {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+    button, .btn {
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    button.primary { border-color: var(--green); background: var(--green); color: white; }
+    button.good { border-color: #95c8bf; background: var(--green-soft); color: #07514c; }
+    button.bad { border-color: #f0b5af; background: var(--red-soft); color: var(--red); }
+    button.warn { border-color: #efd48a; background: var(--amber-soft); color: var(--amber); }
+    main { max-width: 1640px; margin: 0 auto; padding: 14px 16px 36px; }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .summary-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      padding: 10px;
+      box-shadow: var(--shadow);
+    }
+    .summary-card b { display: block; margin-bottom: 4px; }
+    .small { color: var(--muted); font-size: 12px; line-height: 1.35; }
+    .status {
+      min-height: 28px;
+      color: var(--muted);
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      text-align: right;
+    }
+    .vendor {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      margin-bottom: 14px;
+      overflow: hidden;
+    }
+    .vendor-head {
+      padding: 12px;
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .vendor-title {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+    .vendor-title h2 { margin: 0; font-size: 18px; letter-spacing: 0; }
+    .vendor-controls {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(96px, auto));
+      gap: 8px;
+      align-items: end;
+    }
+    .vendor-controls label {
+      color: var(--muted);
+      font-size: 11px;
+      display: grid;
+      gap: 3px;
+    }
+    .columns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+    }
+    @media (max-width: 980px) {
+      .vendor-head, .vendor-controls, .columns { grid-template-columns: 1fr; }
+    }
+    .bucket { padding: 12px; min-width: 0; }
+    .bucket:first-child { border-right: 1px solid var(--line); }
+    @media (max-width: 980px) {
+      .bucket:first-child { border-right: 0; border-bottom: 1px solid var(--line); }
+    }
+    .bucket-title {
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+      font-weight: 800;
+    }
+    .bucket.accepted .bucket-title { color: var(--green); }
+    .bucket.rejected .bucket-title { color: var(--red); }
+    .marker-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 8px;
+    }
+    .marker {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      overflow: hidden;
+      min-width: 0;
+    }
+    .marker.good { border-color: #a7d4cc; }
+    .marker.bad { border-color: #efb4ad; }
+    .thumb-wrap {
+      height: 112px;
+      display: grid;
+      place-items: center;
+      background:
+        linear-gradient(45deg, #f0f2f5 25%, transparent 25%),
+        linear-gradient(-45deg, #f0f2f5 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #f0f2f5 75%),
+        linear-gradient(-45deg, transparent 75%, #f0f2f5 75%);
+      background-size: 16px 16px;
+      background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+    }
+    .thumb-wrap img {
+      max-width: 96px;
+      max-height: 96px;
+      image-rendering: pixelated;
+      background: #111827;
+      border: 1px solid #111827;
+      transform: scale(1.6);
+      transform-origin: center;
+    }
+    .marker-body { padding: 8px; }
+    .marker-name {
+      font-weight: 800;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+      margin-bottom: 4px;
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 2px 6px;
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+    .kv b { color: #3a4655; font-weight: 700; }
+    .source {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.25;
+      max-height: 38px;
+      overflow: auto;
+      word-break: break-all;
+    }
+    .marker-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      padding: 0 8px 8px;
+    }
+    .marker-actions button { min-height: 30px; padding: 5px 6px; font-size: 12px; }
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 2px 7px;
+      border: 1px solid var(--line);
+      font-size: 11px;
+      font-weight: 800;
+      background: #fff;
+      white-space: nowrap;
+    }
+    .tag.good { border-color: #9ccfc6; color: var(--green); background: var(--green-soft); }
+    .tag.bad { border-color: #efb4ad; color: var(--red); background: var(--red-soft); }
+    .tag.warn { border-color: #efd48a; color: var(--amber); background: var(--amber-soft); }
+    .empty {
+      border: 1px dashed var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      background: #fbfcfd;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="topbar">
+      <div>
+        <h1>Review Marker LR Storici</h1>
+        <div id="libraryPath" class="path">Caricamento libreria...</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+        <a class="btn" href="/">Pipeline</a>
+        <button id="saveBtn" class="primary" type="button">Salva selezione</button>
+      </div>
+    </div>
+    <div class="toolbar">
+      <select id="vendorFilter"></select>
+      <input id="searchBox" type="search" placeholder="Cerca marker, source path o dimensione">
+      <div id="saveStatus" class="status"></div>
+    </div>
+  </header>
+  <main>
+    <div id="summary" class="summary"></div>
+    <div id="content"></div>
+  </main>
+  <script>
+    const S = {vendors: [], defaults: {min_area: 256, min_short_side: 12}, query: "", vendor: "__all__"};
+    const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const byId = (id) => document.getElementById(id);
+    const markerImageUrl = (rel) => `/api/lr_marker_templates/review/image?path=${encodeURIComponent(rel)}`;
+    const areaOf = (m) => Number(m.width || 0) * Number(m.height || 0);
+    const shortSideOf = (m) => Math.min(Number(m.width || 0), Number(m.height || 0));
+
+    async function apiJson(url, opts) {
+      const res = await fetch(url, opts || {});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      return data;
+    }
+
+    function visibleMarkers(vendor) {
+      const q = S.query.trim().toLowerCase();
+      return vendor.markers.filter((m) => {
+        if (!q) return true;
+        const hay = `${m.name} ${m.rel_path} ${m.source_path} ${m.config_dir} ${m.width}x${m.height} area ${areaOf(m)}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
+    function computeCounts(vendor) {
+      let accepted = 0, rejected = 0;
+      for (const m of vendor.markers) {
+        if (m.decision === "accepted") accepted += 1;
+        else rejected += 1;
+      }
+      return {accepted, rejected, total: vendor.markers.length};
+    }
+
+    function renderSummary() {
+      byId("summary").innerHTML = S.vendors.map((v) => {
+        const c = computeCounts(v);
+        return `<button class="summary-card" type="button" data-vendor="${esc(v.vendor)}" style="text-align:left;cursor:pointer;">
+          <b>${esc(v.vendor)}</b>
+          <span class="tag good">${c.accepted} accettati</span>
+          <span class="tag bad">${c.rejected} scartati</span>
+          <div class="small">soglie: area >= ${esc(v.rule.min_area)} | lato >= ${esc(v.rule.min_short_side)} | totale ${c.total}</div>
+        </button>`;
+      }).join("");
+      document.querySelectorAll(".summary-card").forEach((el) => {
+        el.addEventListener("click", () => {
+          S.vendor = el.getAttribute("data-vendor") || "__all__";
+          byId("vendorFilter").value = S.vendor;
+          render();
+        });
+      });
+    }
+
+    function markerCard(m) {
+      const cls = m.decision === "accepted" ? "good" : "bad";
+      const warning = shortSideOf(m) < 8 || areaOf(m) < 100 ? `<span class="tag warn">molto piccolo</span>` : "";
+      return `<div class="marker ${cls}">
+        <div class="thumb-wrap"><img src="${markerImageUrl(m.rel_path)}" alt="${esc(m.name)}" loading="lazy"></div>
+        <div class="marker-body">
+          <div class="marker-name">${esc(m.name)}</div>
+          <div style="margin-bottom:5px;">${warning}</div>
+          <div class="kv">
+            <b>dim</b><span>${esc(m.width)} x ${esc(m.height)} px</span>
+            <b>area</b><span>${esc(areaOf(m))}</span>
+            <b>mean</b><span>${Number(m.mean || 0).toFixed(2)}</span>
+            <b>std</b><span>${Number(m.std || 0).toFixed(2)}</span>
+            <b>sim</b><span>${Number(m.best_similarity_to_kept ?? -1).toFixed(3)}</span>
+          </div>
+          <div class="source">${esc(m.source_path || m.config_dir || m.rel_path)}</div>
+        </div>
+        <div class="marker-actions">
+          <button type="button" class="good" data-action="accepted" data-rel="${esc(m.rel_path)}">Accetta</button>
+          <button type="button" class="bad" data-action="rejected" data-rel="${esc(m.rel_path)}">Scarta</button>
+        </div>
+      </div>`;
+    }
+
+    function renderVendor(v) {
+      const shown = visibleMarkers(v);
+      const accepted = shown.filter((m) => m.decision === "accepted");
+      const rejected = shown.filter((m) => m.decision !== "accepted");
+      const c = computeCounts(v);
+      return `<section class="vendor" data-vendor="${esc(v.vendor)}">
+        <div class="vendor-head">
+          <div class="vendor-title">
+            <h2>${esc(v.vendor)}</h2>
+            <span class="tag good">${c.accepted} accettati</span>
+            <span class="tag bad">${c.rejected} scartati</span>
+            <span class="tag">${c.total} totali</span>
+          </div>
+          <div class="vendor-controls">
+            <label>Area min
+              <input type="number" min="0" value="${esc(v.rule.min_area)}" data-rule="min_area" data-vendor="${esc(v.vendor)}">
+            </label>
+            <label>Lato corto min
+              <input type="number" min="0" value="${esc(v.rule.min_short_side)}" data-rule="min_short_side" data-vendor="${esc(v.vendor)}">
+            </label>
+            <button type="button" class="warn" data-apply-thresholds="${esc(v.vendor)}">Applica soglie</button>
+            <button type="button" data-accept-all="${esc(v.vendor)}">Accetta visibili</button>
+          </div>
+        </div>
+        <div class="columns">
+          <div class="bucket accepted">
+            <div class="bucket-title"><span>Accettati</span><span>${accepted.length}</span></div>
+            <div class="marker-grid">${accepted.length ? accepted.map(markerCard).join("") : '<div class="empty">Nessun marker accettato visibile.</div>'}</div>
+          </div>
+          <div class="bucket rejected">
+            <div class="bucket-title"><span>Scartati</span><span>${rejected.length}</span></div>
+            <div class="marker-grid">${rejected.length ? rejected.map(markerCard).join("") : '<div class="empty">Nessun marker scartato visibile.</div>'}</div>
+          </div>
+        </div>
+      </section>`;
+    }
+
+    function bindContent() {
+      document.querySelectorAll("[data-action]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const rel = btn.getAttribute("data-rel") || "";
+          const decision = btn.getAttribute("data-action") || "rejected";
+          for (const v of S.vendors) {
+            const m = v.markers.find((x) => x.rel_path === rel);
+            if (m) {
+              m.decision = decision;
+              m.decision_source = "manual_ui";
+              break;
+            }
+          }
+          render();
+        });
+      });
+      document.querySelectorAll("[data-rule]").forEach((input) => {
+        input.addEventListener("change", () => {
+          const vendor = input.getAttribute("data-vendor") || "";
+          const key = input.getAttribute("data-rule") || "";
+          const v = S.vendors.find((x) => x.vendor === vendor);
+          if (v && key) v.rule[key] = Math.max(0, Number(input.value || 0));
+        });
+      });
+      document.querySelectorAll("[data-apply-thresholds]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const vendor = btn.getAttribute("data-apply-thresholds") || "";
+          const v = S.vendors.find((x) => x.vendor === vendor);
+          if (!v) return;
+          for (const m of v.markers) {
+            m.decision = (areaOf(m) >= Number(v.rule.min_area || 0) && shortSideOf(m) >= Number(v.rule.min_short_side || 0)) ? "accepted" : "rejected";
+            m.decision_source = "vendor_threshold";
+          }
+          render();
+        });
+      });
+      document.querySelectorAll("[data-accept-all]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const vendor = btn.getAttribute("data-accept-all") || "";
+          const v = S.vendors.find((x) => x.vendor === vendor);
+          if (!v) return;
+          for (const m of visibleMarkers(v)) {
+            m.decision = "accepted";
+            m.decision_source = "manual_ui";
+          }
+          render();
+        });
+      });
+    }
+
+    function renderVendorFilter() {
+      byId("vendorFilter").innerHTML = `<option value="__all__">Tutti i vendor</option>` + S.vendors.map((v) => `<option value="${esc(v.vendor)}">${esc(v.vendor)}</option>`).join("");
+      byId("vendorFilter").value = S.vendor;
+    }
+
+    function render() {
+      renderSummary();
+      renderVendorFilter();
+      const vendors = S.vendor === "__all__" ? S.vendors : S.vendors.filter((v) => v.vendor === S.vendor);
+      byId("content").innerHTML = vendors.length ? vendors.map(renderVendor).join("") : '<div class="empty">Nessun vendor da mostrare.</div>';
+      bindContent();
+    }
+
+    async function save() {
+      byId("saveStatus").textContent = "Salvataggio...";
+      const vendors = {};
+      for (const v of S.vendors) {
+        vendors[v.vendor] = {
+          vendor: v.vendor,
+          min_area: Math.max(0, Number(v.rule.min_area || 0)),
+          min_short_side: Math.max(0, Number(v.rule.min_short_side || 0)),
+          accepted: v.markers.filter((m) => m.decision === "accepted").map((m) => m.rel_path).sort(),
+          rejected: v.markers.filter((m) => m.decision !== "accepted").map((m) => m.rel_path).sort(),
+        };
+      }
+      const out = await apiJson("/api/lr_marker_templates/review", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({vendors}),
+      });
+      byId("saveStatus").textContent = `Salvato: ${out.review_path}`;
+    }
+
+    async function load() {
+      byId("saveStatus").textContent = "Caricamento...";
+      const data = await apiJson("/api/lr_marker_templates/review");
+      S.vendors = data.vendors || [];
+      S.defaults = data.defaults || S.defaults;
+      byId("libraryPath").textContent = `${data.library_root || "-"} | review: ${data.review_path || "-"}`;
+      byId("saveStatus").textContent = data.review_exists ? "Review salvata caricata." : "Nessuna review salvata: stato iniziale da soglie default.";
+      render();
+    }
+
+    byId("searchBox").addEventListener("input", (ev) => { S.query = ev.target.value || ""; render(); });
+    byId("vendorFilter").addEventListener("change", (ev) => { S.vendor = ev.target.value || "__all__"; render(); });
+    byId("saveBtn").addEventListener("click", () => save().catch((err) => { byId("saveStatus").textContent = err.message; }));
+    load().catch((err) => {
+      byId("saveStatus").textContent = err.message;
+      byId("content").innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+    });
+  </script>
+</body>
+</html>
+"""
+
+
 def _parse_iso_dt(value: Any) -> Optional[datetime]:
     text = str(value or "").strip()
     if not text:
@@ -14038,6 +14631,254 @@ def _safe_float(value: Any, default: float) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _marker_review_vendor_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.expanduser().resolve().relative_to(root.expanduser().resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _load_lr_marker_saved_review(review_path: Path) -> Dict[str, Any]:
+    if not review_path.is_file():
+        return {"version": 1, "vendors": {}}
+    try:
+        payload = json.loads(review_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"version": 1, "vendors": {}}
+    if not isinstance(payload, dict):
+        return {"version": 1, "vendors": {}}
+    vendors = payload.get("vendors", {})
+    if not isinstance(vendors, dict):
+        vendors = {}
+    payload["vendors"] = vendors
+    return payload
+
+
+def _saved_lr_marker_vendor_entry(saved: Dict[str, Any], vendor: str) -> Dict[str, Any]:
+    vendors = saved.get("vendors", {})
+    if not isinstance(vendors, dict):
+        return {}
+    target = _marker_review_vendor_key(vendor)
+    for key, entry in vendors.items():
+        if _marker_review_vendor_key(key) == target and isinstance(entry, dict):
+            return entry
+        if isinstance(entry, dict) and _marker_review_vendor_key(entry.get("vendor", "")) == target:
+            return entry
+    return {}
+
+
+def _as_rel_marker_path(value: Any, library_root: Path) -> str:
+    txt = str(value or "").strip()
+    if not txt:
+        return ""
+    p = Path(txt).expanduser()
+    if p.is_absolute():
+        try:
+            return p.resolve().relative_to(library_root.resolve()).as_posix()
+        except Exception:
+            return ""
+    txt = txt.replace("\\", "/").lstrip("/")
+    if not txt or txt.startswith("../") or "/../" in txt:
+        return ""
+    return txt
+
+
+def _load_lr_marker_library_catalog(
+    *,
+    library_root: Path = DEFAULT_LR_MARKER_LIBRARY_ROOT,
+    review_path: Path = DEFAULT_LR_MARKER_REVIEW_FILE,
+) -> Dict[str, Any]:
+    library_root = library_root.expanduser().resolve()
+    review_path = review_path.expanduser().resolve()
+    defaults = {"min_area": 256, "min_short_side": 12}
+    saved = _load_lr_marker_saved_review(review_path)
+    vendors_out: List[Dict[str, Any]] = []
+    if not library_root.is_dir():
+        return {
+            "ok": False,
+            "error": f"libreria marker non trovata: {library_root.as_posix()}",
+            "library_root": library_root.as_posix(),
+            "review_path": review_path.as_posix(),
+            "review_exists": bool(review_path.is_file()),
+            "defaults": defaults,
+            "vendors": [],
+        }
+
+    for vendor_dir in sorted([p for p in library_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+        manifest_path = vendor_dir / "manifest.json"
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = []
+        if not isinstance(manifest, list):
+            continue
+        vendor = vendor_dir.name
+        saved_entry = _saved_lr_marker_vendor_entry(saved, vendor)
+        min_area = _safe_int(saved_entry.get("min_area"), defaults["min_area"]) if saved_entry else defaults["min_area"]
+        min_short = (
+            _safe_int(saved_entry.get("min_short_side"), defaults["min_short_side"])
+            if saved_entry
+            else defaults["min_short_side"]
+        )
+        accepted_saved = {
+            _as_rel_marker_path(x, library_root)
+            for x in (saved_entry.get("accepted", []) if isinstance(saved_entry, dict) else [])
+        }
+        rejected_saved = {
+            _as_rel_marker_path(x, library_root)
+            for x in (saved_entry.get("rejected", []) if isinstance(saved_entry, dict) else [])
+        }
+        accepted_saved.discard("")
+        rejected_saved.discard("")
+        markers: List[Dict[str, Any]] = []
+        for item in manifest:
+            if not isinstance(item, dict):
+                continue
+            template_raw = str(item.get("template_path", "") or "").strip()
+            template_path = Path(template_raw).expanduser() if template_raw else vendor_dir / str(item.get("name", "") or "")
+            if not template_path.is_absolute():
+                template_path = (vendor_dir / template_path).resolve()
+            else:
+                template_path = template_path.resolve()
+            if not template_path.is_file() or not _path_is_under(template_path, library_root):
+                continue
+            rel_path = template_path.relative_to(library_root).as_posix()
+            width = _safe_int(item.get("width"), 0)
+            height = _safe_int(item.get("height"), 0)
+            area = max(0, width) * max(0, height)
+            short_side = min(max(0, width), max(0, height))
+            if rel_path in accepted_saved:
+                decision = "accepted"
+                decision_source = "saved"
+            elif rel_path in rejected_saved:
+                decision = "rejected"
+                decision_source = "saved"
+            elif area >= max(0, min_area) and short_side >= max(0, min_short):
+                decision = "accepted"
+                decision_source = "vendor_threshold" if saved_entry else "default_threshold"
+            else:
+                decision = "rejected"
+                decision_source = "vendor_threshold" if saved_entry else "default_threshold"
+            markers.append(
+                {
+                    "vendor": str(item.get("vendor", vendor) or vendor),
+                    "name": template_path.name,
+                    "rel_path": rel_path,
+                    "template_path": template_path.as_posix(),
+                    "source_path": str(item.get("source_path", "") or ""),
+                    "config_dir": str(item.get("config_dir", "") or ""),
+                    "width": width,
+                    "height": height,
+                    "area": area,
+                    "mean": _safe_float(item.get("mean"), 0.0),
+                    "std": _safe_float(item.get("std"), 0.0),
+                    "digest": str(item.get("digest", "") or ""),
+                    "best_similarity_to_kept": _safe_float(item.get("best_similarity_to_kept"), -1.0),
+                    "decision": decision,
+                    "decision_source": decision_source,
+                }
+            )
+        markers.sort(key=lambda m: (str(m.get("name", "")).lower(), str(m.get("rel_path", ""))))
+        if not markers:
+            continue
+        vendors_out.append(
+            {
+                "vendor": vendor,
+                "rule": {
+                    "min_area": int(max(0, min_area)),
+                    "min_short_side": int(max(0, min_short)),
+                },
+                "markers": markers,
+            }
+        )
+    return {
+        "ok": True,
+        "library_root": library_root.as_posix(),
+        "review_path": review_path.as_posix(),
+        "review_exists": bool(review_path.is_file()),
+        "defaults": defaults,
+        "vendors": vendors_out,
+    }
+
+
+def _save_lr_marker_library_review(
+    payload: Dict[str, Any],
+    *,
+    library_root: Path = DEFAULT_LR_MARKER_LIBRARY_ROOT,
+    review_path: Path = DEFAULT_LR_MARKER_REVIEW_FILE,
+) -> Dict[str, Any]:
+    library_root = library_root.expanduser().resolve()
+    review_path = review_path.expanduser().resolve()
+    catalog = _load_lr_marker_library_catalog(library_root=library_root, review_path=review_path)
+    known_by_vendor: Dict[str, set[str]] = {}
+    for vendor in catalog.get("vendors", []):
+        if not isinstance(vendor, dict):
+            continue
+        vendor_name = str(vendor.get("vendor", "") or "").strip()
+        known_by_vendor[vendor_name] = {
+            str(m.get("rel_path", "") or "")
+            for m in vendor.get("markers", [])
+            if isinstance(m, dict) and str(m.get("rel_path", "") or "").strip()
+        }
+    raw_vendors = payload.get("vendors", {})
+    if not isinstance(raw_vendors, dict):
+        raw_vendors = {}
+    vendors_out: Dict[str, Any] = {}
+    for vendor_name, entry_raw in raw_vendors.items():
+        if not isinstance(entry_raw, dict):
+            continue
+        vendor = str(entry_raw.get("vendor", vendor_name) or vendor_name).strip()
+        if vendor not in known_by_vendor:
+            continue
+        known = known_by_vendor[vendor]
+        accepted = sorted(
+            {
+                rel
+                for rel in (_as_rel_marker_path(x, library_root) for x in entry_raw.get("accepted", []))
+                if rel in known
+            }
+        )
+        rejected = sorted(
+            {
+                rel
+                for rel in (_as_rel_marker_path(x, library_root) for x in entry_raw.get("rejected", []))
+                if rel in known
+            }.difference(accepted)
+        )
+        missing = sorted(known.difference(accepted).difference(rejected))
+        rejected = sorted(set(rejected).union(missing))
+        vendors_out[vendor] = {
+            "vendor": vendor,
+            "min_area": max(0, _safe_int(entry_raw.get("min_area"), 256)),
+            "min_short_side": max(0, _safe_int(entry_raw.get("min_short_side"), 12)),
+            "accepted": accepted,
+            "rejected": rejected,
+        }
+    review = {
+        "version": 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "library_root": library_root.as_posix(),
+        "defaults": {"min_area": 256, "min_short_side": 12},
+        "vendors": vendors_out,
+    }
+    review_path.parent.mkdir(parents=True, exist_ok=True)
+    review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "ok": True,
+        "review_path": review_path.as_posix(),
+        "vendors_saved": len(vendors_out),
+        "accepted_total": sum(len(v.get("accepted", [])) for v in vendors_out.values()),
+        "rejected_total": sum(len(v.get("rejected", [])) for v in vendors_out.values()),
+    }
 
 
 def _rect_metrics_from_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -14478,16 +15319,28 @@ def _recompute_line16_from_lr_marker_evidence(summary: Dict[str, Any], evidence:
     min_score = max(0.62, _safe_float(model.get("lr_marker_min_match_score"), 0.62))
     target_w = _safe_int(row.get("line_09_video_x_size") or row.get("line_07_video_input_size_x"), 0)
     target_h = _safe_int(row.get("line_10_video_y_size") or row.get("line_08_video_input_size_y"), 0)
+    bundle_method = str(model.get("lr_marker_method", "") or row.get("lr_marker_method", "") or "").strip().lower() == "bundle"
+    if not bundle_method:
+        bundle_method = any(
+            str((item if isinstance(item, dict) else {}).get("lr_marker_method", "") or "").strip().lower() == "bundle"
+            for item in items
+        )
     order = ("NF", "LR", "UD", "LRUD")
     groups: Dict[str, Dict[str, Any]] = {
-        key: {"top": None, "left": None, "bottom": None, "right": None, "boxes": 0}
+        key: {"top": None, "left": None, "bottom": None, "right": None, "boxes": 0, "widths": [], "heights": []}
         for key in order
     }
     boxes_count = 0
     for item_raw in items:
         item = dict(item_raw) if isinstance(item_raw, dict) else {}
-        group_key = str(item.get("quadrant_group", "") or "").strip().upper()
+        group_key = str(
+            item.get("orientation_group", "") if bundle_method else ""
+        ).strip().upper()
         if group_key not in groups:
+            group_key = str(item.get("quadrant_group", "") or "").strip().upper()
+        if group_key not in groups:
+            continue
+        if bundle_method and str(item.get("status", "") or "").strip().lower() != "ok":
             continue
         if str(item.get("quadrant_status", "") or "").strip().lower() == "invalid":
             continue
@@ -14500,6 +15353,8 @@ def _recompute_line16_from_lr_marker_evidence(summary: Dict[str, Any], evidence:
             continue
         review_reason = str(item.get("review_reason", "") or "")
         if _lr_marker_evidence_truthy(item.get("match_patch_is_blank")) or "blank_marker_match" in review_reason.split(";"):
+            continue
+        if _safe_float(item.get("match_patch_std"), 0.0) < 3.0 or "low_texture_marker_match" in review_reason.split(";"):
             continue
         image_w = _safe_int(item.get("image_width"), 0)
         image_h = _safe_int(item.get("image_height"), 0)
@@ -14517,14 +15372,41 @@ def _recompute_line16_from_lr_marker_evidence(summary: Dict[str, Any], evidence:
         env["bottom"] = bottom if env["bottom"] is None else max(int(env["bottom"]), bottom)
         env["right"] = right if env["right"] is None else max(int(env["right"]), right)
         env["boxes"] = int(env["boxes"]) + 1
+        if isinstance(env.get("widths"), list):
+            env["widths"].append(int(right - left + 1))
+        if isinstance(env.get("heights"), list):
+            env["heights"].append(int(bottom - top + 1))
         boxes_count += 1
+
+    unstable_groups: List[str] = []
+    for key in order:
+        env = groups[key]
+        if int(env["boxes"]) <= 0:
+            continue
+        widths = [int(v) for v in env.get("widths", [])] if isinstance(env.get("widths"), list) else []
+        heights = [int(v) for v in env.get("heights", [])] if isinstance(env.get("heights"), list) else []
+        median_w = statistics.median(widths) if widths else 0.0
+        median_h = statistics.median(heights) if heights else 0.0
+        envelope_w = int(env["right"]) - int(env["left"]) + 1
+        envelope_h = int(env["bottom"]) - int(env["top"]) + 1
+        env["median_width"] = float(median_w)
+        env["median_height"] = float(median_h)
+        env["envelope_width"] = int(envelope_w)
+        env["envelope_height"] = int(envelope_h)
+        if (
+            not bundle_method
+            and (envelope_w > max(80.0, float(median_w) * 6.0) or envelope_h > max(80.0, float(median_h) * 6.0))
+        ):
+            env["unstable"] = 1
+            unstable_groups.append(key)
 
     groups_json = json.dumps(
         {
             "min_match_score": float(min_score),
             "target_image_width": int(target_w or 0),
             "target_image_height": int(target_h or 0),
-            "grouping": "quadrant_marker_sugiu",
+            "grouping": "bundle_quadrant_marker_official_rect_axes" if bundle_method else "quadrant_marker_sugiu",
+            "unstable_groups": unstable_groups,
             "groups": groups,
         },
         ensure_ascii=False,
@@ -14532,14 +15414,21 @@ def _recompute_line16_from_lr_marker_evidence(summary: Dict[str, Any], evidence:
     )
     if any(int(groups[key]["boxes"]) <= 0 for key in order):
         line16 = ""
-        source = "lr_marker_quadrant_envelope_missing_groups"
+        source = "lr_marker_envelope_missing_groups"
+    elif unstable_groups:
+        line16 = ""
+        source = "lr_marker_envelope_unstable_groups"
     else:
         line16 = "".join(
             f"{int(groups[key]['top'])}|{int(groups[key]['left'])}|{int(groups[key]['bottom'])}|{int(groups[key]['right'])}|"
             "1|0:0.000000:0:0:0:0:0|0|;"
             for key in order
         )
-        source = "lr_marker_quadrant_orientation_envelopes_pending_thresholds"
+        source = (
+            "bundle_marker_orientation_envelopes_pending_thresholds"
+            if bundle_method
+            else "lr_marker_quadrant_orientation_envelopes_pending_thresholds"
+        )
     row["line_16_rect_orientation"] = line16
     row["line_16_source"] = source
     row["line_16_marker_boxes_count"] = int(boxes_count)
@@ -15283,10 +16172,12 @@ def _run_safe_runner(
     low_confidence_policy: str,
     vendor_min_confidence: float,
     probe_min_confidence: float,
+    lr_marker_method: str,
     lr_marker_template_policy: str,
     no_generated_images: bool = False,
     no_split_symlinks: bool = False,
     excluded_images_rel: Optional[List[str]] = None,
+    lr_marker_manual_seeds: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     run_dir = store.run_dir(run_id)
     safe_runner = (SCRIPT_DIR / "run_pipeline_single_folder_safe.py").resolve()
@@ -15321,6 +16212,16 @@ def _run_safe_runner(
         str(probe_min_confidence),
         "--lr-marker-template-policy",
         str(lr_marker_template_policy),
+        "--lr-marker-method",
+        str(lr_marker_method),
+        "--lr-marker-bundle-dir",
+        DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR.expanduser().resolve().as_posix(),
+        "--lr-marker-bundle-zip",
+        DEFAULT_ORIENTATION_MARKER_BUNDLE_ZIP.expanduser().resolve().as_posix(),
+        "--lr-marker-bundle-library-root",
+        DEFAULT_ORIENTATION_MARKER_BUNDLE_LIBRARY_ROOT.expanduser().resolve().as_posix(),
+        "--lr-marker-review-file",
+        DEFAULT_LR_MARKER_REVIEW_FILE.expanduser().resolve().as_posix(),
     ]
     excluded_images = [str(x).strip() for x in (excluded_images_rel or []) if str(x).strip()]
     if excluded_images:
@@ -15338,6 +16239,23 @@ def _run_safe_runner(
             encoding="utf-8",
         )
         cmd.extend(["--exclude-images-file", exclude_path.as_posix()])
+    manual_seeds = [item for item in (lr_marker_manual_seeds or []) if isinstance(item, dict)]
+    if manual_seeds:
+        manual_seeds_path = run_dir / "manual_lr_marker_seeds.json"
+        manual_seeds_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "source": "workbench_review_annotations",
+                    "seeds": manual_seeds,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        cmd.extend(["--lr-marker-manual-seeds-file", manual_seeds_path.as_posix()])
     if bool(no_generated_images):
         cmd.append("--no-generated-images")
     if bool(no_split_symlinks):
@@ -15353,6 +16271,8 @@ def _run_safe_runner(
             "input_folder": input_folder.as_posix(),
             "excluded_images_rel": excluded_images,
             "excluded_images_count": int(len(excluded_images)),
+            "lr_marker_method": str(lr_marker_method),
+            "lr_marker_manual_seeds_count": int(len(manual_seeds)),
             "started_at": datetime.now(timezone.utc).isoformat(),
             "command": " ".join(cmd),
             "events": [],
@@ -15535,6 +16455,103 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
                 out.append(rel_txt)
         return out
 
+    def _parse_lr_marker_seed_rect(value: Any) -> Optional[str]:
+        parts = re.split(r"[|,;\s]+", str(value or "").strip())
+        vals: List[int] = []
+        for part in parts:
+            if not part:
+                continue
+            try:
+                vals.append(int(round(float(part))))
+            except ValueError:
+                continue
+        if len(vals) < 4:
+            return None
+        top, left, bottom, right = vals[:4]
+        if bottom <= top or right <= left:
+            return None
+        return f"{top},{left},{bottom},{right}"
+
+    def _normalize_lr_marker_manual_seeds(raw_items: Any) -> List[Dict[str, Any]]:
+        if isinstance(raw_items, dict):
+            raw_items = raw_items.get("seeds", raw_items.get("lr_marker_manual_seeds", []))
+        if not isinstance(raw_items, list):
+            return []
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for idx, raw in enumerate(raw_items, start=1):
+            if not isinstance(raw, dict):
+                continue
+            rect = _parse_lr_marker_seed_rect(raw.get("rect", raw.get("marker_rect", "")))
+            if not rect:
+                continue
+            flag = str(raw.get("flag", "") or "").strip().lower()
+            correction = str(raw.get("correction", "") or "").strip()
+            if flag == "exclude" or correction.lower() == "exclude":
+                continue
+            image_rel = str(raw.get("image_rel", "") or "").strip()
+            image_path = str(raw.get("image_path", "") or raw.get("source_image_path", "") or "").strip()
+            review_key = str(raw.get("review_key", "") or "").strip()
+            if not image_rel and review_key and "|" in review_key:
+                image_rel = review_key.split("|", 1)[1].strip()
+            key = (image_rel, image_path, rect)
+            if key in seen:
+                continue
+            seen.add(key)
+            seed: Dict[str, Any] = {
+                "seed_index": int(raw.get("seed_index", idx) or idx),
+                "review_key": review_key,
+                "image_rel": image_rel,
+                "image_path": image_path,
+                "image_index": raw.get("image_index", ""),
+                "rect": rect,
+                "flag": flag,
+                "correction": correction,
+                "comment": str(raw.get("comment", "") or ""),
+            }
+            out.append(seed)
+        return out
+
+    def _lr_marker_manual_seeds_from_annotations(annotations: Any) -> List[Dict[str, Any]]:
+        if not isinstance(annotations, dict):
+            return []
+        reviews = annotations.get("lr_marker_reviews", {})
+        if not isinstance(reviews, dict):
+            return []
+        raw_seeds: List[Dict[str, Any]] = []
+        for key, rec in reviews.items():
+            if not isinstance(rec, dict):
+                continue
+            rect = rec.get("rect", "")
+            context = rec.get("context", {})
+            if not isinstance(context, dict):
+                context = {}
+            raw_seeds.append(
+                {
+                    "review_key": str(key),
+                    "image_rel": str(context.get("image_rel", "") or ""),
+                    "image_index": context.get("image_index", ""),
+                    "rect": rect,
+                    "flag": rec.get("flag", ""),
+                    "correction": rec.get("correction", ""),
+                    "comment": rec.get("comment", ""),
+                }
+            )
+        return _normalize_lr_marker_manual_seeds(raw_seeds)
+
+    def _load_lr_marker_manual_seeds_from_run(source_run_id: str) -> List[Dict[str, Any]]:
+        source_run_id = str(source_run_id or "").strip()
+        if not source_run_id:
+            return []
+        annotations_path = store.annotations_path(source_run_id)
+        if not annotations_path.is_file():
+            return []
+        try:
+            annotations = json.loads(annotations_path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        return _lr_marker_manual_seeds_from_annotations(annotations)
+
     def _load_saved_exclusions(input_folder: Path) -> List[str]:
         memory = _read_exclusions_memory()
         entry = memory.get("folders", {}).get(_folder_memory_key(input_folder), {})
@@ -15567,6 +16584,9 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
         lr_marker_template_policy = str(payload.get("lr_marker_template_policy", "historical_best_then_derived")).strip()
         if lr_marker_template_policy not in {"historical_best_then_derived", "historical_best", "derived_folder"}:
             lr_marker_template_policy = "historical_best_then_derived"
+        lr_marker_method = str(payload.get("lr_marker_method", "bundle")).strip().lower()
+        if lr_marker_method not in {"bundle", "classical"}:
+            lr_marker_method = "bundle"
         excluded_json_raw = str(payload.get("excluded_images_rel_json", "") or "").strip()
         if "excluded_images_rel" in payload:
             excluded_images_rel = _normalize_exclusion_items(payload.get("excluded_images_rel"), input_folder)
@@ -15576,6 +16596,10 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
             excluded_images_rel = _load_saved_exclusions(input_folder)
         if bool(payload.get("remember_exclusions", True)):
             _save_exclusions(input_folder, excluded_images_rel)
+        source_run_id = str(payload.get("source_run_id", "") or "").strip()
+        lr_marker_manual_seeds = _normalize_lr_marker_manual_seeds(payload.get("lr_marker_manual_seeds", []))
+        if not lr_marker_manual_seeds and source_run_id:
+            lr_marker_manual_seeds = _load_lr_marker_manual_seeds_from_run(source_run_id)
 
         run_id = "run_" + datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
         run_dir = store.run_dir(run_id)
@@ -15585,6 +16609,9 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
             "run_id": run_id,
             "input_folder": input_folder.as_posix(),
             "excluded_images_count": int(len(excluded_images_rel)),
+            "source_run_id": source_run_id,
+            "lr_marker_method": lr_marker_method,
+            "lr_marker_manual_seeds_count": int(len(lr_marker_manual_seeds)),
             "status": "queued",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "run_dir": run_dir.as_posix(),
@@ -15596,6 +16623,9 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
             "input_folder": input_folder.as_posix(),
             "excluded_images_rel": excluded_images_rel,
             "excluded_images_count": int(len(excluded_images_rel)),
+            "source_run_id": source_run_id,
+            "lr_marker_method": lr_marker_method,
+            "lr_marker_manual_seeds_count": int(len(lr_marker_manual_seeds)),
             "run_dir": run_dir.as_posix(),
             "status": "queued",
             "stage": "queued",
@@ -15620,10 +16650,12 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
                 "low_confidence_policy": str(payload.get("low_confidence_policy", "review")),
                 "vendor_min_confidence": _safe_float(payload.get("vendor_min_confidence"), 0.50),
                 "probe_min_confidence": _safe_float(payload.get("probe_min_confidence"), 0.50),
+                "lr_marker_method": lr_marker_method,
                 "lr_marker_template_policy": lr_marker_template_policy,
                 "no_generated_images": bool(payload.get("no_generated_images", False)),
                 "no_split_symlinks": bool(payload.get("no_split_symlinks", False)),
                 "excluded_images_rel": excluded_images_rel,
+                "lr_marker_manual_seeds": lr_marker_manual_seeds,
             },
             daemon=True,
         )
@@ -15723,6 +16755,7 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
                     low_confidence_policy=str(payload.get("low_confidence_policy", "review")),
                     vendor_min_confidence=_safe_float(payload.get("vendor_min_confidence"), 0.50),
                     probe_min_confidence=_safe_float(payload.get("probe_min_confidence"), 0.50),
+                    lr_marker_method="bundle",
                     lr_marker_template_policy=lr_policy,
                     no_generated_images=True,
                     no_split_symlinks=True,
@@ -16041,6 +17074,42 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
             dirs=listing.get("dirs", []),
             error_msg=error_msg,
         )
+
+    @app.get("/lr-marker-library")
+    def lr_marker_library_page():
+        return render_template_string(LR_MARKER_LIBRARY_PAGE)
+
+    @app.get("/api/lr_marker_templates/review")
+    def api_lr_marker_templates_review():
+        payload = _load_lr_marker_library_catalog()
+        if not payload.get("ok", False):
+            return jsonify({"error": str(payload.get("error", "errore lettura libreria marker"))}), 500
+        return jsonify(payload)
+
+    @app.post("/api/lr_marker_templates/review")
+    def api_lr_marker_templates_review_save():
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"error": "payload non valido"}), 400
+        try:
+            out = _save_lr_marker_library_review(payload)
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify(out)
+
+    @app.get("/api/lr_marker_templates/review/image")
+    def api_lr_marker_templates_review_image():
+        rel_raw = str(request.args.get("path", "")).strip()
+        rel = _as_rel_marker_path(rel_raw, DEFAULT_LR_MARKER_LIBRARY_ROOT)
+        if not rel:
+            return jsonify({"error": "path mancante o non valido"}), 400
+        root = DEFAULT_LR_MARKER_LIBRARY_ROOT.expanduser().resolve()
+        target = (root / rel).resolve()
+        if not _path_is_under(target, root):
+            return jsonify({"error": "path non valido"}), 403
+        if not target.is_file():
+            return jsonify({"error": "marker non trovato"}), 404
+        return send_file(target)
 
     @app.post("/api/dialog/select_folder")
     def api_select_folder():

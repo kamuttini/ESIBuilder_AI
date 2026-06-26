@@ -51,6 +51,7 @@ class BBoxPredRow:
 class ManifestLine:
     sample_id: str
     split: str
+    depth_mm: float
     x_gt_video: float
     y_top_gt_video: float
     y_bottom_gt_video: float
@@ -301,9 +302,14 @@ def load_manifest_lines(manifest_csv: Path) -> Dict[str, ManifestLine]:
                 x2 = _f(r["x2"])
                 y1 = _f(r["y1"])
                 y2 = _f(r["y2"])
+                try:
+                    depth_mm = _f(r.get("depth_mm", "nan"))
+                except Exception:
+                    depth_mm = float("nan")
                 out[sid] = ManifestLine(
                     sample_id=sid,
                     split=str(r["split"]).strip().lower(),
+                    depth_mm=float(depth_mm),
                     x_gt_video=0.5 * (x1 + x2),
                     y_top_gt_video=min(y1, y2),
                     y_bottom_gt_video=max(y1, y2),
@@ -618,6 +624,168 @@ def nearest_tick_row(y_target: float, tick_rows: Sequence[float], max_dist: floa
     return None
 
 
+def _label_value_candidates_cm(value: int, depth_cm: float) -> List[float]:
+    """Return plausible centimeter values for OCR integers.
+
+    Tesseract often reads decimal labels like "8.0 cm" as "80" when the
+    whitelist strips punctuation. Keep both raw and decimal-shifted variants,
+    then let the geometric fit pick a coherent scale.
+    """
+    raw = float(value)
+    max_cm = float(depth_cm) + 2.0 if math.isfinite(float(depth_cm)) and depth_cm > 0 else max(30.0, raw + 2.0)
+    candidates: List[float] = []
+
+    def add(v: float) -> None:
+        if not math.isfinite(float(v)):
+            return
+        if v < -0.01 or v > max_cm:
+            return
+        if all(abs(float(v) - old) > 1e-6 for old in candidates):
+            candidates.append(float(v))
+
+    add(raw)
+    if raw >= 10.0:
+        add(raw / 10.0)
+    if raw >= 100.0:
+        add(raw / 100.0)
+    return candidates
+
+
+def solve_scale_endpoints_from_ocr(
+    tokens: Sequence[OCRToken],
+    tick_rows: Sequence[float],
+    depth_mm: float,
+    max_rmse_px: float,
+) -> Optional[Dict[str, float]]:
+    """Fit y = a + b * value_cm and return 0/depth endpoints snapped to ticks."""
+    rows = _dedupe_tick_rows(tick_rows=tick_rows, min_gap=2.0)
+    if len(tokens) < 2 or len(rows) < 3:
+        return None
+
+    if not math.isfinite(float(depth_mm)) or depth_mm <= 0:
+        return None
+    depth_cm = float(depth_mm) / 10.0
+    if depth_cm <= 0.0:
+        return None
+
+    points: List[Tuple[int, float, float, float]] = []
+    tick_tol_for_labels = max(10.0, 0.45 * float(max_rmse_px))
+    if len(rows) >= 2:
+        diffs = np.diff(np.asarray(rows, dtype=np.float32))
+        valid_diffs = [float(d) for d in diffs if 2.0 <= float(d) <= 90.0]
+        if valid_diffs:
+            tick_tol_for_labels = max(tick_tol_for_labels, 0.55 * float(np.median(valid_diffs)))
+
+    for token_idx, token in enumerate(tokens):
+        y_tick = nearest_tick_row(float(token.y_center), tick_rows=rows, max_dist=tick_tol_for_labels)
+        if y_tick is None:
+            continue
+        for value_cm in _label_value_candidates_cm(int(token.value), depth_cm=depth_cm):
+            points.append((token_idx, float(value_cm), float(y_tick), float(token.conf)))
+
+    if len(points) < 2:
+        return None
+
+    best: Optional[Dict[str, float]] = None
+    best_score = -1e18
+    endpoint_tol = max(12.0, float(max_rmse_px))
+
+    for i, p1 in enumerate(points):
+        for p2 in points[i + 1 :]:
+            if p1[0] == p2[0]:
+                continue
+            v1, y1 = p1[1], p1[2]
+            v2, y2 = p2[1], p2[2]
+            if abs(v2 - v1) < 0.75:
+                continue
+
+            slope = (y2 - y1) / (v2 - v1)
+            if abs(slope) < 6.0 or abs(slope) > 240.0:
+                continue
+            intercept = y1 - slope * v1
+
+            # Use one best residual per original OCR token to avoid double-counting
+            # ambiguous labels such as "10" -> 10 or 1.0.
+            by_token: Dict[int, float] = {}
+            conf_by_token: Dict[int, float] = {}
+            values_by_token: Dict[int, float] = {}
+            for token_idx, value_cm, y_tick, conf in points:
+                residual = abs((intercept + slope * value_cm) - y_tick)
+                old = by_token.get(token_idx)
+                if old is None or residual < old:
+                    by_token[token_idx] = float(residual)
+                    conf_by_token[token_idx] = float(conf)
+                    values_by_token[token_idx] = float(value_cm)
+
+            if len(by_token) < 2:
+                continue
+
+            residual_vals = list(by_token.values())
+            fit_tol = max(9.0, min(30.0, 0.28 * abs(slope)))
+            inlier_res = [r for r in residual_vals if r <= fit_tol]
+            if len(inlier_res) < 2:
+                continue
+
+            inlier_values = [
+                values_by_token[token_idx]
+                for token_idx, residual in by_token.items()
+                if residual <= fit_tol
+            ]
+            value_span = max(inlier_values) - min(inlier_values) if inlier_values else 0.0
+            rmse = float(math.sqrt(sum(r * r for r in inlier_res) / max(1, len(inlier_res))))
+            y_zero_model = float(intercept)
+            y_final_model = float(intercept + slope * depth_cm)
+
+            # Snapping is mandatory: final vertices must land on actual tick rows.
+            endpoint_snap_tol = max(endpoint_tol, min(45.0, 0.38 * abs(slope)))
+            y_zero_snap = nearest_tick_row(y_zero_model, tick_rows=rows, max_dist=endpoint_snap_tol)
+            y_final_snap = nearest_tick_row(y_final_model, tick_rows=rows, max_dist=endpoint_snap_tol)
+            if y_zero_snap is None or y_final_snap is None:
+                continue
+            if abs(float(y_zero_snap) - float(y_final_snap)) < 8.0:
+                continue
+
+            # Depth endpoint should usually be outside or near the observed label range.
+            coverage_bonus = min(1.0, value_span / max(1.0, depth_cm))
+            endpoint_penalty = 0.04 * (
+                abs(float(y_zero_model) - float(y_zero_snap)) + abs(float(y_final_model) - float(y_final_snap))
+            )
+            conf_bonus = 0.006 * sum(conf_by_token[token_idx] for token_idx, residual in by_token.items() if residual <= fit_tol)
+            score = (
+                34.0 * len(inlier_res)
+                + 28.0 * coverage_bonus
+                + conf_bonus
+                - 2.8 * rmse
+                - endpoint_penalty
+            )
+
+            if rmse > float(max_rmse_px):
+                score -= 24.0 + 1.5 * (rmse - float(max_rmse_px))
+
+            if score > best_score:
+                best_score = float(score)
+                best = {
+                    "y_zero": float(y_zero_snap),
+                    "y_final": float(y_final_snap),
+                    "slope_px_per_cm": float(slope),
+                    "intercept": float(intercept),
+                    "inliers": float(len(inlier_res)),
+                    "tokens_used": float(len(by_token)),
+                    "rmse_px": float(rmse),
+                    "value_span_cm": float(value_span),
+                    "depth_cm": float(depth_cm),
+                    "score": float(score),
+                }
+
+    if best is None:
+        return None
+    if best["inliers"] < 2.0:
+        return None
+    if best["rmse_px"] > max(float(max_rmse_px), 18.0) and best["inliers"] < 4.0:
+        return None
+    return best
+
+
 def _dedupe_tick_rows(tick_rows: Sequence[float], min_gap: float = 2.0) -> List[float]:
     vals = sorted(float(v) for v in tick_rows if math.isfinite(float(v)))
     if not vals:
@@ -731,6 +899,7 @@ def refine_row(
     ocr_min_conf: float,
     ocr_min_consistency: float,
     use_ocr: bool,
+    allow_uniform_y_snap: bool,
 ) -> Dict[str, object]:
     # Defaults.
     out: Dict[str, object] = {
@@ -755,6 +924,12 @@ def refine_row(
         "zero_tick_image": float("nan"),
         "last_tick_image": float("nan"),
         "zero_tick_source": "none",
+        "final_tick_source": "none",
+        "depth_cm_target": float("nan"),
+        "ocr_scale_inliers": 0,
+        "ocr_scale_rmse_px": float("nan"),
+        "ocr_scale_slope_px_per_cm": float("nan"),
+        "ocr_scale_value_span_cm": float("nan"),
     }
 
     try:
@@ -777,6 +952,8 @@ def refine_row(
     x_gt_img = float(gt.x_gt_video) * sx_to_img
     y_top_gt_img = float(gt.y_top_gt_video) * sy_to_img
     y_bottom_gt_img = float(gt.y_bottom_gt_video) * sy_to_img
+    depth_cm_target = float(gt.depth_mm) / 10.0 if math.isfinite(float(gt.depth_mm)) and gt.depth_mm > 0 else float("nan")
+    out["depth_cm_target"] = float(depth_cm_target)
 
     side = int(gt.label_side)
     x_before, y_top_before, y_bottom_before = baseline_line_from_bbox(
@@ -860,7 +1037,7 @@ def refine_row(
                     and 0.45 <= span_ratio <= 1.70
                     and center_shift <= max(55.0, 0.36 * pred_span)
                 )
-                if plausible:
+                if plausible and allow_uniform_y_snap:
                     y_top_after_img = float(y0_seq)
                     y_bottom_after_img = float(y1_seq)
                     out["anchor_source"] = "ticks_uniform"
@@ -916,6 +1093,48 @@ def refine_row(
                 out["ocr_values"] = "|".join(str(t.value) for t in tokens_img[:18])
                 out["ocr_y_image"] = "|".join(f"{t.y_center:.1f}" for t in tokens_img[:18])
 
+                if len(tokens_img) >= 2 and len(tick_rows_seq) >= 4:
+                    tick_step = float(out.get("tick_seq_step_px", float("nan")))
+                    if not math.isfinite(tick_step) or tick_step < 2.0:
+                        tick_step = float(det.tick_step) if math.isfinite(float(det.tick_step)) else float("nan")
+                    tol = max(8.0, 0.55 * tick_step) if math.isfinite(tick_step) else 14.0
+
+                    endpoint_fit = solve_scale_endpoints_from_ocr(
+                        tokens=tokens_img,
+                        tick_rows=tick_rows_seq,
+                        depth_mm=float(gt.depth_mm),
+                        max_rmse_px=max(10.0, 0.36 * tick_step) if math.isfinite(tick_step) else 14.0,
+                    )
+                    if endpoint_fit is not None:
+                        y_zero = float(endpoint_fit["y_zero"])
+                        y_final = float(endpoint_fit["y_final"])
+                        fit_top = float(min(y_zero, y_final))
+                        fit_bottom = float(max(y_zero, y_final))
+                        fit_span = max(1.0, fit_bottom - fit_top)
+                        pred_span = max(8.0, float(y_bottom_before) - float(y_top_before))
+                        span_ratio = float(fit_span / pred_span)
+                        center_shift = abs(0.5 * (fit_top + fit_bottom) - 0.5 * (float(y_top_before) + float(y_bottom_before)))
+                        fit_plausible = (
+                            0.62 <= span_ratio <= 1.38
+                            and center_shift <= max(42.0, 0.14 * pred_span)
+                            and (
+                                int(endpoint_fit["inliers"]) >= 3
+                                or float(endpoint_fit["value_span_cm"]) >= max(2.0, 0.55 * float(endpoint_fit["depth_cm"]))
+                            )
+                        )
+                        if fit_plausible:
+                            y_top_after_img = float(fit_top)
+                            y_bottom_after_img = float(fit_bottom)
+                            out["anchor_source"] = "ticks+ocr_depth"
+                            out["zero_tick_image"] = float(y_zero)
+                            out["last_tick_image"] = float(y_final)
+                            out["zero_tick_source"] = "ocr_scale_fit"
+                            out["final_tick_source"] = "ocr_scale_fit"
+                        out["ocr_scale_inliers"] = int(endpoint_fit["inliers"])
+                        out["ocr_scale_rmse_px"] = float(endpoint_fit["rmse_px"])
+                        out["ocr_scale_slope_px_per_cm"] = float(endpoint_fit["slope_px_per_cm"])
+                        out["ocr_scale_value_span_cm"] = float(endpoint_fit["value_span_cm"])
+
                 if (
                     len(tokens_img) >= 3
                     and consistency >= float(ocr_min_consistency)
@@ -934,22 +1153,31 @@ def refine_row(
                     else:
                         y_zero_snap = None
 
-                    # Last tick comes from bottom of the regular sequence.
+                    # The final-depth tick is the opposite endpoint of the regular sequence.
                     if tick_rows_seq:
-                        y_last_seq = float(np.max(np.asarray(tick_rows_seq, dtype=np.float32)))
+                        y_min_seq = float(np.min(np.asarray(tick_rows_seq, dtype=np.float32)))
+                        y_max_seq = float(np.max(np.asarray(tick_rows_seq, dtype=np.float32)))
                     else:
-                        y_last_seq = float("nan")
+                        y_min_seq = float("nan")
+                        y_max_seq = float("nan")
 
-                    if y_zero_snap is not None and math.isfinite(y_last_seq) and y_last_seq > y_zero_snap + 1.0:
-                        y_top_after_img = float(y_zero_snap)
-                        y_bottom_after_img = float(y_last_seq)
-                        out["anchor_source"] = "ticks+ocr_zero"
-                        out["zero_tick_image"] = float(y_top_after_img)
-                        out["last_tick_image"] = float(y_bottom_after_img)
-                        out["zero_tick_source"] = "ocr_zero"
+                    if y_zero_snap is not None and math.isfinite(y_min_seq) and math.isfinite(y_max_seq):
+                        if abs(float(y_zero_snap) - y_min_seq) <= abs(float(y_zero_snap) - y_max_seq):
+                            y_final_seq = y_max_seq
+                        else:
+                            y_final_seq = y_min_seq
+                        if out.get("anchor_source") != "ticks+ocr_depth":
+                            y_top_after_img = float(min(y_zero_snap, y_final_seq))
+                            y_bottom_after_img = float(max(y_zero_snap, y_final_seq))
+                            out["anchor_source"] = "ticks+ocr_zero"
+                            out["zero_tick_image"] = float(y_zero_snap)
+                            out["last_tick_image"] = float(y_final_seq)
+                            out["zero_tick_source"] = "ocr_zero"
+                            out["final_tick_source"] = "uniform_last"
                     elif tick_rows_seq and out.get("anchor_source") == "ticks_uniform":
                         # Keep uniform tick endpoints when OCR is monotonic but no explicit zero.
                         out["zero_tick_source"] = "uniform_top_no_zero_ocr"
+                        out["final_tick_source"] = "uniform_last"
 
     y_top_after_img = float(np.clip(y_top_after_img, 0.0, max(0.0, h_img - 1.0)))
     y_bottom_after_img = float(np.clip(y_bottom_after_img, 0.0, max(0.0, h_img - 1.0)))
@@ -1152,6 +1380,11 @@ def build_review_html(
                 "ocr_dir": str(r.get("ocr_direction", "")),
                 "ocr_cons": f"{float(r.get('ocr_consistency', 0.0)):.2f}",
                 "zero_src": str(r.get("zero_tick_source", "")),
+                "final_src": str(r.get("final_tick_source", "")),
+                "depth_cm": f"{float(r.get('depth_cm_target', float('nan'))):.2f}",
+                "fit_n": f"{int(r.get('ocr_scale_inliers', 0))}",
+                "fit_rmse": f"{float(r.get('ocr_scale_rmse_px', float('nan'))):.2f}",
+                "fit_slope": f"{float(r.get('ocr_scale_slope_px_per_cm', float('nan'))):.2f}",
             }
             metrics_json = escape(json.dumps(metrics, ensure_ascii=False), quote=True)
             img_tag = (
@@ -1183,6 +1416,10 @@ def build_review_html(
             f"<td>{str(r.get('ocr_direction',''))}</td>"
             f"<td>{float(r.get('ocr_consistency', 0.0)):.2f}</td>"
             f"<td>{str(r.get('zero_tick_source',''))}</td>"
+            f"<td>{str(r.get('final_tick_source',''))}</td>"
+            f"<td>{float(r.get('depth_cm_target', float('nan'))):.2f}</td>"
+            f"<td>{int(r.get('ocr_scale_inliers', 0))}</td>"
+            f"<td>{float(r.get('ocr_scale_rmse_px', float('nan'))):.2f}</td>"
             "</tr>"
         )
 
@@ -1231,7 +1468,7 @@ def build_review_html(
       <tr>
         <th>#</th><th>Preview</th><th>sample_id</th><th>score_before</th><th>score_after</th>
         <th>x_before</th><th>x_after</th><th>y_before</th><th>y_after</th>
-        <th>source</th><th>tick_orient</th><th>tick_q</th><th>tick_n</th><th>ocr_n</th><th>ocr_dir</th><th>ocr_cons</th><th>zero_src</th>
+        <th>source</th><th>tick_orient</th><th>tick_q</th><th>tick_n</th><th>ocr_n</th><th>ocr_dir</th><th>ocr_cons</th><th>zero_src</th><th>final_src</th><th>depth_cm</th><th>fit_n</th><th>fit_rmse</th>
       </tr>
     </thead>
     <tbody>
@@ -1288,7 +1525,12 @@ def build_review_html(
         ['ocr_n', 'ocr_n'],
         ['ocr_dir', 'ocr_dir'],
         ['ocr_cons', 'ocr_cons'],
-        ['zero_src', 'zero_src']
+        ['zero_src', 'zero_src'],
+        ['final_src', 'final_src'],
+        ['depth_cm', 'depth_cm'],
+        ['fit_n', 'fit_n'],
+        ['fit_rmse', 'fit_rmse'],
+        ['fit_slope', 'fit_slope']
       ];
 
       function render(index) {{
@@ -1383,6 +1625,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ocr-min-confidence", type=float, default=24.0)
     p.add_argument("--ocr-min-consistency", type=float, default=0.58)
     p.add_argument("--no-ocr", action="store_true")
+    p.add_argument(
+        "--allow-uniform-y-snap",
+        action="store_true",
+        help="Allow snapping Y endpoints to first/last regular ticks without OCR confirmation.",
+    )
     p.add_argument("--max-rows-per-split", type=int, default=0, help="0 = all rows")
     p.add_argument("--max-review-rows", type=int, default=180)
     p.add_argument(
@@ -1446,6 +1693,7 @@ def main() -> int:
             "ocr_min_confidence": float(args.ocr_min_confidence),
             "ocr_min_consistency": float(args.ocr_min_consistency),
             "use_ocr": not bool(args.no_ocr),
+            "allow_uniform_y_snap": bool(args.allow_uniform_y_snap),
             "dataset_roots": [p.as_posix() for p in dataset_roots],
         },
         "artifacts": {},
@@ -1486,6 +1734,7 @@ def main() -> int:
                 ocr_min_conf=float(args.ocr_min_confidence),
                 ocr_min_consistency=float(args.ocr_min_consistency),
                 use_ocr=not bool(args.no_ocr),
+                allow_uniform_y_snap=bool(args.allow_uniform_y_snap),
             )
             refined_rows.append(refined)
             if i % 40 == 0:

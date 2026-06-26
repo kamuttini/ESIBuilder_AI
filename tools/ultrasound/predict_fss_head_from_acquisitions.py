@@ -29,6 +29,8 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
+import zipfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -59,6 +61,12 @@ from train_ultrasound_vendor_classifier import VendorClassifier, choose_device
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
 DEFAULT_LR_MARKER_VENDOR_LIBRARY = REPO_ROOT / "artifacts/10_active_pipeline/pipeline_fss_head/lr_marker_vendor_template_library"
+DEFAULT_LR_MARKER_REVIEW_FILE = DEFAULT_LR_MARKER_VENDOR_LIBRARY / "review_decisions.json"
+DEFAULT_ORIENTATION_MARKER_BUNDLE_ZIP = Path("/Users/Shared/41_orientation_marker_detector_bundle.zip")
+DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR = REPO_ROOT / "artifacts/41_orientation_marker_detector_bundle"
+DEFAULT_ORIENTATION_MARKER_BUNDLE_LIBRARY_ROOT = (
+    DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR / "orientation_marker_detector" / "templates"
+)
 ORIENTATION_TOOL_DIR = Path(__file__).resolve().parent.parent / "orientation"
 if ORIENTATION_TOOL_DIR.is_dir() and ORIENTATION_TOOL_DIR.as_posix() not in sys.path:
     sys.path.insert(0, ORIENTATION_TOOL_DIR.as_posix())
@@ -100,6 +108,14 @@ LR_MARKER_RELIABLE_MATCH_SCORE = 0.62
 LR_MARKER_MIN_TEXTURE_STD = 3.0
 LR_MARKER_MIN_HISTORICAL_TEMPLATE_AREA = 256
 LR_MARKER_MIN_HISTORICAL_TEMPLATE_SHORT_SIDE = 12
+LR_MARKER_MIN_RELIABLE_ROW_RATIO = 0.55
+LR_MARKER_MAX_BLANK_ROW_RATIO = 0.25
+LR_MARKER_MAX_LOW_TEXTURE_ROW_RATIO = 0.25
+LR_MARKER_MIN_DERIVED_TEMPLATE_AREA = 160
+LR_MARKER_MIN_DERIVED_TEMPLATE_SHORT_SIDE = 8
+LR_MARKER_MIN_MANUAL_TEMPLATE_AREA = 80
+LR_MARKER_MIN_MANUAL_TEMPLATE_SHORT_SIDE = 6
+LR_MARKER_DUAL_SUGIU_SEARCH_CONFIDENCE = 0.90
 # Expected acquisition filename pattern: timestamp_<vga|hdmi>_<WxH>[...]
 CAPTURE_FILENAME_PATTERN_RE = re.compile(
     r"^.+_(vga|hdmi)_(\d{3,5})[xX](\d{3,5})(?:[_\-].*)?$",
@@ -188,6 +204,7 @@ class FolderPrediction:
     lr_marker_best_template_path: str
     lr_marker_best_search_strategy: str
     lr_marker_source: str
+    lr_marker_method: str
     line_16_rect_orientation: str
     line_16_source: str
     line_16_marker_boxes_count: int
@@ -1312,6 +1329,137 @@ def _template_digest_for_dedup(path: Path) -> str:
     return hashlib.sha1(payload).hexdigest()
 
 
+def _normalize_lr_marker_review_vendor_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _load_lr_marker_template_review(path: Optional[Path]) -> Dict[str, object]:
+    if path is None:
+        return {"available": False, "error": "missing_review_file_path"}
+    review_path = path.expanduser()
+    if not review_path.is_absolute():
+        review_path = (REPO_ROOT / review_path).resolve()
+    else:
+        review_path = review_path.resolve()
+    if not review_path.is_file():
+        return {
+            "available": False,
+            "path": review_path.as_posix(),
+            "error": "review_file_not_found",
+        }
+    try:
+        payload = json.loads(review_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "available": False,
+            "path": review_path.as_posix(),
+            "error": f"review_file_invalid:{exc}",
+        }
+    if not isinstance(payload, dict):
+        return {
+            "available": False,
+            "path": review_path.as_posix(),
+            "error": "review_file_not_object",
+        }
+    raw_vendors = payload.get("vendors", {})
+    if not isinstance(raw_vendors, dict):
+        raw_vendors = {}
+    vendors: Dict[str, Dict[str, object]] = {}
+    for vendor_name, entry_raw in raw_vendors.items():
+        if not isinstance(entry_raw, dict):
+            continue
+        key = _normalize_lr_marker_review_vendor_key(vendor_name)
+        if not key:
+            continue
+        accepted = entry_raw.get("accepted", [])
+        rejected = entry_raw.get("rejected", [])
+        if not isinstance(accepted, list):
+            accepted = []
+        if not isinstance(rejected, list):
+            rejected = []
+        vendors[key] = {
+            "vendor": str(entry_raw.get("vendor", vendor_name) or vendor_name),
+            "min_area": int(float(entry_raw.get("min_area", 0) or 0)),
+            "min_short_side": int(float(entry_raw.get("min_short_side", 0) or 0)),
+            "accepted": {str(x).replace("\\", "/").lstrip("/") for x in accepted if str(x).strip()},
+            "rejected": {str(x).replace("\\", "/").lstrip("/") for x in rejected if str(x).strip()},
+        }
+    library_root_raw = str(payload.get("library_root", "") or "").strip()
+    library_root = Path(library_root_raw).expanduser() if library_root_raw else review_path.parent
+    if not library_root.is_absolute():
+        library_root = (REPO_ROOT / library_root).resolve()
+    else:
+        library_root = library_root.resolve()
+    return {
+        "available": True,
+        "path": review_path.as_posix(),
+        "library_root": library_root.as_posix(),
+        "vendors": vendors,
+    }
+
+
+def _lr_marker_review_vendor_entry(review: Dict[str, object], vendor_name: str) -> Optional[Dict[str, object]]:
+    vendors = review.get("vendors", {})
+    if not isinstance(vendors, dict):
+        return None
+    key = _normalize_lr_marker_review_vendor_key(vendor_name)
+    entry = vendors.get(key)
+    return entry if isinstance(entry, dict) else None
+
+
+def _lr_marker_review_rel_path(path: Path, library_root: Path) -> str:
+    try:
+        return path.expanduser().resolve().relative_to(library_root.expanduser().resolve()).as_posix()
+    except Exception:
+        return path.name
+
+
+def _lr_marker_review_template_decision(
+    *,
+    review: Dict[str, object],
+    vendor_name: str,
+    template_path: Path,
+    width: int,
+    height: int,
+) -> str:
+    entry = _lr_marker_review_vendor_entry(review, vendor_name)
+    if not entry:
+        return ""
+    library_root_raw = str(review.get("library_root", "") or "").strip()
+    library_root = Path(library_root_raw).expanduser().resolve() if library_root_raw else template_path.parent.parent
+    rel_path = _lr_marker_review_rel_path(template_path, library_root)
+    accepted = entry.get("accepted", set())
+    rejected = entry.get("rejected", set())
+    if not isinstance(accepted, set):
+        accepted = {str(x).replace("\\", "/").lstrip("/") for x in accepted} if isinstance(accepted, list) else set()
+    if not isinstance(rejected, set):
+        rejected = {str(x).replace("\\", "/").lstrip("/") for x in rejected} if isinstance(rejected, list) else set()
+    path_keys = {
+        rel_path,
+        template_path.name,
+        template_path.expanduser().resolve().as_posix(),
+    }
+    if path_keys.intersection(rejected):
+        return "rejected"
+    if path_keys.intersection(accepted):
+        return "accepted"
+    if accepted or rejected:
+        return "rejected"
+    try:
+        min_area = int(entry.get("min_area", 0) or 0)
+        min_short = int(entry.get("min_short_side", 0) or 0)
+    except (TypeError, ValueError):
+        min_area = 0
+        min_short = 0
+    if min_area > 0 or min_short > 0:
+        area = int(max(0, width) * max(0, height))
+        short_side = int(min(max(0, width), max(0, height)))
+        if area < max(0, min_area) or short_side < max(0, min_short):
+            return "rejected"
+        return "accepted"
+    return ""
+
+
 def _load_lr_marker_templates_by_vendor(
     *,
     roots: Sequence[Path],
@@ -1320,6 +1468,7 @@ def _load_lr_marker_templates_by_vendor(
     max_depth: int,
     blank_template_max_value: int,
     exclude_vendors: Sequence[str],
+    review_file: Optional[Path] = None,
 ) -> Tuple[List[object], Dict[str, object]]:
     if not _lr_marker_tooling_available():
         return [], {"available": False, "error": "lr_marker_tooling_unavailable"}
@@ -1334,12 +1483,21 @@ def _load_lr_marker_templates_by_vendor(
     assert _lr_marker_load_template is not None
     assert _lr_marker_infer_manufacturer is not None
 
+    review = _load_lr_marker_template_review(review_file)
+    review_entry = _lr_marker_review_vendor_entry(review, vendor_name) if bool(review.get("available", False)) else None
+    review_active_for_vendor = bool(review_entry)
+    review_library_root_raw = str(review.get("library_root", "") or "").strip()
+    review_library_root = Path(review_library_root_raw).expanduser().resolve() if review_library_root_raw else None
+
     templates: List[object] = []
     seen_digests: set[str] = set()
     configs_seen = 0
     files_seen = 0
     blank_or_unusable = 0
     library_files_seen = 0
+    review_accepted = 0
+    review_rejected = 0
+    review_unmentioned = 0
     for root in roots:
         root = root.expanduser().resolve()
         if not root.is_dir() or not (root / "summary.json").is_file():
@@ -1355,6 +1513,26 @@ def _load_lr_marker_templates_by_vendor(
                 if not template_path.is_file():
                     continue
                 library_files_seen += 1
+                try:
+                    with Image.open(template_path) as img_for_review:
+                        width_for_review, height_for_review = img_for_review.size
+                except Exception:
+                    width_for_review, height_for_review = 0, 0
+                if review_active_for_vendor and review_library_root is not None:
+                    decision = _lr_marker_review_template_decision(
+                        review=review,
+                        vendor_name=vendor_name,
+                        template_path=template_path,
+                        width=int(width_for_review),
+                        height=int(height_for_review),
+                    )
+                    if decision == "rejected":
+                        review_rejected += 1
+                        continue
+                    if decision == "accepted":
+                        review_accepted += 1
+                    else:
+                        review_unmentioned += 1
                 try:
                     digest = _template_digest_for_dedup(template_path)
                 except Exception:
@@ -1373,36 +1551,38 @@ def _load_lr_marker_templates_by_vendor(
                     continue
                 templates.append(template)
 
-    for config_dir in _iter_lr_marker_config_folders(roots, max_depth=max_depth):
-        manufacturer = str(_lr_marker_infer_manufacturer(config_dir.name) or "").strip()
-        if manufacturer.lower() != vendor_norm:
-            continue
-        configs_seen += 1
-        for template_path in sorted((config_dir / "DB_echo").rglob("*")):
-            if (
-                not template_path.is_file()
-                or not LR_MARKER_TEMPLATE_RE.match(template_path.name)
-                or template_path.stem.lower() != "orientation_0"
-            ):
+    config_scan_skipped_by_review = bool(review_active_for_vendor)
+    if not config_scan_skipped_by_review:
+        for config_dir in _iter_lr_marker_config_folders(roots, max_depth=max_depth):
+            manufacturer = str(_lr_marker_infer_manufacturer(config_dir.name) or "").strip()
+            if manufacturer.lower() != vendor_norm:
                 continue
-            files_seen += 1
-            try:
-                digest = _template_digest_for_dedup(template_path)
-            except Exception:
-                blank_or_unusable += 1
-                continue
-            if digest in seen_digests:
-                continue
-            seen_digests.add(digest)
-            template = _lr_marker_load_template(
-                template_path,
-                device=device,
-                blank_template_max_value=int(blank_template_max_value),
-            )
-            if template is None:
-                blank_or_unusable += 1
-                continue
-            templates.append(template)
+            configs_seen += 1
+            for template_path in sorted((config_dir / "DB_echo").rglob("*")):
+                if (
+                    not template_path.is_file()
+                    or not LR_MARKER_TEMPLATE_RE.match(template_path.name)
+                    or template_path.stem.lower() != "orientation_0"
+                ):
+                    continue
+                files_seen += 1
+                try:
+                    digest = _template_digest_for_dedup(template_path)
+                except Exception:
+                    blank_or_unusable += 1
+                    continue
+                if digest in seen_digests:
+                    continue
+                seen_digests.add(digest)
+                template = _lr_marker_load_template(
+                    template_path,
+                    device=device,
+                    blank_template_max_value=int(blank_template_max_value),
+                )
+                if template is None:
+                    blank_or_unusable += 1
+                    continue
+                templates.append(template)
 
     meta = {
         "available": bool(templates),
@@ -1413,7 +1593,19 @@ def _load_lr_marker_templates_by_vendor(
         "prepared_library_files_seen": int(library_files_seen),
         "unique_usable_templates": int(len(templates)),
         "blank_or_unusable_templates": int(blank_or_unusable),
+        "review_file": str(review.get("path", "") or ""),
+        "review_available": bool(review.get("available", False)),
+        "review_error": str(review.get("error", "") or ""),
+        "review_active_for_vendor": bool(review_active_for_vendor),
+        "review_library_root": str(review.get("library_root", "") or ""),
+        "review_accepted_templates": int(review_accepted),
+        "review_rejected_templates": int(review_rejected),
+        "review_unmentioned_templates": int(review_unmentioned),
+        "config_scan_skipped_by_review": bool(config_scan_skipped_by_review),
     }
+    if review_active_for_vendor and not templates:
+        meta["error"] = "no_usable_vendor_templates_after_review"
+        meta["available"] = False
     return templates, meta
 
 
@@ -1592,6 +1784,355 @@ def _trim_uniform_dark_border(patch: Image.Image, dark_max: int = 18, keep_px: i
         return patch
 
 
+def _parse_lr_marker_manual_rect(value: object) -> Optional[Tuple[int, int, int, int]]:
+    if isinstance(value, (list, tuple)) and len(value) >= 4:
+        raw_parts = list(value[:4])
+    else:
+        raw_parts = re.split(r"[|,;\s]+", str(value or "").strip())
+    vals: List[int] = []
+    for part in raw_parts:
+        try:
+            vals.append(int(round(float(str(part).strip()))))
+        except (TypeError, ValueError):
+            continue
+    if len(vals) < 4:
+        return None
+    top, left, bottom, right = vals[:4]
+    if bottom <= top or right <= left:
+        return None
+    return top, left, bottom, right
+
+
+def _load_lr_marker_manual_seed_rows(path: Optional[Path]) -> List[Dict[str, object]]:
+    if path is None:
+        return []
+    seed_path = path.expanduser().resolve()
+    if not seed_path.is_file():
+        return []
+    try:
+        payload = json.loads(seed_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    raw_items: object
+    if isinstance(payload, dict):
+        raw_items = payload.get("seeds", payload.get("lr_marker_manual_seeds", []))
+    else:
+        raw_items = payload
+    if not isinstance(raw_items, list):
+        return []
+    rows: List[Dict[str, object]] = []
+    for idx, item in enumerate(raw_items, start=1):
+        if not isinstance(item, dict):
+            continue
+        rect = _parse_lr_marker_manual_rect(item.get("rect", item.get("marker_rect", "")))
+        if rect is None:
+            continue
+        flag = str(item.get("flag", "") or "").strip().lower()
+        correction = str(item.get("correction", "") or "").strip()
+        if flag == "exclude" or correction.lower() == "exclude":
+            continue
+        row = dict(item)
+        row["seed_index"] = int(item.get("seed_index", idx) or idx)
+        row["rect"] = ",".join(str(v) for v in rect)
+        rows.append(row)
+    return rows
+
+
+def _resolve_lr_marker_manual_seed_image(
+    seed: Dict[str, object],
+    *,
+    folder: Path,
+    su_giu_rows: Sequence[Dict[str, object]],
+) -> Optional[Path]:
+    candidates: List[Path] = []
+    for key in ("image_path", "source_image_path"):
+        value = str(seed.get(key, "") or "").strip()
+        if value:
+            p = Path(value).expanduser()
+            candidates.append(p if p.is_absolute() else folder / p)
+
+    rel_value = str(seed.get("image_rel", "") or "").strip().replace("\\", "/")
+    if rel_value:
+        rel = Path(rel_value)
+        candidates.append(folder / rel)
+        candidates.append(folder.parent / rel)
+        parts = [part for part in rel_value.split("/") if part]
+        for marker in ("input_ref", "input"):
+            if marker in parts:
+                pos = parts.index(marker)
+                tail = parts[pos + 1 :]
+                if tail and tail[0] == folder.name:
+                    candidates.append(folder / Path(*tail[1:]))
+                elif tail:
+                    candidates.append(folder.parent / Path(*tail))
+        if parts and parts[0] == folder.name:
+            candidates.append(folder / Path(*parts[1:]))
+        if folder.name in parts:
+            pos = parts.index(folder.name)
+            if pos + 1 < len(parts):
+                candidates.append(folder / Path(*parts[pos + 1 :]))
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+            if resolved.is_file():
+                return resolved
+        except Exception:
+            continue
+
+    try:
+        seed_index = int(seed.get("image_index", -999999) or -999999)
+    except (TypeError, ValueError):
+        seed_index = -999999
+    if seed_index != -999999:
+        for row in su_giu_rows:
+            try:
+                if int(row.get("image_index", -999999) or -999999) != seed_index:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            row_path = str(row.get("image_path", "") or "").strip()
+            if row_path:
+                p = Path(row_path).expanduser().resolve()
+                if p.is_file():
+                    return p
+
+    wanted_name = Path(rel_value).name if rel_value else ""
+    if wanted_name:
+        for row in su_giu_rows:
+            row_path = str(row.get("image_path", "") or "").strip()
+            if row_path and Path(row_path).name == wanted_name:
+                p = Path(row_path).expanduser().resolve()
+                if p.is_file():
+                    return p
+    return None
+
+
+def _extract_manual_lr_marker_seed_patch(
+    *,
+    image_path: Path,
+    marker_box_abs: Tuple[int, int, int, int],
+    blank_template_max_value: int,
+) -> Optional[Image.Image]:
+    patch = _extract_expanded_lr_marker_patch(
+        image_path=image_path,
+        marker_box_abs=marker_box_abs,
+        blank_template_max_value=blank_template_max_value,
+    )
+    if patch is None:
+        try:
+            with Image.open(image_path) as img:
+                rgb = img.convert("RGB")
+                width, height = rgb.size
+                top, left, bottom, right = marker_box_abs
+                top = max(0, min(height - 1, int(top)))
+                bottom = max(0, min(height - 1, int(bottom)))
+                left = max(0, min(width - 1, int(left)))
+                right = max(0, min(width - 1, int(right)))
+                if bottom <= top or right <= left:
+                    return None
+                patch = rgb.crop((left, top, right + 1, bottom + 1))
+                patch = _trim_uniform_dark_border(patch, dark_max=50, keep_px=0)
+        except Exception:
+            return None
+    patch_w, patch_h = int(patch.size[0]), int(patch.size[1])
+    if (
+        patch_w * patch_h < int(LR_MARKER_MIN_MANUAL_TEMPLATE_AREA)
+        or min(patch_w, patch_h) < int(LR_MARKER_MIN_MANUAL_TEMPLATE_SHORT_SIDE)
+    ):
+        return None
+    extrema = patch.convert("L").getextrema()
+    if extrema is None or int(extrema[1]) <= int(blank_template_max_value):
+        return None
+    return patch
+
+
+def _build_lr_marker_manual_seed_templates(
+    *,
+    seeds: Sequence[Dict[str, object]],
+    su_giu_rows: Sequence[Dict[str, object]],
+    folder: Path,
+    output_dir: Path,
+    vendor_name: str,
+    device: torch.device,
+    blank_template_max_value: int,
+) -> Tuple[List[object], List[Dict[str, object]]]:
+    if not seeds or not _lr_marker_tooling_available():
+        return [], []
+    assert _lr_marker_load_template is not None
+    template_dir = output_dir / "lr_marker_manual_seed_templates"
+    templates: List[object] = []
+    meta_rows: List[Dict[str, object]] = []
+    safe_vendor = re.sub(r"[^A-Za-z0-9_.-]+", "_", vendor_name.strip() or "vendor").strip("_") or "vendor"
+    for idx, seed in enumerate(seeds, start=1):
+        rect = _parse_lr_marker_manual_rect(seed.get("rect", ""))
+        meta: Dict[str, object] = {
+            "seed_index": int(seed.get("seed_index", idx) or idx),
+            "review_key": str(seed.get("review_key", "") or ""),
+            "image_rel": str(seed.get("image_rel", "") or ""),
+            "rect": str(seed.get("rect", "") or ""),
+            "correction": str(seed.get("correction", "") or ""),
+            "status": "rejected",
+            "reason": "",
+        }
+        if rect is None:
+            meta["reason"] = "invalid_rect"
+            meta_rows.append(meta)
+            continue
+        image_path = _resolve_lr_marker_manual_seed_image(seed, folder=folder, su_giu_rows=su_giu_rows)
+        if image_path is None:
+            meta["reason"] = "image_not_found"
+            meta_rows.append(meta)
+            continue
+        patch = _extract_manual_lr_marker_seed_patch(
+            image_path=image_path,
+            marker_box_abs=rect,
+            blank_template_max_value=int(blank_template_max_value),
+        )
+        if patch is None:
+            meta["reason"] = "unusable_patch"
+            meta["image_path"] = image_path.as_posix()
+            meta_rows.append(meta)
+            continue
+        try:
+            template_dir.mkdir(parents=True, exist_ok=True)
+            seed_hash = hashlib.sha1((image_path.as_posix() + str(rect)).encode("utf-8")).hexdigest()[:10]
+            out_path = template_dir / f"{safe_vendor}_manual_seed_{idx:03d}_{seed_hash}.png"
+            patch.save(out_path)
+            template = _lr_marker_load_template(
+                out_path,
+                device=device,
+                blank_template_max_value=int(blank_template_max_value),
+            )
+            if template is None:
+                meta["reason"] = "load_template_rejected"
+                meta["image_path"] = image_path.as_posix()
+                meta["template_path"] = out_path.as_posix()
+                meta_rows.append(meta)
+                continue
+            templates.append(template)
+            meta.update(
+                {
+                    "status": "accepted",
+                    "reason": "",
+                    "image_path": image_path.as_posix(),
+                    "template_path": out_path.resolve().as_posix(),
+                    "template_width": int(patch.size[0]),
+                    "template_height": int(patch.size[1]),
+                    "template_area": int(patch.size[0] * patch.size[1]),
+                }
+            )
+            meta_rows.append(meta)
+        except Exception as exc:
+            meta["reason"] = f"exception:{exc}"
+            meta["image_path"] = image_path.as_posix()
+            meta_rows.append(meta)
+            continue
+    return templates, meta_rows
+
+
+def _build_lr_marker_bundle_manual_seed_library(
+    *,
+    seeds: Sequence[Dict[str, object]],
+    su_giu_rows: Sequence[Dict[str, object]],
+    folder: Path,
+    output_dir: Path,
+    vendor_name: str,
+    blank_template_max_value: int,
+) -> Tuple[Optional[Path], List[Dict[str, object]]]:
+    if not seeds:
+        return None, []
+    library_root = output_dir / "lr_marker_bundle_manual_seed_templates"
+    safe_vendor = re.sub(r"[^A-Za-z0-9_.-]+", "_", vendor_name.strip() or "vendor").strip("_") or "vendor"
+    vendor_dir = library_root / safe_vendor
+    accepted_rels: List[str] = []
+    meta_rows: List[Dict[str, object]] = []
+    for idx, seed in enumerate(seeds, start=1):
+        rect = _parse_lr_marker_manual_rect(seed.get("rect", ""))
+        meta: Dict[str, object] = {
+            "seed_index": int(seed.get("seed_index", idx) or idx),
+            "review_key": str(seed.get("review_key", "") or ""),
+            "image_rel": str(seed.get("image_rel", "") or ""),
+            "image_index": str(seed.get("image_index", "") or ""),
+            "rect": str(seed.get("rect", "") or ""),
+            "correction": str(seed.get("correction", "") or "").strip().upper(),
+            "status": "rejected",
+            "reason": "",
+            "source": "bundle_manual_seed",
+        }
+        if rect is None:
+            meta["reason"] = "invalid_rect"
+            meta_rows.append(meta)
+            continue
+        correction = str(meta.get("correction", "") or "").strip().upper()
+        if correction and correction not in {"NF", "LR", "UD", "LRUD"}:
+            meta["reason"] = "invalid_correction"
+            meta_rows.append(meta)
+            continue
+        image_path = _resolve_lr_marker_manual_seed_image(seed, folder=folder, su_giu_rows=su_giu_rows)
+        if image_path is None:
+            meta["reason"] = "image_not_found"
+            meta_rows.append(meta)
+            continue
+        patch = _extract_manual_lr_marker_seed_patch(
+            image_path=image_path,
+            marker_box_abs=rect,
+            blank_template_max_value=int(blank_template_max_value),
+        )
+        if patch is None:
+            meta["reason"] = "unusable_patch"
+            meta["image_path"] = image_path.as_posix()
+            meta_rows.append(meta)
+            continue
+        try:
+            vendor_dir.mkdir(parents=True, exist_ok=True)
+            out_path = vendor_dir / f"marker_{len(accepted_rels) + 1:03d}.png"
+            patch.save(out_path)
+            rel = f"{safe_vendor}/{out_path.name}"
+            accepted_rels.append(rel)
+            meta.update(
+                {
+                    "status": "accepted",
+                    "reason": "",
+                    "image_path": image_path.as_posix(),
+                    "template_path": out_path.resolve().as_posix(),
+                    "template_rel": rel,
+                    "template_width": int(patch.size[0]),
+                    "template_height": int(patch.size[1]),
+                    "template_area": int(patch.size[0] * patch.size[1]),
+                }
+            )
+            meta_rows.append(meta)
+        except Exception as exc:
+            meta["reason"] = f"exception:{exc}"
+            meta["image_path"] = image_path.as_posix()
+            meta_rows.append(meta)
+            continue
+
+    if not accepted_rels:
+        return None, meta_rows
+    decisions = {
+        "source": "pipeline_manual_lr_marker_seeds",
+        "vendors": {
+            safe_vendor: {
+                "vendor": safe_vendor,
+                "accepted": accepted_rels,
+                "rejected": [],
+            }
+        },
+    }
+    try:
+        library_root.mkdir(parents=True, exist_ok=True)
+        (library_root / "review_decisions.json").write_text(json.dumps(decisions, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        for meta in meta_rows:
+            if str(meta.get("status", "") or "") == "accepted":
+                meta["status"] = "rejected"
+                meta["reason"] = f"review_decisions_write_failed:{exc}"
+        return None, meta_rows
+    return library_root, meta_rows
+
+
 def _lr_marker_patch_stats_from_gray(
     gray: np.ndarray,
     marker_box_abs: Tuple[int, int, int, int],
@@ -1710,6 +2251,81 @@ def _lr_marker_row_template_area(row: Dict[str, object]) -> int:
     return max(0, width) * max(0, height)
 
 
+def _lr_marker_template_candidate_rank_rows(rows: Sequence[Dict[str, object]], limit: int = 20) -> List[Dict[str, object]]:
+    grouped: Dict[str, List[Dict[str, object]]] = {}
+    for row in rows:
+        path = str(row.get("template_path", "") or "").strip()
+        if path:
+            grouped.setdefault(path, []).append(dict(row))
+    ranked: List[Dict[str, object]] = []
+    for path, group_rows in grouped.items():
+        scores: List[float] = []
+        expected_total = 0
+        expected_correct = 0
+        expected_groups: set[str] = set()
+        labels: Counter[str] = Counter()
+        max_area = 0
+        template_width = 0
+        template_height = 0
+        for item in group_rows:
+            try:
+                scores.append(float(item.get("match_score", 0.0) or 0.0))
+            except (TypeError, ValueError):
+                scores.append(0.0)
+            label = str(item.get("lr_label", "") or "").strip()
+            if label:
+                labels[label] += 1
+            area = _lr_marker_row_template_area(item)
+            if area > max_area:
+                max_area = area
+                try:
+                    template_width = int(item.get("template_width", 0) or 0)
+                    template_height = int(item.get("template_height", 0) or 0)
+                except (TypeError, ValueError):
+                    template_width = 0
+                    template_height = 0
+            source_group = _lr_marker_row_source_orientation_group(item)
+            expected = _lr_marker_expected_label_for_orientation_group(source_group)
+            if expected:
+                expected_total += 1
+                expected_groups.add(source_group)
+                if label == expected:
+                    expected_correct += 1
+        mean_score = sum(scores) / max(1, len(scores))
+        median_score = float(statistics.median(scores)) if scores else 0.0
+        expected_ratio = expected_correct / max(1, expected_total) if expected_total else 0.0
+        ranked.append(
+            {
+                "template_path": path,
+                "support": int(len(group_rows)),
+                "mean_score": float(mean_score),
+                "median_score": float(median_score),
+                "expected_total": int(expected_total),
+                "expected_correct": int(expected_correct),
+                "expected_ratio": float(expected_ratio),
+                "expected_groups": sorted(expected_groups),
+                "expected_groups_count": int(len(expected_groups)),
+                "label_counts": dict(labels),
+                "template_width": int(template_width),
+                "template_height": int(template_height),
+                "template_area": int(max_area),
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("expected_ratio", 0.0) or 0.0),
+            -int(item.get("expected_correct", 0) or 0),
+            -int(item.get("expected_groups_count", 0) or 0),
+            -int(item.get("support", 0) or 0),
+            -float(item.get("median_score", 0.0) or 0.0),
+            -float(item.get("mean_score", 0.0) or 0.0),
+            -int(item.get("template_area", 0) or 0),
+            str(item.get("template_path", "")),
+        )
+    )
+    return ranked[: max(1, int(limit))]
+
+
 def _select_lr_marker_folder_template_candidate(rows: Sequence[Dict[str, object]]) -> Dict[str, object]:
     grouped: Dict[str, List[Dict[str, object]]] = {}
     for row in rows:
@@ -1724,6 +2340,7 @@ def _select_lr_marker_folder_template_candidate(rows: Sequence[Dict[str, object]
         scores: List[float] = []
         expected_total = 0
         expected_correct = 0
+        expected_groups: set[str] = set()
         max_area = 0
         for item in group_rows:
             try:
@@ -1731,17 +2348,29 @@ def _select_lr_marker_folder_template_candidate(rows: Sequence[Dict[str, object]
             except (TypeError, ValueError):
                 scores.append(0.0)
             max_area = max(max_area, _lr_marker_row_template_area(item))
-            expected = _lr_marker_expected_label_for_source_row(item)
+            source_group = _lr_marker_row_source_orientation_group(item)
+            expected = _lr_marker_expected_label_for_orientation_group(source_group)
             if expected:
                 expected_total += 1
+                expected_groups.add(source_group)
                 if str(item.get("lr_label", "") or "").strip() == expected:
                     expected_correct += 1
         support = len(group_rows)
         mean_score = sum(scores) / max(1, len(scores))
+        median_score = float(statistics.median(scores)) if scores else 0.0
         expected_ratio = expected_correct / max(1, expected_total) if expected_total else 0.0
         if expected_total:
-            return (1.0, float(expected_correct), expected_ratio, float(support), mean_score, float(max_area))
-        return (0.0, float(support), mean_score, float(max_area), 0.0, 0.0)
+            return (
+                1.0,
+                expected_ratio,
+                float(expected_correct),
+                float(len(expected_groups)),
+                float(support),
+                median_score,
+                mean_score,
+                float(max_area),
+            )
+        return (0.0, 0.0, 0.0, 0.0, float(support), median_score, mean_score, float(max_area))
 
     best_group_rows = max(grouped.values(), key=_group_key)
     return max(
@@ -1864,6 +2493,8 @@ def _lr_marker_reliable_rows(
             score = 0.0
         if score < float(min_match_score):
             continue
+        if str(row.get("lr_marker_method", "") or "") == "bundle" and str(row.get("status", "") or "") != "ok":
+            continue
         if str(row.get("search_strategy", "") or "") == "spatial_consensus_forced":
             continue
         if not _lr_marker_row_matches_target_size(
@@ -1916,7 +2547,21 @@ def _lr_marker_should_use_derived_fallback(
     )
     comparable_total = len(comparable_rows) if comparable_rows else len(rows)
     if comparable_total >= 8:
-        min_reliable = max(2, int(round(float(comparable_total) * 0.25)))
+        blank_count = 0
+        low_texture_count = 0
+        for row in comparable_rows:
+            review_parts = set(str(row.get("review_reason", "") or "").split(";"))
+            if _lr_marker_truthy_flag(row.get("match_patch_is_blank", False)) or "blank_marker_match" in review_parts:
+                blank_count += 1
+            if not _lr_marker_row_has_textured_match(row) or "low_texture_marker_match" in review_parts:
+                low_texture_count += 1
+        blank_ratio = float(blank_count) / float(comparable_total)
+        low_texture_ratio = float(low_texture_count) / float(comparable_total)
+        if blank_ratio > float(LR_MARKER_MAX_BLANK_ROW_RATIO):
+            return True, f"historical_blank_rows_above_max:{blank_count}/{comparable_total}"
+        if low_texture_ratio > float(LR_MARKER_MAX_LOW_TEXTURE_ROW_RATIO):
+            return True, f"historical_low_texture_rows_above_max:{low_texture_count}/{comparable_total}"
+        min_reliable = max(2, int(round(float(comparable_total) * float(LR_MARKER_MIN_RELIABLE_ROW_RATIO))))
         if len(reliable) < min_reliable:
             return True, f"historical_reliable_rows_below_min:{len(reliable)}/{comparable_total}"
     elif not reliable:
@@ -1945,8 +2590,10 @@ def _predict_lr_marker_on_su_giu_rows(
     folder_template_seed_db_template_path: str = "",
     folder_template_rank_json: str = "",
     folder_template_policy: str = "",
+    single_template_policy: str = "fixed_historical_best_template",
     target_image_width: int = 0,
     target_image_height: int = 0,
+    prefer_large_historical_templates: bool = True,
 ) -> List[Dict[str, object]]:
     if not su_giu_rows or not templates:
         return []
@@ -1966,7 +2613,11 @@ def _predict_lr_marker_on_su_giu_rows(
     selected_template_path = str(fixed_template_path or "").strip()
     selected_template_score = float(fixed_template_selection_score or 0.0)
     if bool(force_single_template) and not selected_template_path:
-        selection_templates = _lr_marker_preferred_historical_templates(templates)
+        selection_templates = (
+            _lr_marker_preferred_historical_templates(templates)
+            if bool(prefer_large_historical_templates)
+            else list(templates)
+        )
         candidate_rows = _predict_lr_marker_on_su_giu_rows(
             su_giu_rows=su_giu_rows,
             templates=selection_templates,
@@ -1982,6 +2633,7 @@ def _predict_lr_marker_on_su_giu_rows(
             blank_template_max_value=blank_template_max_value,
             target_image_width=int(target_image_width or 0),
             target_image_height=int(target_image_height or 0),
+            prefer_large_historical_templates=bool(prefer_large_historical_templates),
         )
         if not candidate_rows:
             return []
@@ -2002,6 +2654,7 @@ def _predict_lr_marker_on_su_giu_rows(
             if _lr_marker_row_source_orientation_group(dict(row)) in {"NF", "LR", "UD", "LRUD"}
         ]
         candidate_rows_for_selection = orientation_candidate_rows or canonical_candidate_rows
+        candidate_rank_rows = _lr_marker_template_candidate_rank_rows(candidate_rows_for_selection, limit=25)
 
         def _sample_is_canonical(item: Dict[str, object]) -> bool:
             if int(target_image_width or 0) <= 0 or int(target_image_height or 0) <= 0:
@@ -2034,7 +2687,7 @@ def _predict_lr_marker_on_su_giu_rows(
         selected_template_path = str(best_candidate.get("template_path", "") or "").strip()
         selected_template_score = float(best_candidate.get("match_score", 0.0) or 0.0)
         selected_templates = [t for t in selection_templates if _template_path_text(t) == selected_template_path]
-        selected_template_policy = "fixed_historical_best_template" if selected_template_path else ""
+        selected_template_policy = str(single_template_policy or "fixed_historical_best_template") if selected_template_path else ""
         seed_candidate = best_candidate
         if derived_template_dir is not None:
             safe_vendor = re.sub(r"[^A-Za-z0-9_.-]+", "_", vendor_name.strip() or "vendor").strip("_") or "vendor"
@@ -2089,7 +2742,13 @@ def _predict_lr_marker_on_su_giu_rows(
                         marker_box_abs=(marker_top, marker_left, marker_bottom, marker_right),
                         blank_template_max_value=int(blank_template_max_value),
                     )
-                    if patch is None or patch.size[0] < 4 or patch.size[1] < 4:
+                    if patch is None:
+                        continue
+                    patch_w, patch_h = int(patch.size[0]), int(patch.size[1])
+                    if (
+                        patch_w * patch_h < int(LR_MARKER_MIN_DERIVED_TEMPLATE_AREA)
+                        or min(patch_w, patch_h) < int(LR_MARKER_MIN_DERIVED_TEMPLATE_SHORT_SIDE)
+                    ):
                         continue
                     derived_template_dir.mkdir(parents=True, exist_ok=True)
                     sample_hash = hashlib.sha1(candidate_sample_path.encode("utf-8")).hexdigest()[:10]
@@ -2112,6 +2771,8 @@ def _predict_lr_marker_on_su_giu_rows(
                     break
                 except Exception:
                     continue
+        if derived_template_dir is not None and selected_template_policy != "fixed_derived_folder_template":
+            return []
         if not selected_templates:
             return []
         rank_rows: List[Dict[str, object]] = []
@@ -2153,7 +2814,16 @@ def _predict_lr_marker_on_su_giu_rows(
                 except Exception:
                     continue
         rank_rows.sort(key=lambda item: (-float(item.get("score", 0.0) or 0.0), str(item.get("template_path", ""))))
-        rank_json = json.dumps(rank_rows, ensure_ascii=False, separators=(",", ":"))
+        rank_json = json.dumps(
+            {
+                "selection_candidates": candidate_rank_rows,
+                "sample_scores": rank_rows[:25],
+                "selected_template_path": selected_template_path,
+                "selected_template_policy": selected_template_policy,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         return _predict_lr_marker_on_su_giu_rows(
             su_giu_rows=su_giu_rows,
             templates=selected_templates,
@@ -2174,6 +2844,7 @@ def _predict_lr_marker_on_su_giu_rows(
             folder_template_seed_db_template_path=str(seed_candidate.get("template_path", "") or "").strip(),
             folder_template_rank_json=rank_json,
             folder_template_policy=selected_template_policy,
+            single_template_policy=single_template_policy,
             target_image_width=int(target_image_width or 0),
             target_image_height=int(target_image_height or 0),
         )
@@ -2207,7 +2878,8 @@ def _predict_lr_marker_on_su_giu_rows(
                     continue
                 crop_width = right - left + 1
                 crop_height = bottom - top + 1
-                sugiu_pred = str(row_sg.get("pred_label", "") or "").strip().lower()
+                sugiu_model_pred = str(row_sg.get("pred_label", "") or "").strip().lower()
+                sugiu_pred = sugiu_model_pred
                 if sugiu_pred not in {"su", "giu"}:
                     continue
                 roi_top, roi_left, roi_bottom, roi_right = _lr_marker_roi_from_sugiu(crop_width, crop_height, sugiu_pred)
@@ -2228,6 +2900,39 @@ def _predict_lr_marker_on_su_giu_rows(
                     search_margin_px=0,
                 )
                 best_loc = initial_loc
+                dual_sugiu_search_used = False
+                opposite_sugiu_match_score = ""
+                try:
+                    sugiu_conf_value = float(row_sg.get("confidence", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    sugiu_conf_value = 0.0
+                if sugiu_conf_value < float(LR_MARKER_DUAL_SUGIU_SEARCH_CONFIDENCE):
+                    opposite_sugiu = "giu" if sugiu_pred == "su" else "su"
+                    opp_roi_top, opp_roi_left, opp_roi_bottom, opp_roi_right = _lr_marker_roi_from_sugiu(
+                        crop_width,
+                        crop_height,
+                        opposite_sugiu,
+                    )
+                    opposite_search_rect_abs = (
+                        top + opp_roi_top,
+                        left + opp_roi_left,
+                        top + opp_roi_bottom,
+                        left + opp_roi_right,
+                    )
+                    opposite_loc = _lr_marker_locate_match_in_abs_rect(
+                        gray_full=gray_full,
+                        search_rect_abs=opposite_search_rect_abs,
+                        echo_rect_abs=rect,
+                        templates=templates,
+                        search_strategy="opposite_sugiu_roi_low_conf",
+                        search_scope="opposite_predicted_half",
+                        search_margin_px=0,
+                    )
+                    opposite_sugiu_match_score = "" if opposite_loc is None else float(opposite_loc.score)
+                    if _lr_marker_score_of(opposite_loc) > _lr_marker_score_of(best_loc):
+                        best_loc = opposite_loc
+                        sugiu_pred = opposite_sugiu
+                    dual_sugiu_search_used = True
                 full_crop_loc = None
                 if _lr_marker_score_of(best_loc) < float(full_crop_fallback_threshold):
                     full_crop_loc = _lr_marker_locate_match_in_abs_rect(
@@ -2328,10 +3033,13 @@ def _predict_lr_marker_on_su_giu_rows(
                         "template_path": best_loc.template.path.as_posix(),
                         "template_width": int(best_loc.template.width),
                         "template_height": int(best_loc.template.height),
+                        "su_giu_model_pred": sugiu_model_pred,
                         "su_giu_pred": sugiu_pred,
                         "su_giu_conf": float(row_sg.get("confidence", 0.0) or 0.0),
                         "prob_su": float(row_sg.get("prob_su", 0.0) or 0.0),
                         "prob_giu": float(row_sg.get("prob_giu", 0.0) or 0.0),
+                        "dual_sugiu_search_used": int(1 if dual_sugiu_search_used else 0),
+                        "opposite_sugiu_match_score": opposite_sugiu_match_score,
                         "echo_rect_top_abs": top,
                         "echo_rect_left_abs": left,
                         "echo_rect_bottom_abs": bottom,
@@ -2374,6 +3082,502 @@ def _predict_lr_marker_on_su_giu_rows(
     return out_rows
 
 
+def _ensure_orientation_marker_bundle_import(bundle_dir: Path, bundle_zip: Path) -> Optional[Path]:
+    """Make the portable bundle importable without changing pipeline outputs."""
+    root = bundle_dir.expanduser().resolve()
+    marker = root / "orientation_marker_detector" / "detector.py"
+    if not marker.is_file():
+        zip_path = bundle_zip.expanduser().resolve()
+        if not zip_path.is_file():
+            return None
+        root.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(root.parent)
+        extracted = root.parent / "41_orientation_marker_detector_bundle"
+        if extracted.is_dir():
+            root = extracted.resolve()
+            marker = root / "orientation_marker_detector" / "detector.py"
+    if not marker.is_file():
+        return None
+    if root.as_posix() not in sys.path:
+        sys.path.insert(0, root.as_posix())
+    return root
+
+
+def _install_cv2_fallback_if_needed() -> None:
+    """Provide the small cv2 subset used by the bundle when OpenCV is absent."""
+    try:
+        import cv2  # noqa: F401
+
+        return
+    except Exception:
+        pass
+
+    cv2_stub = types.ModuleType("cv2")
+    cv2_stub.TM_CCOEFF_NORMED = 5
+    cv2_stub.INTER_AREA = 3
+
+    def _resize(image: np.ndarray, size: Tuple[int, int], interpolation: int = 3) -> np.ndarray:
+        width, height = int(size[0]), int(size[1])
+        pil = Image.fromarray(np.asarray(image).astype(np.uint8))
+        return np.asarray(pil.resize((width, height), Image.Resampling.BOX), dtype=np.uint8)
+
+    def _match_template(search: np.ndarray, template: np.ndarray, method: int) -> np.ndarray:
+        if method != cv2_stub.TM_CCOEFF_NORMED:
+            raise ValueError("cv2 fallback supports only TM_CCOEFF_NORMED")
+        src = np.asarray(search, dtype=np.float32)
+        tpl = np.asarray(template, dtype=np.float32)
+        if src.ndim != 2 or tpl.ndim != 2:
+            return np.zeros((0, 0), dtype=np.float32)
+        th, tw = tpl.shape[:2]
+        out_h = int(src.shape[0] - th + 1)
+        out_w = int(src.shape[1] - tw + 1)
+        if out_h <= 0 or out_w <= 0:
+            return np.zeros((0, 0), dtype=np.float32)
+
+        tpl_z = tpl - float(tpl.mean())
+        tpl_norm = float(np.sqrt(np.sum(tpl_z * tpl_z)))
+        if tpl_norm <= 1e-8:
+            return np.zeros((out_h, out_w), dtype=np.float32)
+
+        result = np.empty((out_h, out_w), dtype=np.float32)
+        # Chunk rows to keep the sliding-window tensor bounded in memory.
+        max_window_elems = 16_000_000
+        chunk_rows = max(1, min(out_h, max_window_elems // max(1, out_w * th * tw)))
+        for y0 in range(0, out_h, chunk_rows):
+            y1 = min(out_h, y0 + chunk_rows)
+            src_chunk = src[y0 : y1 + th - 1, :]
+            windows = np.lib.stride_tricks.sliding_window_view(src_chunk, (th, tw))
+            # windows shape: chunk_rows x out_w x th x tw
+            sums = windows.sum(axis=(-1, -2), dtype=np.float32)
+            sums_sq = np.square(windows, dtype=np.float32).sum(axis=(-1, -2), dtype=np.float32)
+            area = float(th * tw)
+            means = sums / area
+            var_sum = np.maximum(sums_sq - area * means * means, 1e-8)
+            numerator = np.tensordot(windows, tpl_z, axes=((2, 3), (0, 1)))
+            denom = np.sqrt(var_sum) * tpl_norm
+            result[y0:y1, :] = (numerator / np.maximum(denom, 1e-8)).astype(np.float32)
+        return result
+
+    def _min_max_loc(result: np.ndarray):
+        arr = np.asarray(result)
+        if arr.size == 0:
+            return 0.0, 0.0, (0, 0), (0, 0)
+        min_flat = int(np.argmin(arr))
+        max_flat = int(np.argmax(arr))
+        min_y, min_x = np.unravel_index(min_flat, arr.shape)
+        max_y, max_x = np.unravel_index(max_flat, arr.shape)
+        return float(arr[min_y, min_x]), float(arr[max_y, max_x]), (int(min_x), int(min_y)), (int(max_x), int(max_y))
+
+    cv2_stub.resize = _resize
+    cv2_stub.matchTemplate = _match_template
+    cv2_stub.minMaxLoc = _min_max_loc
+    sys.modules["cv2"] = cv2_stub
+
+
+def _bundle_crop_rect_from_sugiu_row(row_sg: Dict[str, object]) -> Optional[Tuple[int, int, int, int]]:
+    try:
+        top = int(float(row_sg.get("crop_top", 0) or 0))
+        left = int(float(row_sg.get("crop_left", 0) or 0))
+        bottom = int(float(row_sg.get("crop_bottom", 0) or 0)) - 1
+        right = int(float(row_sg.get("crop_right", 0) or 0)) - 1
+    except (TypeError, ValueError):
+        return None
+    if bottom <= top or right <= left:
+        return None
+    return top, left, bottom, right
+
+
+def _bundle_group_to_lr(group: str) -> Tuple[str, str, int]:
+    group = str(group or "").strip().upper()
+    if group in {"LR", "LRUD"}:
+        return "lr_flipped", "specchiata_a_destra", 1
+    if group in {"NF", "UD"}:
+        return "not_lr_flipped", "normale", 0
+    return "", "", -1
+
+
+def _lr_marker_echo_rect_penalty_fields(
+    *,
+    marker_box_abs: Tuple[int, int, int, int],
+    echo_rect_abs: Tuple[int, int, int, int],
+    raw_score: float,
+) -> Dict[str, object]:
+    marker_top, marker_left, marker_bottom, marker_right = [int(v) for v in marker_box_abs]
+    echo_top, echo_left, echo_bottom, echo_right = [int(v) for v in echo_rect_abs]
+    marker_w = max(1, marker_right - marker_left + 1)
+    marker_h = max(1, marker_bottom - marker_top + 1)
+    marker_area = float(max(1, marker_w * marker_h))
+    crop_w = max(1, echo_right - echo_left + 1)
+    crop_h = max(1, echo_bottom - echo_top + 1)
+
+    overlap_left = max(marker_left, echo_left)
+    overlap_right = min(marker_right, echo_right)
+    overlap_top = max(marker_top, echo_top)
+    overlap_bottom = min(marker_bottom, echo_bottom)
+    overlap_w = max(0, overlap_right - overlap_left + 1)
+    overlap_h = max(0, overlap_bottom - overlap_top + 1)
+    overlap_ratio = float((overlap_w * overlap_h) / marker_area)
+
+    outside_top_px = max(0, echo_top - marker_top)
+    outside_left_px = max(0, echo_left - marker_left)
+    outside_bottom_px = max(0, marker_bottom - echo_bottom)
+    outside_right_px = max(0, marker_right - echo_right)
+    max_outside_px = max(outside_top_px, outside_left_px, outside_bottom_px, outside_right_px)
+
+    fully_above_gap_px = max(0, echo_top - marker_bottom)
+    fully_left_gap_px = max(0, echo_left - marker_right)
+    fully_below_gap_px = max(0, marker_top - echo_bottom)
+    fully_right_gap_px = max(0, marker_left - echo_right)
+    fully_outside = overlap_ratio <= 0.0
+    top_left_outside = fully_above_gap_px > 0 and fully_left_gap_px > 0
+
+    # The marker may legitimately fall a few pixels outside the rect. The
+    # penalty grows with distance; far top-left matches are usually vendor
+    # logos, so only those get a much harsher suppression.
+    near_margin_px = max(12.0, min(crop_w, crop_h) * 0.025, min(marker_w, marker_h) * 1.5)
+    penalty_factor = 1.0
+    reasons: List[str] = []
+    gap_px = max(fully_above_gap_px, fully_left_gap_px, fully_below_gap_px, fully_right_gap_px)
+    outside_distance_px = gap_px if gap_px > 0 else max_outside_px
+    outside_severity = float(outside_distance_px) / max(1.0, float(near_margin_px))
+    if max_outside_px > 0:
+        if outside_severity <= 1.0:
+            penalty_factor = 1.0 - 0.08 * outside_severity
+        elif outside_severity <= 2.0:
+            penalty_factor = 0.92 - 0.17 * (outside_severity - 1.0)
+        elif outside_severity <= 4.0:
+            penalty_factor = 0.75 - 0.30 * ((outside_severity - 2.0) / 2.0)
+        elif outside_severity <= 6.0:
+            penalty_factor = 0.45 - 0.20 * ((outside_severity - 4.0) / 2.0)
+        else:
+            penalty_factor = max(0.08, 0.25 - 0.17 * min((outside_severity - 6.0) / 4.0, 1.0))
+
+        if outside_severity <= 1.0:
+            reasons.append("marker_near_outside_echo_rect" if fully_outside else "marker_slightly_outside_echo_rect")
+        elif outside_severity <= 2.0:
+            reasons.append("marker_near_outside_echo_rect")
+        elif outside_severity <= 4.0:
+            reasons.append("marker_partly_outside_echo_rect" if overlap_ratio > 0.0 else "marker_fully_outside_echo_rect")
+        else:
+            reasons.append("marker_mostly_outside_echo_rect" if overlap_ratio > 0.0 else "marker_fully_outside_echo_rect")
+        if outside_severity > 6.0:
+            reasons.append("marker_far_outside_echo_rect")
+
+        if top_left_outside:
+            reasons.append("top_left_vendor_logo_candidate")
+            diagonal_severity = max(fully_above_gap_px, fully_left_gap_px) / max(1.0, float(near_margin_px))
+            if diagonal_severity <= 1.0:
+                top_left_factor = 0.95 - 0.15 * diagonal_severity
+            elif diagonal_severity <= 3.0:
+                top_left_factor = 0.80 - 0.35 * ((diagonal_severity - 1.0) / 2.0)
+            else:
+                top_left_factor = max(0.08, 0.45 - 0.37 * min((diagonal_severity - 3.0) / 3.0, 1.0))
+            penalty_factor = min(penalty_factor, top_left_factor)
+
+    adjusted_score = max(0.0, min(1.0, float(raw_score) * float(penalty_factor)))
+    return {
+        "match_score_raw": float(raw_score),
+        "match_score_penalty_factor": float(penalty_factor),
+        "match_score_penalty_reason": ";".join(dict.fromkeys(reasons)),
+        "match_score_adjusted": float(adjusted_score),
+        "marker_echo_overlap_ratio": float(overlap_ratio),
+        "marker_outside_echo_rect": int(1 if max_outside_px > 0 else 0),
+        "marker_outside_echo_top_px": int(outside_top_px),
+        "marker_outside_echo_left_px": int(outside_left_px),
+        "marker_outside_echo_bottom_px": int(outside_bottom_px),
+        "marker_outside_echo_right_px": int(outside_right_px),
+        "marker_outside_echo_max_px": int(max_outside_px),
+        "marker_outside_echo_gap_px": int(gap_px),
+        "marker_outside_echo_severity": float(outside_severity),
+        "marker_top_left_outside_echo_rect": int(1 if top_left_outside else 0),
+        "marker_echo_near_margin_px": float(near_margin_px),
+    }
+
+
+def _bundle_predict_lr_marker_on_su_giu_rows(
+    *,
+    su_giu_rows: Sequence[Dict[str, object]],
+    vendor_name: str,
+    library_root: Path,
+    bundle_dir: Path,
+    bundle_zip: Path,
+    min_match_score: float,
+    vertical_delta: float,
+    full_crop_fallback_threshold: float,
+    expanded_search_threshold: float,
+    expanded_search_steps: Sequence[float],
+    match_max_side: int,
+    selection_images: int,
+    target_image_width: int = 0,
+    target_image_height: int = 0,
+    expected_groups_by_image_path: Optional[Dict[str, str]] = None,
+    expected_groups_by_image_index: Optional[Dict[str, str]] = None,
+    template_policy: str = "bundle_historical_best",
+) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+    bundle_root = _ensure_orientation_marker_bundle_import(bundle_dir=bundle_dir, bundle_zip=bundle_zip)
+    if bundle_root is None:
+        return [], {"available": False, "error": "bundle_not_found"}
+    _install_cv2_fallback_if_needed()
+    try:
+        from orientation_marker_detector.detector import (  # type: ignore
+            DetectionParams,
+            ImageInput,
+            analyze_images,
+        )
+    except Exception as exc:  # pragma: no cover - optional bundle feature
+        return [], {"available": False, "error": f"bundle_import_failed:{exc}"}
+
+    params = DetectionParams(
+        min_match_score=float(min_match_score),
+        vertical_delta=float(vertical_delta),
+        fallback_threshold=float(full_crop_fallback_threshold),
+        expanded_threshold=float(expanded_search_threshold),
+        expanded_steps=tuple(float(x) for x in expanded_search_steps),
+        match_max_side=int(match_max_side),
+    )
+    bundle_library_root = bundle_root / "orientation_marker_detector" / "templates"
+    requested_library_root = library_root.expanduser().resolve()
+    vendor_dir_requested = next(
+        (
+            p for p in [requested_library_root / str(vendor_name), requested_library_root / str(vendor_name).capitalize()]
+            if p.is_dir()
+        ),
+        None,
+    )
+    effective_library_root = requested_library_root if vendor_dir_requested is not None else bundle_library_root
+    images: List[object] = []
+    source_rows: List[Dict[str, object]] = []
+    for row_sg in su_giu_rows:
+        image_path_s = str(row_sg.get("image_path", "") or "").strip()
+        if not image_path_s:
+            continue
+        image_path = Path(image_path_s).expanduser().resolve()
+        if not image_path.is_file():
+            continue
+        crop_rect = _bundle_crop_rect_from_sugiu_row(dict(row_sg))
+        if crop_rect is None:
+            continue
+        sugiu_model_pred = str(row_sg.get("pred_label", "") or "").strip().lower()
+        sugiu_pred = sugiu_model_pred if sugiu_model_pred in {"su", "giu"} else ""
+        try:
+            conf = float(row_sg.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        image_index_s = str(row_sg.get("image_index", "") or "").strip()
+        expected_group = ""
+        if expected_groups_by_image_path:
+            expected_group = str(expected_groups_by_image_path.get(image_path.as_posix(), "") or "").strip().upper()
+        if not expected_group and expected_groups_by_image_index and image_index_s:
+            expected_group = str(expected_groups_by_image_index.get(image_index_s, "") or "").strip().upper()
+        if expected_group not in {"NF", "LR", "UD", "LRUD"}:
+            expected_group = ""
+        images.append(
+            ImageInput(
+                image_path=image_path,
+                image_id=image_index_s or image_path.name,
+                crop_rect=crop_rect,
+                crop_source=str(row_sg.get("crop_source", "")),
+                sugiu_pred=sugiu_pred,
+                sugiu_conf=float(conf),
+                expected_group=expected_group,
+            )
+        )
+        source_rows.append(dict(row_sg))
+
+    if not images:
+        return [], {"available": True, "error": "no_valid_bundle_inputs", "bundle_root": bundle_root.as_posix()}
+
+    try:
+        analysis = analyze_images(
+            images,
+            vendor=str(vendor_name),
+            library_root=effective_library_root,
+            params=params,
+            selection_images=max(1, int(selection_images)),
+        )
+    except Exception as exc:
+        return [], {"available": True, "error": f"bundle_analysis_failed:{exc}", "bundle_root": bundle_root.as_posix()}
+
+    out_rows: List[Dict[str, object]] = []
+    for result, row_sg in zip(analysis.rows, source_rows):
+        result_d = result.to_dict()
+        marker_box = result_d.get("marker_box_abs")
+        crop_rect = result_d.get("crop_rect_abs")
+        image_path_s = str(result_d.get("image_path", row_sg.get("image_path", "")) or "")
+        if not marker_box or not crop_rect or not image_path_s:
+            row_out: Dict[str, object] = {
+                "image_index": int(row_sg.get("image_index", 0) or 0),
+                "image_path": image_path_s,
+                "vendor": vendor_name,
+                "status": "review",
+                "review_reason": str(result_d.get("review_reason", "") or "bundle_no_match"),
+                "lr_marker_method": "bundle",
+                "match_score": float(result_d.get("match_score", 0.0) or 0.0),
+                "template_path": str(result_d.get("template_path", "") or ""),
+                "template_width": int(result_d.get("template_width", 0) or 0),
+                "template_height": int(result_d.get("template_height", 0) or 0),
+                "su_giu_model_pred": str(row_sg.get("pred_label", "") or ""),
+                "su_giu_pred": str(result_d.get("vertical_final", "") or row_sg.get("pred_label", "") or ""),
+                "su_giu_conf": float(row_sg.get("confidence", 0.0) or 0.0),
+                "prob_su": float(row_sg.get("prob_su", 0.0) or 0.0),
+                "prob_giu": float(row_sg.get("prob_giu", 0.0) or 0.0),
+            }
+            out_rows.append(row_out)
+            continue
+        marker_top, marker_left, marker_bottom, marker_right = [int(v) for v in marker_box]
+        echo_top, echo_left, echo_bottom, echo_right = [int(v) for v in crop_rect]
+        crop_width = max(1, echo_right - echo_left + 1)
+        crop_height = max(1, echo_bottom - echo_top + 1)
+        marker_cx_abs = (marker_left + marker_right) / 2.0
+        marker_cy_abs = (marker_top + marker_bottom) / 2.0
+        detected_side = "left" if marker_cx_abs < ((echo_left + echo_right) / 2.0) else "right"
+        vertical_final = str(result_d.get("vertical_final", "") or "").strip().lower()
+        orientation_group = str(result_d.get("orientation_group", "") or "").strip().upper()
+        lr_label, lr_label_it, lr_binary = _bundle_group_to_lr(orientation_group)
+        if not lr_label:
+            if detected_side == "right":
+                lr_label, lr_label_it, lr_binary = "lr_flipped", "specchiata_a_destra", 1
+            elif detected_side == "left":
+                lr_label, lr_label_it, lr_binary = "not_lr_flipped", "normale", 0
+            else:
+                lr_label, lr_label_it, lr_binary = "", "", -1
+        try:
+            with Image.open(Path(image_path_s).expanduser().resolve()) as img:
+                width, height = img.size
+                gray_uint8 = np.asarray(img.convert("L"), dtype=np.uint8)
+        except Exception:
+            width = int(target_image_width or 0)
+            height = int(target_image_height or 0)
+            gray_uint8 = np.zeros((max(1, height), max(1, width)), dtype=np.uint8)
+        image_is_canonical = (
+            int(target_image_width or 0) <= 0
+            or int(target_image_height or 0) <= 0
+            or (int(width) == int(target_image_width) and int(height) == int(target_image_height))
+        )
+        patch_stats = _lr_marker_patch_stats_from_gray(
+            gray_uint8,
+            (int(marker_top), int(marker_left), int(marker_bottom), int(marker_right)),
+        )
+        raw_match_score = float(result_d.get("match_score", 0.0) or 0.0)
+        penalty_fields = _lr_marker_echo_rect_penalty_fields(
+            marker_box_abs=(int(marker_top), int(marker_left), int(marker_bottom), int(marker_right)),
+            echo_rect_abs=(int(echo_top), int(echo_left), int(echo_bottom), int(echo_right)),
+            raw_score=raw_match_score,
+        )
+        adjusted_match_score = float(penalty_fields.get("match_score_adjusted", raw_match_score) or 0.0)
+        reasons = [
+            part
+            for part in str(result_d.get("review_reason", "") or "").split(";")
+            if part
+        ]
+        penalty_reason = str(penalty_fields.get("match_score_penalty_reason", "") or "").strip()
+        if penalty_reason:
+            reasons.extend(part for part in penalty_reason.split(";") if part)
+            if adjusted_match_score < raw_match_score:
+                reasons.append("outside_echo_rect_score_penalty")
+            if raw_match_score >= float(min_match_score) and adjusted_match_score < float(min_match_score):
+                reasons.append("outside_echo_rect_penalty_below_threshold")
+        if not image_is_canonical:
+            reasons.append("non_canonical_image_size")
+        if bool(patch_stats.get("blank", False)):
+            reasons.append("blank_marker_match")
+        if float(patch_stats.get("std", 0.0) or 0.0) < float(LR_MARKER_MIN_TEXTURE_STD):
+            reasons.append("low_texture_marker_match")
+        row_out = {
+            "image_index": int(row_sg.get("image_index", 0) or 0),
+            "image_path": image_path_s,
+            "image_width": int(width),
+            "image_height": int(height),
+            "canonical_image_size": int(1 if image_is_canonical else 0),
+            "vendor": vendor_name,
+            "status": str(result_d.get("status", "") or "review"),
+            "review_reason": "",
+            "lr_label": lr_label,
+            "lr_label_it": lr_label_it,
+            "lr_binary": int(lr_binary),
+            "detected_marker_side": detected_side,
+            "match_score": adjusted_match_score,
+            "match_patch_is_blank": int(1 if bool(patch_stats.get("blank", False)) else 0),
+            "match_patch_dark_pct": float(patch_stats.get("dark_pct", 0.0) or 0.0),
+            "match_patch_max_value": int(patch_stats.get("max_value", 0) or 0),
+            "match_patch_std": float(patch_stats.get("std", 0.0) or 0.0),
+            "initial_match_score": "",
+            "top_half_score": "" if result_d.get("top_half_score") is None else float(result_d.get("top_half_score", 0.0) or 0.0),
+            "bottom_half_score": "" if result_d.get("bottom_half_score") is None else float(result_d.get("bottom_half_score", 0.0) or 0.0),
+            "full_crop_fallback_score": "" if result_d.get("full_crop_score") is None else float(result_d.get("full_crop_score", 0.0) or 0.0),
+            "expanded_score": "" if result_d.get("expanded_score") is None else float(result_d.get("expanded_score", 0.0) or 0.0),
+            "search_strategy": str(result_d.get("search_scope", "") or ""),
+            "search_scope": str(result_d.get("search_scope", "") or ""),
+            "search_margin_px": 0,
+            "template_policy": str(template_policy or "bundle_historical_best"),
+            "folder_fixed_template_path": str(analysis.template.path),
+            "folder_fixed_template_selection_score": raw_match_score,
+            "folder_template_seed_image_path": "",
+            "folder_template_seed_darkness_pct": -1.0,
+            "folder_template_seed_db_template_path": "",
+            "folder_template_rank_json": json.dumps(analysis.historical_rank[:25], ensure_ascii=False, separators=(",", ":")),
+            "bundle_template_name": str(result_d.get("template_name", "") or ""),
+            "template_path": str(result_d.get("template_path", "") or ""),
+            "template_width": int(result_d.get("template_width", 0) or 0),
+            "template_height": int(result_d.get("template_height", 0) or 0),
+            "su_giu_model_pred": str(row_sg.get("pred_label", "") or ""),
+            "su_giu_pred": vertical_final or str(row_sg.get("pred_label", "") or ""),
+            "su_giu_conf": float(row_sg.get("confidence", 0.0) or 0.0),
+            "prob_su": float(row_sg.get("prob_su", 0.0) or 0.0),
+            "prob_giu": float(row_sg.get("prob_giu", 0.0) or 0.0),
+            "dual_sugiu_search_used": int(1 if str(result_d.get("vertical_correction", "") or "") == "corrected" else 0),
+            "opposite_sugiu_match_score": "",
+            "orientation_group": orientation_group,
+            "bundle_vertical_center": str(result_d.get("vertical_center", "") or ""),
+            "bundle_vertical_source": str(result_d.get("vertical_source", "") or ""),
+            "bundle_vertical_correction": str(result_d.get("vertical_correction", "") or ""),
+            "lr_marker_method": "bundle",
+            "echo_rect_top_abs": int(echo_top),
+            "echo_rect_left_abs": int(echo_left),
+            "echo_rect_bottom_abs": int(echo_bottom),
+            "echo_rect_right_abs": int(echo_right),
+            "marker_top_crop": int(marker_top - echo_top),
+            "marker_left_crop": int(marker_left - echo_left),
+            "marker_bottom_crop": int(marker_bottom - echo_top),
+            "marker_right_crop": int(marker_right - echo_left),
+            "marker_top_abs": int(marker_top),
+            "marker_left_abs": int(marker_left),
+            "marker_bottom_abs": int(marker_bottom),
+            "marker_right_abs": int(marker_right),
+            "marker_cx_crop_norm": float((marker_cx_abs - echo_left) / max(1, crop_width)),
+            "marker_cy_crop_norm": float((marker_cy_abs - echo_top) / max(1, crop_height)),
+            **penalty_fields,
+        }
+        if adjusted_match_score < float(min_match_score) and raw_match_score >= float(min_match_score):
+            row_out["status"] = "review"
+        quadrant_fields = _lr_marker_quadrant_validation_fields(row_out)
+        row_out.update(quadrant_fields)
+        if str(quadrant_fields.get("quadrant_status", "") or "") == "invalid":
+            reasons.append("quadrant_logic_violation")
+            reasons.extend(
+                part
+                for part in str(quadrant_fields.get("quadrant_reason", "") or "").split(";")
+                if part
+            )
+            row_out["status"] = "review"
+        row_out["review_reason"] = ";".join(dict.fromkeys(reasons))
+        out_rows.append(row_out)
+
+    out_rows.sort(key=lambda row: int(row.get("image_index", 0) or 0))
+    return out_rows, {
+        "available": True,
+        "bundle_root": bundle_root.as_posix(),
+        "requested_library_root": requested_library_root.as_posix(),
+        "effective_library_root": effective_library_root.as_posix(),
+        "template_name": analysis.template.name,
+        "template_path": str(analysis.template.path),
+        "template_policy": str(template_policy or "bundle_historical_best"),
+        "historical_rank": analysis.historical_rank[:25],
+        "rows": len(out_rows),
+    }
+
+
 def _infer_lr_marker_orientation_group(image_path_text: str) -> str:
     path = Path(str(image_path_text or "").strip())
     normalized = re.sub(r"[^A-Z0-9]+", "_", " ".join([path.name, path.parent.name, str(path)]).upper())
@@ -2400,7 +3604,14 @@ def _infer_lr_marker_orientation_group(image_path_text: str) -> str:
 
 
 def _infer_lr_marker_orientation_group_from_row(row: Dict[str, object]) -> str:
+    exported_group = str(row.get("orientation_group", "") or "").strip().upper()
     quadrant_fields = _lr_marker_quadrant_validation_fields(row)
+    if str(row.get("lr_marker_method", "") or "") == "bundle":
+        center_group = str(quadrant_fields.get("quadrant_center_group", "") or "").strip().upper()
+        if center_group in {"NF", "LR", "UD", "LRUD"}:
+            return center_group
+        if exported_group in {"NF", "LR", "UD", "LRUD"}:
+            return exported_group
     if str(quadrant_fields.get("quadrant_status", "") or "") == "ok":
         quadrant_group = str(quadrant_fields.get("quadrant_group", "") or "").strip().upper()
         if quadrant_group in {"NF", "LR", "UD", "LRUD"}:
@@ -2673,9 +3884,10 @@ def _build_line16_rect_orientation_from_lr_marker_rows(
     """Build line #16 from reliable marker envelopes while thresholds are pending."""
     order = ("NF", "LR", "UD", "LRUD")
     groups: Dict[str, Dict[str, object]] = {
-        key: {"top": None, "left": None, "bottom": None, "right": None, "boxes": 0}
+        key: {"top": None, "left": None, "bottom": None, "right": None, "boxes": 0, "widths": [], "heights": []}
         for key in order
     }
+    bundle_method = any(str(row.get("lr_marker_method", "") or "") == "bundle" for row in rows)
     boxes_count = 0
     for row in rows:
         try:
@@ -2692,10 +3904,17 @@ def _build_line16_rect_orientation_from_lr_marker_rows(
             target_image_height=int(target_image_height or 0),
         ):
             continue
-        if not _lr_marker_row_quadrant_valid_or_unknown(dict(row)):
+        if str(row.get("lr_marker_method", "") or "") == "bundle":
+            q_fields = _lr_marker_quadrant_validation_fields(dict(row))
+            center_group = str(q_fields.get("quadrant_center_group", "") or "").strip().upper()
+            if center_group not in groups:
+                continue
+        elif not _lr_marker_row_quadrant_valid_or_unknown(dict(row)):
             continue
         review_reason = str(row.get("review_reason", "") or "")
         if _lr_marker_truthy_flag(row.get("match_patch_is_blank", False)) or "blank_marker_match" in review_reason.split(";"):
+            continue
+        if not _lr_marker_row_has_textured_match(dict(row)) or "low_texture_marker_match" in review_reason.split(";"):
             continue
         group_key = _infer_lr_marker_orientation_group_from_row(dict(row))
         if group_key not in groups:
@@ -2715,14 +3934,45 @@ def _build_line16_rect_orientation_from_lr_marker_rows(
         env["bottom"] = bottom if env["bottom"] is None else max(int(env["bottom"]), bottom)
         env["right"] = right if env["right"] is None else max(int(env["right"]), right)
         env["boxes"] = int(env["boxes"]) + 1
+        widths = env.get("widths")
+        heights = env.get("heights")
+        if isinstance(widths, list):
+            widths.append(int(right - left + 1))
+        if isinstance(heights, list):
+            heights.append(int(bottom - top + 1))
         boxes_count += 1
+
+    unstable_groups: List[str] = []
+    for key in order:
+        env = groups[key]
+        if int(env["boxes"]) <= 0:
+            continue
+        widths = [int(v) for v in env.get("widths", [])] if isinstance(env.get("widths"), list) else []
+        heights = [int(v) for v in env.get("heights", [])] if isinstance(env.get("heights"), list) else []
+        median_w = float(statistics.median(widths)) if widths else 0.0
+        median_h = float(statistics.median(heights)) if heights else 0.0
+        envelope_w = int(env["right"]) - int(env["left"]) + 1
+        envelope_h = int(env["bottom"]) - int(env["top"]) + 1
+        env["median_width"] = float(median_w)
+        env["median_height"] = float(median_h)
+        env["envelope_width"] = int(envelope_w)
+        env["envelope_height"] = int(envelope_h)
+        if (
+            not bundle_method
+            and (envelope_w > max(80.0, median_w * 6.0) or envelope_h > max(80.0, median_h * 6.0))
+        ):
+            unstable_groups.append(key)
+    if unstable_groups:
+        for key in unstable_groups:
+            groups[key]["unstable"] = 1
 
     groups_json = json.dumps(
         {
             "min_match_score": float(min_match_score),
             "target_image_width": int(target_image_width or 0),
             "target_image_height": int(target_image_height or 0),
-            "grouping": "quadrant_marker_sugiu",
+            "grouping": "bundle_quadrant_marker_official_rect_axes" if bundle_method else "quadrant_marker_sugiu",
+            "unstable_groups": unstable_groups,
             "groups": groups,
         },
         ensure_ascii=False,
@@ -2730,6 +3980,8 @@ def _build_line16_rect_orientation_from_lr_marker_rows(
     )
     if any(int(groups[key]["boxes"]) <= 0 for key in order):
         return "", "lr_marker_envelope_missing_groups", boxes_count, groups_json
+    if unstable_groups:
+        return "", "lr_marker_envelope_unstable_groups", boxes_count, groups_json
 
     checks = []
     for key in order:
@@ -2738,7 +3990,12 @@ def _build_line16_rect_orientation_from_lr_marker_rows(
             f"{int(env['top'])}|{int(env['left'])}|{int(env['bottom'])}|{int(env['right'])}|"
             f"{LINE16_PENDING_MATCH_TAIL};"
         )
-    return "".join(checks), "lr_marker_quadrant_orientation_envelopes_pending_thresholds", boxes_count, groups_json
+    source = (
+        "bundle_marker_orientation_envelopes_pending_thresholds"
+        if bundle_method
+        else "lr_marker_quadrant_orientation_envelopes_pending_thresholds"
+    )
+    return "".join(checks), source, boxes_count, groups_json
 
 
 def _predict_lt_on_rect_crops(
@@ -4567,6 +5824,56 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disattiva inferenza LR classica basata sui marker orientation.",
     )
+    parser.add_argument(
+        "--lr-marker-method",
+        type=str,
+        choices=("bundle", "classical"),
+        default="bundle",
+        help=(
+            "Metodo ufficiale per marker orientamento: bundle usa la regola del bundle "
+            "con assi mediani del rettangolo ecografico ufficiale; classical mantiene il vecchio blocco."
+        ),
+    )
+    parser.add_argument(
+        "--lr-marker-bundle-dir",
+        type=Path,
+        default=DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR,
+        help="Cartella unpacked del bundle orientation_marker_detector.",
+    )
+    parser.add_argument(
+        "--lr-marker-bundle-zip",
+        type=Path,
+        default=DEFAULT_ORIENTATION_MARKER_BUNDLE_ZIP,
+        help="Zip del bundle da usare se --lr-marker-bundle-dir non e' gia presente.",
+    )
+    parser.add_argument(
+        "--lr-marker-bundle-library-root",
+        type=Path,
+        default=DEFAULT_ORIENTATION_MARKER_BUNDLE_LIBRARY_ROOT,
+        help=(
+            "Libreria marker usata dal metodo bundle. Default: templates interni al bundle. "
+            "Se la libreria indicata non contiene il vendor, la pipeline ricade automaticamente "
+            "su orientation_marker_detector/templates del bundle."
+        ),
+    )
+    parser.add_argument(
+        "--lr-marker-bundle-vertical-delta",
+        type=float,
+        default=0.05,
+        help="Delta score minimo per correggere SU/GIU quando l'altra meta' del rect e' migliore.",
+    )
+    parser.add_argument(
+        "--lr-marker-bundle-match-max-side",
+        type=int,
+        default=720,
+        help="Lato massimo usato dal bundle per accelerare matchTemplate.",
+    )
+    parser.add_argument(
+        "--lr-marker-bundle-selection-images",
+        type=int,
+        default=18,
+        help="Numero immagini usate dal bundle per scegliere il miglior template storico del vendor.",
+    )
     parser.add_argument("--lr-marker-max-config-depth", type=int, default=4)
     parser.add_argument("--lr-marker-min-match-score", type=float, default=LR_MARKER_RELIABLE_MATCH_SCORE)
     parser.add_argument("--lr-marker-full-crop-fallback-threshold", type=float, default=0.55)
@@ -4585,6 +5892,21 @@ def _build_parser() -> argparse.ArgumentParser:
             "storico e' debole; historical_best usa sempre e solo lo storico; derived_folder "
             "crea subito un template ad hoc dal miglior match storico."
         ),
+    )
+    parser.add_argument(
+        "--lr-marker-manual-seeds-file",
+        type=Path,
+        default=None,
+        help=(
+            "JSON opzionale con rettangoli marker corretti manualmente. Se presente, "
+            "la pipeline crea template manuali di cartella e li prova prima dello storico."
+        ),
+    )
+    parser.add_argument(
+        "--lr-marker-review-file",
+        type=Path,
+        default=DEFAULT_LR_MARKER_REVIEW_FILE,
+        help="JSON opzionale con template LR marker storici accettati/scartati per vendor.",
     )
     parser.add_argument(
         "--lr-marker-exclude-vendors",
@@ -4854,6 +6176,12 @@ def main() -> int:
         raise ValueError("--lr-marker-expanded-search-threshold deve essere tra 0 e 1.")
     if not (0.0 <= args.lr_marker_min_sugiu_confidence <= 1.0):
         raise ValueError("--lr-marker-min-sugiu-confidence deve essere tra 0 e 1.")
+    if not (0.0 <= args.lr_marker_bundle_vertical_delta <= 1.0):
+        raise ValueError("--lr-marker-bundle-vertical-delta deve essere tra 0 e 1.")
+    if args.lr_marker_bundle_match_max_side < 0:
+        raise ValueError("--lr-marker-bundle-match-max-side deve essere >= 0.")
+    if args.lr_marker_bundle_selection_images <= 0:
+        raise ValueError("--lr-marker-bundle-selection-images deve essere > 0.")
     if args.lt_rect_batch_size < 0:
         raise ValueError("--lt-rect-batch-size deve essere >= 0.")
     if args.lt_rect_image_size < 0:
@@ -4875,6 +6203,7 @@ def main() -> int:
     dataset_root = args.dataset_root.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    lr_marker_manual_seed_rows = _load_lr_marker_manual_seed_rows(args.lr_marker_manual_seeds_file)
     encoding_struct_path = (
         args.encoding_struct_path.expanduser().resolve()
         if args.encoding_struct_path is not None
@@ -5003,6 +6332,7 @@ def main() -> int:
     manual_entries_written = 0
     su_giu_per_image_rows: List[Dict[str, object]] = []
     lr_marker_per_image_rows: List[Dict[str, object]] = []
+    lr_marker_manual_seed_template_meta: List[Dict[str, object]] = []
     lt_per_image_rows: List[Dict[str, object]] = []
     lr_marker_templates_cache: Dict[str, Tuple[List[object], Dict[str, object]]] = {}
     lr_marker_template_roots = [p.expanduser().resolve() for p in args.lr_marker_template_roots]
@@ -6067,6 +7397,247 @@ def main() -> int:
             lr_marker_source = "missing_su_giu_predictions"
         elif not vendor_pred:
             lr_marker_source = "missing_vendor"
+        elif str(args.lr_marker_method) == "bundle":
+            def _bundle_rows_choice_score(rows: Sequence[Dict[str, object]]) -> Tuple[int, int, float]:
+                reliable = [
+                    row for row in _lr_marker_reliable_rows(
+                        rows,
+                        min_match_score=float(args.lr_marker_min_match_score),
+                        target_image_width=int(out_video_x or 0),
+                        target_image_height=int(out_video_y or 0),
+                    )
+                    if str(row.get("status", "") or "") == "ok"
+                ]
+                groups = {
+                    _infer_lr_marker_orientation_group_from_row(dict(row))
+                    for row in reliable
+                }
+                groups.discard("")
+                best = max((float(row.get("match_score", 0.0) or 0.0) for row in reliable), default=0.0)
+                return (len(groups), len(reliable), best)
+
+            lr_marker_rows, bundle_meta = _bundle_predict_lr_marker_on_su_giu_rows(
+                su_giu_rows=su_giu_rows,
+                vendor_name=vendor_pred,
+                library_root=args.lr_marker_bundle_library_root.expanduser().resolve(),
+                bundle_dir=args.lr_marker_bundle_dir.expanduser().resolve(),
+                bundle_zip=args.lr_marker_bundle_zip.expanduser().resolve(),
+                min_match_score=float(args.lr_marker_min_match_score),
+                vertical_delta=float(args.lr_marker_bundle_vertical_delta),
+                full_crop_fallback_threshold=float(args.lr_marker_full_crop_fallback_threshold),
+                expanded_search_threshold=float(args.lr_marker_expanded_search_threshold),
+                expanded_search_steps=lr_marker_expanded_search_steps,
+                match_max_side=int(args.lr_marker_bundle_match_max_side),
+                selection_images=int(args.lr_marker_bundle_selection_images),
+                target_image_width=int(out_video_x or 0),
+                target_image_height=int(out_video_y or 0),
+                template_policy="bundle_historical_best",
+            )
+            historical_bundle_meta = dict(bundle_meta)
+            bundle_policy_effective = "bundle_historical_best"
+            manual_bundle_library_root, manual_bundle_meta = _build_lr_marker_bundle_manual_seed_library(
+                seeds=lr_marker_manual_seed_rows,
+                su_giu_rows=su_giu_rows,
+                folder=folder,
+                output_dir=output_dir,
+                vendor_name=vendor_pred,
+                blank_template_max_value=int(args.lr_marker_blank_template_max_value),
+            )
+            if manual_bundle_meta:
+                lr_marker_manual_seed_template_meta.extend(manual_bundle_meta)
+            if manual_bundle_library_root is not None:
+                expected_by_path = {
+                    str(meta.get("image_path", "") or ""): str(meta.get("correction", "") or "").strip().upper()
+                    for meta in manual_bundle_meta
+                    if str(meta.get("status", "") or "") == "accepted"
+                    and str(meta.get("image_path", "") or "")
+                    and str(meta.get("correction", "") or "").strip().upper() in {"NF", "LR", "UD", "LRUD"}
+                }
+                expected_by_index = {
+                    str(meta.get("image_index", "") or ""): str(meta.get("correction", "") or "").strip().upper()
+                    for meta in manual_bundle_meta
+                    if str(meta.get("status", "") or "") == "accepted"
+                    and str(meta.get("image_index", "") or "")
+                    and str(meta.get("correction", "") or "").strip().upper() in {"NF", "LR", "UD", "LRUD"}
+                }
+                manual_lr_marker_rows, manual_bundle_run_meta = _bundle_predict_lr_marker_on_su_giu_rows(
+                    su_giu_rows=su_giu_rows,
+                    vendor_name=vendor_pred,
+                    library_root=manual_bundle_library_root,
+                    bundle_dir=args.lr_marker_bundle_dir.expanduser().resolve(),
+                    bundle_zip=args.lr_marker_bundle_zip.expanduser().resolve(),
+                    min_match_score=float(args.lr_marker_min_match_score),
+                    vertical_delta=float(args.lr_marker_bundle_vertical_delta),
+                    full_crop_fallback_threshold=float(args.lr_marker_full_crop_fallback_threshold),
+                    expanded_search_threshold=float(args.lr_marker_expanded_search_threshold),
+                    expanded_search_steps=lr_marker_expanded_search_steps,
+                    match_max_side=int(args.lr_marker_bundle_match_max_side),
+                    selection_images=max(int(args.lr_marker_bundle_selection_images), len(expected_by_path), 1),
+                    target_image_width=int(out_video_x or 0),
+                    target_image_height=int(out_video_y or 0),
+                    expected_groups_by_image_path=expected_by_path,
+                    expected_groups_by_image_index=expected_by_index,
+                    template_policy="bundle_manual_seed",
+                )
+                accepted_manual_metas = [
+                    meta for meta in manual_bundle_meta
+                    if str(meta.get("status", "") or "") == "accepted"
+                    and str(meta.get("template_path", "") or "")
+                ]
+                manual_ensemble_candidates: List[Dict[str, object]] = []
+                safe_vendor = re.sub(r"[^A-Za-z0-9_.-]+", "_", vendor_pred.strip() or "vendor").strip("_") or "vendor"
+                single_root_base = output_dir / "lr_marker_bundle_manual_seed_single_template_libraries"
+                for meta in accepted_manual_metas:
+                    try:
+                        seed_index = int(meta.get("seed_index", len(manual_ensemble_candidates) + 1) or len(manual_ensemble_candidates) + 1)
+                    except (TypeError, ValueError):
+                        seed_index = len(manual_ensemble_candidates) + 1
+                    template_path = Path(str(meta.get("template_path", "") or "")).expanduser().resolve()
+                    if not template_path.is_file():
+                        continue
+                    single_root = single_root_base / f"seed_{seed_index:03d}"
+                    single_vendor_dir = single_root / safe_vendor
+                    single_template_path = single_vendor_dir / "marker_001.png"
+                    try:
+                        single_vendor_dir.mkdir(parents=True, exist_ok=True)
+                        single_template_path.write_bytes(template_path.read_bytes())
+                        (single_root / "review_decisions.json").write_text(
+                            json.dumps(
+                                {
+                                    "source": "pipeline_single_manual_lr_marker_seed",
+                                    "seed_index": seed_index,
+                                    "vendors": {
+                                        safe_vendor: {
+                                            "vendor": safe_vendor,
+                                            "accepted": [f"{safe_vendor}/{single_template_path.name}"],
+                                            "rejected": [],
+                                        }
+                                    },
+                                },
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            encoding="utf-8",
+                        )
+                    except Exception:
+                        continue
+                    seed_rows, _seed_bundle_meta = _bundle_predict_lr_marker_on_su_giu_rows(
+                        su_giu_rows=su_giu_rows,
+                        vendor_name=vendor_pred,
+                        library_root=single_root,
+                        bundle_dir=args.lr_marker_bundle_dir.expanduser().resolve(),
+                        bundle_zip=args.lr_marker_bundle_zip.expanduser().resolve(),
+                        min_match_score=float(args.lr_marker_min_match_score),
+                        vertical_delta=float(args.lr_marker_bundle_vertical_delta),
+                        full_crop_fallback_threshold=float(args.lr_marker_full_crop_fallback_threshold),
+                        expanded_search_threshold=float(args.lr_marker_expanded_search_threshold),
+                        expanded_search_steps=lr_marker_expanded_search_steps,
+                        match_max_side=int(args.lr_marker_bundle_match_max_side),
+                        selection_images=1,
+                        target_image_width=int(out_video_x or 0),
+                        target_image_height=int(out_video_y or 0),
+                        expected_groups_by_image_path=expected_by_path,
+                        expected_groups_by_image_index=expected_by_index,
+                        template_policy="bundle_manual_seed_ensemble",
+                    )
+                    for row in seed_rows:
+                        row["manual_seed_index"] = seed_index
+                        row["folder_template_seed_image_path"] = str(meta.get("image_path", "") or "")
+                        row["folder_template_seed_db_template_path"] = str(meta.get("template_path", "") or "")
+                    manual_ensemble_candidates.extend(seed_rows)
+                if manual_ensemble_candidates:
+                    def _manual_ensemble_rank(row: Dict[str, object]) -> Tuple[int, int, int, float, float]:
+                        image_path_s = str(row.get("image_path", "") or "")
+                        image_index_s = str(row.get("image_index", "") or "")
+                        expected_group = expected_by_path.get(image_path_s, "") or expected_by_index.get(image_index_s, "")
+                        group = str(row.get("orientation_group", "") or "").strip().upper()
+                        expected_hit = int(1 if expected_group and group == expected_group else 0)
+                        ok = int(1 if str(row.get("status", "") or "") == "ok" else 0)
+                        inside = int(0 if _lr_marker_truthy_flag(row.get("marker_outside_echo_rect", 0)) else 1)
+                        try:
+                            score = float(row.get("match_score", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            score = 0.0
+                        try:
+                            overlap = float(row.get("marker_echo_overlap_ratio", 0.0) or 0.0)
+                        except (TypeError, ValueError):
+                            overlap = 0.0
+                        return (expected_hit, ok, inside, score, overlap)
+
+                    combined_rows_by_key: Dict[str, Dict[str, object]] = {}
+                    for row in manual_ensemble_candidates:
+                        key = str(row.get("image_index", "") or row.get("image_path", "") or "")
+                        if not key:
+                            continue
+                        current = combined_rows_by_key.get(key)
+                        if current is None or _manual_ensemble_rank(dict(row)) > _manual_ensemble_rank(dict(current)):
+                            combined_rows_by_key[key] = dict(row)
+                    manual_lr_marker_rows = sorted(
+                        combined_rows_by_key.values(),
+                        key=lambda row: int(row.get("image_index", 0) or 0),
+                    )
+                    manual_bundle_run_meta = dict(manual_bundle_run_meta)
+                    manual_bundle_run_meta["template_policy"] = "bundle_manual_seed_ensemble"
+                    manual_bundle_run_meta["manual_seed_ensemble_templates"] = len(accepted_manual_metas)
+                    manual_bundle_run_meta["manual_seed_ensemble_candidates"] = len(manual_ensemble_candidates)
+                if manual_lr_marker_rows and _bundle_rows_choice_score(manual_lr_marker_rows) > _bundle_rows_choice_score(lr_marker_rows):
+                    chosen_bundle_meta = dict(manual_bundle_run_meta)
+                    chosen_bundle_meta["historical_bundle_meta"] = historical_bundle_meta
+                    chosen_bundle_meta["manual_seed_template_count"] = len(expected_by_path)
+                    bundle_meta = chosen_bundle_meta
+                    lr_marker_rows = manual_lr_marker_rows
+                    bundle_policy_effective = str(bundle_meta.get("template_policy", "") or "bundle_manual_seed")
+            if not lr_marker_rows:
+                lr_marker_source = str(bundle_meta.get("error", "") or "bundle_no_marker_predictions")
+            else:
+                lr_marker_images_predicted = len(lr_marker_rows)
+                for row_lr in lr_marker_rows:
+                    row_lr["template_policy_requested"] = "bundle"
+                    row_lr["template_policy_effective"] = bundle_policy_effective
+                    row_lr["template_fallback_reason"] = ""
+                    lr_marker_per_image_rows.append(
+                        {
+                            "folder_path": folder.as_posix(),
+                            "folder_name": folder.name,
+                            **row_lr,
+                        }
+                    )
+                decision_lr_rows = [
+                    row for row in _lr_marker_reliable_rows(
+                        lr_marker_rows,
+                        min_match_score=float(args.lr_marker_min_match_score),
+                        target_image_width=int(out_video_x or 0),
+                        target_image_height=int(out_video_y or 0),
+                    )
+                    if str(row.get("status", "") or "") == "ok"
+                ]
+                label_counter: Counter[str] = Counter()
+                for row_lr in decision_lr_rows:
+                    label = str(row_lr.get("lr_label", "") or "").strip()
+                    if label:
+                        label_counter[label] += 1
+                if label_counter:
+                    lr_marker_majority_label, majority_count = max(
+                        label_counter.items(),
+                        key=lambda item: (item[1], item[0] == "not_lr_flipped", item[0]),
+                    )
+                    lr_marker_majority_vote_ratio = float(majority_count / max(1, len(decision_lr_rows)))
+                    lr_marker_majority_counter[lr_marker_majority_label] += 1
+                if decision_lr_rows:
+                    best_lr = max(decision_lr_rows, key=lambda item: float(item.get("match_score", 0.0) or 0.0))
+                    lr_marker_best_label = str(best_lr.get("lr_label", "") or "")
+                    lr_marker_best_score = float(best_lr.get("match_score", 0.0) or 0.0)
+                    lr_marker_best_template_path = str(best_lr.get("template_path", "") or "")
+                    lr_marker_best_search_strategy = str(best_lr.get("search_strategy", "") or "")
+                    lr_marker_source = (
+                        "bundle_manual_seed_template"
+                        if bundle_policy_effective.startswith("bundle_manual_seed")
+                        else "bundle_historical_best_template"
+                    )
+                elif any(not _lr_marker_row_quadrant_valid_or_unknown(dict(row_lr)) for row_lr in lr_marker_rows):
+                    lr_marker_source = "bundle_quadrant_logic_failed"
+                else:
+                    lr_marker_source = "bundle_no_reliable_marker_predictions"
         elif not _lr_marker_tooling_available():
             lr_marker_source = "tooling_unavailable"
         else:
@@ -6079,6 +7650,7 @@ def main() -> int:
                     max_depth=int(args.lr_marker_max_config_depth),
                     blank_template_max_value=int(args.lr_marker_blank_template_max_value),
                     exclude_vendors=tuple(args.lr_marker_exclude_vendors),
+                    review_file=args.lr_marker_review_file,
                 )
             vendor_templates, vendor_template_meta = lr_marker_templates_cache[vendor_key]
             if not vendor_templates:
@@ -6104,31 +7676,92 @@ def main() -> int:
                         blank_template_max_value=int(args.lr_marker_blank_template_max_value),
                         target_image_width=int(out_video_x or 0),
                         target_image_height=int(out_video_y or 0),
+                        prefer_large_historical_templates=not bool(
+                            vendor_template_meta.get("review_active_for_vendor", False)
+                        ),
                     )
 
-                if str(args.lr_marker_template_policy) == "derived_folder":
-                    lr_marker_rows = _run_lr_marker_with_optional_derived(True)
-                    lr_marker_template_policy_effective = "derived_folder"
-                elif str(args.lr_marker_template_policy) == "historical_best_then_derived":
-                    lr_marker_rows = _run_lr_marker_with_optional_derived(False)
-                    should_fallback, fallback_reason = _lr_marker_should_use_derived_fallback(
-                        lr_marker_rows,
+                manual_seed_templates, manual_seed_meta = _build_lr_marker_manual_seed_templates(
+                    seeds=lr_marker_manual_seed_rows,
+                    su_giu_rows=su_giu_rows,
+                    folder=folder,
+                    output_dir=output_dir,
+                    vendor_name=vendor_pred,
+                    device=device,
+                    blank_template_max_value=int(args.lr_marker_blank_template_max_value),
+                )
+                if manual_seed_meta:
+                    for item in manual_seed_meta:
+                        item["folder_path"] = folder.as_posix()
+                        item["folder_name"] = folder.name
+                        item["vendor"] = vendor_pred
+                    lr_marker_manual_seed_template_meta.extend(manual_seed_meta)
+
+                manual_seed_fallback_reason = ""
+                if manual_seed_templates:
+                    manual_rows = _predict_lr_marker_on_su_giu_rows(
+                        su_giu_rows=su_giu_rows,
+                        templates=manual_seed_templates,
+                        vendor_name=vendor_pred,
+                        min_match_score=float(args.lr_marker_min_match_score),
+                        full_crop_fallback_threshold=float(args.lr_marker_full_crop_fallback_threshold),
+                        expanded_search_threshold=float(args.lr_marker_expanded_search_threshold),
+                        expanded_search_steps=lr_marker_expanded_search_steps,
+                        min_sugiu_confidence=float(args.lr_marker_min_sugiu_confidence),
+                        device=device,
+                        force_single_template=True,
+                        blank_template_max_value=int(args.lr_marker_blank_template_max_value),
+                        folder_template_policy="fixed_manual_seed_template",
+                        single_template_policy="fixed_manual_seed_template",
+                        target_image_width=int(out_video_x or 0),
+                        target_image_height=int(out_video_y or 0),
+                        prefer_large_historical_templates=False,
+                    )
+                    manual_reliable_rows = _lr_marker_reliable_rows(
+                        manual_rows,
                         min_match_score=float(args.lr_marker_min_match_score),
                         target_image_width=int(out_video_x or 0),
                         target_image_height=int(out_video_y or 0),
                     )
-                    lr_marker_template_policy_effective = "historical_best"
-                    if should_fallback:
-                        fallback_rows = _run_lr_marker_with_optional_derived(True)
-                        if fallback_rows:
-                            lr_marker_rows = fallback_rows
-                            lr_marker_template_policy_effective = "derived_folder"
-                            lr_marker_template_fallback_reason = fallback_reason
-                        else:
-                            lr_marker_template_fallback_reason = f"{fallback_reason};derived_no_rows"
-                else:
-                    lr_marker_rows = _run_lr_marker_with_optional_derived(False)
-                    lr_marker_template_policy_effective = "historical_best"
+                    if manual_reliable_rows:
+                        lr_marker_rows = manual_rows
+                        lr_marker_template_policy_effective = "manual_seed"
+                    else:
+                        manual_seed_fallback_reason = "manual_seed_no_reliable_rows"
+
+                if not lr_marker_rows:
+                    if str(args.lr_marker_template_policy) == "derived_folder":
+                        lr_marker_rows = _run_lr_marker_with_optional_derived(True)
+                        lr_marker_template_policy_effective = "derived_folder"
+                    elif str(args.lr_marker_template_policy) == "historical_best_then_derived":
+                        lr_marker_rows = _run_lr_marker_with_optional_derived(False)
+                        should_fallback, fallback_reason = _lr_marker_should_use_derived_fallback(
+                            lr_marker_rows,
+                            min_match_score=float(args.lr_marker_min_match_score),
+                            target_image_width=int(out_video_x or 0),
+                            target_image_height=int(out_video_y or 0),
+                        )
+                        lr_marker_template_policy_effective = "historical_best"
+                        if should_fallback:
+                            fallback_rows = _run_lr_marker_with_optional_derived(True)
+                            if fallback_rows:
+                                lr_marker_rows = fallback_rows
+                                lr_marker_template_policy_effective = "derived_folder"
+                                lr_marker_template_fallback_reason = fallback_reason
+                            else:
+                                lr_marker_rows = []
+                                lr_marker_template_policy_effective = "derived_folder"
+                                lr_marker_template_fallback_reason = f"{fallback_reason};derived_no_rows"
+                    else:
+                        lr_marker_rows = _run_lr_marker_with_optional_derived(False)
+                        lr_marker_template_policy_effective = "historical_best"
+
+                if manual_seed_fallback_reason and lr_marker_template_policy_effective != "manual_seed":
+                    lr_marker_template_fallback_reason = (
+                        f"{manual_seed_fallback_reason};{lr_marker_template_fallback_reason}"
+                        if lr_marker_template_fallback_reason
+                        else manual_seed_fallback_reason
+                    )
 
                 if lr_marker_template_fallback_reason:
                     for row_lr in lr_marker_rows:
@@ -6173,11 +7806,12 @@ def main() -> int:
                         lr_marker_best_score = float(best_lr.get("match_score", 0.0) or 0.0)
                         lr_marker_best_template_path = str(best_lr.get("template_path", "") or "")
                         lr_marker_best_search_strategy = str(best_lr.get("search_strategy", "") or "")
-                        lr_marker_source = (
-                            "classical_vendor_derived_folder_template"
-                            if lr_marker_template_policy_effective == "derived_folder"
-                            else "classical_vendor_historical_best_template"
-                        )
+                        if lr_marker_template_policy_effective == "manual_seed":
+                            lr_marker_source = "classical_manual_seed_template"
+                        elif lr_marker_template_policy_effective == "derived_folder":
+                            lr_marker_source = "classical_vendor_derived_folder_template"
+                        else:
+                            lr_marker_source = "classical_vendor_historical_best_template"
                         if lr_marker_template_fallback_reason:
                             lr_marker_source = f"{lr_marker_source}_fallback"
                     elif any(not _lr_marker_row_quadrant_valid_or_unknown(dict(row_lr)) for row_lr in lr_marker_rows):
@@ -6524,6 +8158,15 @@ def main() -> int:
             not in {str(v).strip().lower() for v in args.lr_marker_exclude_vendors if str(v).strip()}
         ):
             review_reasons.append("missing_lr_marker_predictions")
+        if (
+            not bool(args.disable_lr_marker_classical)
+            and lr_marker_images_predicted > 0
+            and vendor_pred
+            and str(vendor_pred).strip().lower()
+            not in {str(v).strip().lower() for v in args.lr_marker_exclude_vendors if str(v).strip()}
+            and not str(line_16_rect_orientation or "").strip()
+        ):
+            review_reasons.append(str(line_16_source or "missing_line16_rect_orientation"))
         if lt_model is not None and lt_images_predicted <= 0:
             review_reasons.append("missing_lt_predictions")
         if lt_model is not None and lt_images_predicted > 0 and lt_mean_confidence < float(args.lt_min_confidence):
@@ -6591,6 +8234,7 @@ def main() -> int:
             lr_marker_best_template_path=lr_marker_best_template_path,
             lr_marker_best_search_strategy=lr_marker_best_search_strategy,
             lr_marker_source=lr_marker_source,
+            lr_marker_method=str(args.lr_marker_method),
             line_16_rect_orientation=line_16_rect_orientation,
             line_16_source=line_16_source,
             line_16_marker_boxes_count=line_16_marker_boxes_count,
@@ -6730,6 +8374,7 @@ def main() -> int:
                 "lr_marker_best_template_path",
                 "lr_marker_best_search_strategy",
                 "lr_marker_source",
+                "lr_marker_method",
                 "line_16_rect_orientation",
                 "line_16_source",
                 "line_16_marker_boxes_count",
@@ -6850,6 +8495,7 @@ def main() -> int:
                     "lr_marker_best_template_path": p.lr_marker_best_template_path,
                     "lr_marker_best_search_strategy": p.lr_marker_best_search_strategy,
                     "lr_marker_source": p.lr_marker_source,
+                    "lr_marker_method": p.lr_marker_method,
                     "line_16_rect_orientation": p.line_16_rect_orientation,
                     "line_16_source": p.line_16_source,
                     "line_16_marker_boxes_count": p.line_16_marker_boxes_count,
@@ -6960,19 +8606,28 @@ def main() -> int:
                 "image_height",
                 "canonical_image_size",
                 "vendor",
+                "lr_marker_method",
                 "status",
                 "review_reason",
+                "orientation_group",
                 "lr_label",
                 "lr_label_it",
                 "lr_binary",
-                "detected_marker_side",
-                "match_score",
-                "match_patch_is_blank",
-                "match_patch_dark_pct",
-                "match_patch_max_value",
-                "match_patch_std",
+                    "detected_marker_side",
+                    "match_score",
+                    "match_score_raw",
+                    "match_score_adjusted",
+                    "match_score_penalty_factor",
+                    "match_score_penalty_reason",
+                    "match_patch_is_blank",
+                    "match_patch_dark_pct",
+                    "match_patch_max_value",
+                    "match_patch_std",
                 "initial_match_score",
+                "top_half_score",
+                "bottom_half_score",
                 "full_crop_fallback_score",
+                "expanded_score",
                 "search_strategy",
                 "search_scope",
                 "search_margin_px",
@@ -6980,19 +8635,27 @@ def main() -> int:
                 "template_policy_requested",
                 "template_policy_effective",
                 "template_fallback_reason",
+                "manual_seed_index",
                 "folder_fixed_template_path",
                 "folder_fixed_template_selection_score",
-                "folder_template_seed_image_path",
-                "folder_template_seed_darkness_pct",
-                "folder_template_seed_db_template_path",
-                "folder_template_rank_json",
-                "template_path",
-                "template_width",
-                "template_height",
+                    "folder_template_seed_image_path",
+                    "folder_template_seed_darkness_pct",
+                    "folder_template_seed_db_template_path",
+                    "folder_template_rank_json",
+                    "bundle_template_name",
+                    "template_path",
+                    "template_width",
+                    "template_height",
+                "su_giu_model_pred",
                 "su_giu_pred",
                 "su_giu_conf",
                 "prob_su",
                 "prob_giu",
+                "dual_sugiu_search_used",
+                "opposite_sugiu_match_score",
+                "bundle_vertical_center",
+                "bundle_vertical_source",
+                "bundle_vertical_correction",
                 "quadrant_valid",
                 "quadrant_status",
                 "quadrant_reason",
@@ -7013,11 +8676,22 @@ def main() -> int:
                 "marker_top_abs",
                 "marker_left_abs",
                 "marker_bottom_abs",
-                "marker_right_abs",
-                "marker_cx_crop_norm",
-                "marker_cy_crop_norm",
-            ],
-        )
+                    "marker_right_abs",
+                    "marker_cx_crop_norm",
+                    "marker_cy_crop_norm",
+                    "marker_echo_overlap_ratio",
+                    "marker_outside_echo_rect",
+                    "marker_outside_echo_top_px",
+                    "marker_outside_echo_left_px",
+                "marker_outside_echo_bottom_px",
+                "marker_outside_echo_right_px",
+                "marker_outside_echo_max_px",
+                "marker_outside_echo_gap_px",
+                "marker_outside_echo_severity",
+                "marker_top_left_outside_echo_rect",
+                "marker_echo_near_margin_px",
+                ],
+            )
         writer.writeheader()
         for row in lr_marker_per_image_rows:
             writer.writerow(
@@ -7030,19 +8704,28 @@ def main() -> int:
                     "image_height": int(row.get("image_height", 0) or 0),
                     "canonical_image_size": int(row.get("canonical_image_size", 0) or 0),
                     "vendor": str(row.get("vendor", "") or ""),
+                    "lr_marker_method": str(row.get("lr_marker_method", "classical") or "classical"),
                     "status": str(row.get("status", "") or ""),
                     "review_reason": str(row.get("review_reason", "") or ""),
+                    "orientation_group": str(row.get("orientation_group", "") or ""),
                     "lr_label": str(row.get("lr_label", "") or ""),
                     "lr_label_it": str(row.get("lr_label_it", "") or ""),
                     "lr_binary": int(row.get("lr_binary", -1) or -1),
                     "detected_marker_side": str(row.get("detected_marker_side", "") or ""),
                     "match_score": f"{float(row.get('match_score', 0.0) or 0.0):.6f}",
+                    "match_score_raw": f"{float(row.get('match_score_raw', row.get('match_score', 0.0)) or 0.0):.6f}",
+                    "match_score_adjusted": f"{float(row.get('match_score_adjusted', row.get('match_score', 0.0)) or 0.0):.6f}",
+                    "match_score_penalty_factor": f"{float(row.get('match_score_penalty_factor', 1.0) or 1.0):.6f}",
+                    "match_score_penalty_reason": str(row.get("match_score_penalty_reason", "") or ""),
                     "match_patch_is_blank": int(row.get("match_patch_is_blank", 0) or 0),
                     "match_patch_dark_pct": f"{float(row.get('match_patch_dark_pct', 0.0) or 0.0):.6f}",
                     "match_patch_max_value": int(row.get("match_patch_max_value", 0) or 0),
                     "match_patch_std": f"{float(row.get('match_patch_std', 0.0) or 0.0):.6f}",
                     "initial_match_score": row.get("initial_match_score", ""),
+                    "top_half_score": row.get("top_half_score", ""),
+                    "bottom_half_score": row.get("bottom_half_score", ""),
                     "full_crop_fallback_score": row.get("full_crop_fallback_score", ""),
+                    "expanded_score": row.get("expanded_score", ""),
                     "search_strategy": str(row.get("search_strategy", "") or ""),
                     "search_scope": str(row.get("search_scope", "") or ""),
                     "search_margin_px": int(row.get("search_margin_px", 0) or 0),
@@ -7050,6 +8733,7 @@ def main() -> int:
                     "template_policy_requested": str(row.get("template_policy_requested", "") or ""),
                     "template_policy_effective": str(row.get("template_policy_effective", "") or ""),
                     "template_fallback_reason": str(row.get("template_fallback_reason", "") or ""),
+                    "manual_seed_index": str(row.get("manual_seed_index", "") or ""),
                     "folder_fixed_template_path": str(row.get("folder_fixed_template_path", "") or ""),
                     "folder_fixed_template_selection_score": (
                         ""
@@ -7064,13 +8748,24 @@ def main() -> int:
                     ),
                     "folder_template_seed_db_template_path": str(row.get("folder_template_seed_db_template_path", "") or ""),
                     "folder_template_rank_json": str(row.get("folder_template_rank_json", "") or ""),
+                    "bundle_template_name": str(row.get("bundle_template_name", "") or ""),
                     "template_path": str(row.get("template_path", "") or ""),
                     "template_width": int(row.get("template_width", 0) or 0),
                     "template_height": int(row.get("template_height", 0) or 0),
+                    "su_giu_model_pred": str(row.get("su_giu_model_pred", "") or ""),
                     "su_giu_pred": str(row.get("su_giu_pred", "") or ""),
                     "su_giu_conf": f"{float(row.get('su_giu_conf', 0.0) or 0.0):.6f}",
                     "prob_su": f"{float(row.get('prob_su', 0.0) or 0.0):.6f}",
                     "prob_giu": f"{float(row.get('prob_giu', 0.0) or 0.0):.6f}",
+                    "dual_sugiu_search_used": int(row.get("dual_sugiu_search_used", 0) or 0),
+                    "opposite_sugiu_match_score": (
+                        ""
+                        if row.get("opposite_sugiu_match_score", "") == ""
+                        else f"{float(row.get('opposite_sugiu_match_score', 0.0) or 0.0):.6f}"
+                    ),
+                    "bundle_vertical_center": str(row.get("bundle_vertical_center", "") or ""),
+                    "bundle_vertical_source": str(row.get("bundle_vertical_source", "") or ""),
+                    "bundle_vertical_correction": str(row.get("bundle_vertical_correction", "") or ""),
                     "quadrant_valid": int(row.get("quadrant_valid", 0) or 0),
                     "quadrant_status": str(row.get("quadrant_status", "") or ""),
                     "quadrant_reason": str(row.get("quadrant_reason", "") or ""),
@@ -7094,6 +8789,17 @@ def main() -> int:
                     "marker_right_abs": int(row.get("marker_right_abs", 0) or 0),
                     "marker_cx_crop_norm": f"{float(row.get('marker_cx_crop_norm', 0.0) or 0.0):.6f}",
                     "marker_cy_crop_norm": f"{float(row.get('marker_cy_crop_norm', 0.0) or 0.0):.6f}",
+                    "marker_echo_overlap_ratio": f"{float(row.get('marker_echo_overlap_ratio', 0.0) or 0.0):.6f}",
+                    "marker_outside_echo_rect": int(row.get("marker_outside_echo_rect", 0) or 0),
+                    "marker_outside_echo_top_px": int(row.get("marker_outside_echo_top_px", 0) or 0),
+                    "marker_outside_echo_left_px": int(row.get("marker_outside_echo_left_px", 0) or 0),
+                    "marker_outside_echo_bottom_px": int(row.get("marker_outside_echo_bottom_px", 0) or 0),
+                    "marker_outside_echo_right_px": int(row.get("marker_outside_echo_right_px", 0) or 0),
+                    "marker_outside_echo_max_px": int(row.get("marker_outside_echo_max_px", 0) or 0),
+                    "marker_outside_echo_gap_px": int(row.get("marker_outside_echo_gap_px", 0) or 0),
+                    "marker_outside_echo_severity": f"{float(row.get('marker_outside_echo_severity', 0.0) or 0.0):.6f}",
+                    "marker_top_left_outside_echo_rect": int(row.get("marker_top_left_outside_echo_rect", 0) or 0),
+                    "marker_echo_near_margin_px": f"{float(row.get('marker_echo_near_margin_px', 0.0) or 0.0):.6f}",
                 }
             )
 
@@ -7281,7 +8987,16 @@ def main() -> int:
         "su_giu_rect_image_size": int(su_giu_image_size) if su_giu_model is not None else 0,
         "su_giu_rect_batch_size": int(su_giu_batch_size),
         "su_giu_rect_class_names": list(su_giu_class_names) if su_giu_model is not None else [],
-        "lr_marker_classical_enabled": not bool(args.disable_lr_marker_classical),
+        "lr_marker_enabled": not bool(args.disable_lr_marker_classical),
+        "lr_marker_method": str(args.lr_marker_method),
+        "lr_marker_classical_enabled": (not bool(args.disable_lr_marker_classical)) and str(args.lr_marker_method) == "classical",
+        "lr_marker_bundle_enabled": (not bool(args.disable_lr_marker_classical)) and str(args.lr_marker_method) == "bundle",
+        "lr_marker_bundle_dir": args.lr_marker_bundle_dir.expanduser().resolve().as_posix(),
+        "lr_marker_bundle_zip": args.lr_marker_bundle_zip.expanduser().resolve().as_posix(),
+        "lr_marker_bundle_library_root": args.lr_marker_bundle_library_root.expanduser().resolve().as_posix(),
+        "lr_marker_bundle_vertical_delta": float(args.lr_marker_bundle_vertical_delta),
+        "lr_marker_bundle_match_max_side": int(args.lr_marker_bundle_match_max_side),
+        "lr_marker_bundle_selection_images": int(args.lr_marker_bundle_selection_images),
         "lr_marker_template_roots": [p.as_posix() for p in lr_marker_template_roots],
         "lr_marker_exclude_vendors": [str(v) for v in args.lr_marker_exclude_vendors],
         "lr_marker_min_match_score": float(args.lr_marker_min_match_score),
@@ -7290,7 +9005,20 @@ def main() -> int:
         "lr_marker_expanded_search_steps": [float(x) for x in lr_marker_expanded_search_steps],
         "lr_marker_blank_template_max_value": int(args.lr_marker_blank_template_max_value),
         "lr_marker_min_sugiu_confidence": float(args.lr_marker_min_sugiu_confidence),
+        "lr_marker_dual_sugiu_search_confidence": float(LR_MARKER_DUAL_SUGIU_SEARCH_CONFIDENCE),
         "lr_marker_template_policy": str(args.lr_marker_template_policy),
+        "lr_marker_review_file": (
+            args.lr_marker_review_file.expanduser().resolve().as_posix()
+            if args.lr_marker_review_file is not None
+            else ""
+        ),
+        "lr_marker_manual_seeds_file": (
+            args.lr_marker_manual_seeds_file.expanduser().resolve().as_posix()
+            if args.lr_marker_manual_seeds_file is not None
+            else ""
+        ),
+        "lr_marker_manual_seed_rows_loaded": int(len(lr_marker_manual_seed_rows)),
+        "lr_marker_manual_seed_templates": lr_marker_manual_seed_template_meta,
         "lr_marker_template_cache_meta": {
             key: meta for key, (_templates, meta) in sorted(lr_marker_templates_cache.items())
         },
@@ -7332,7 +9060,9 @@ def main() -> int:
             else "disabled"
         ),
         "pipeline_stage_lr_marker": (
-            "classical_vendor_template_library_after_su_giu"
+            "bundle_vendor_template_library_after_official_rect_su_giu"
+            if not bool(args.disable_lr_marker_classical) and str(args.lr_marker_method) == "bundle"
+            else "classical_vendor_template_library_after_su_giu"
             if not bool(args.disable_lr_marker_classical)
             else "disabled"
         ),

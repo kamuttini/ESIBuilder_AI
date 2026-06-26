@@ -37,6 +37,12 @@ CAPTURE_FILENAME_PATTERN_RE = re.compile(
 )
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent.parent
+DEFAULT_LR_MARKER_REVIEW_FILE = REPO_ROOT / "artifacts/10_active_pipeline/pipeline_fss_head/lr_marker_vendor_template_library/review_decisions.json"
+DEFAULT_ORIENTATION_MARKER_BUNDLE_ZIP = Path("/Users/Shared/41_orientation_marker_detector_bundle.zip")
+DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR = REPO_ROOT / "artifacts/41_orientation_marker_detector_bundle"
+DEFAULT_ORIENTATION_MARKER_BUNDLE_LIBRARY_ROOT = (
+    DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR / "orientation_marker_detector" / "templates"
+)
 
 
 def _safe_float(value: str, default: float = 0.0) -> float:
@@ -215,6 +221,9 @@ def _build_step_checks(
     su_giu_source = (row.get("su_giu_source", "") or "").strip()
     lr_marker_images = _safe_int(row.get("lr_marker_images_predicted", "0"), 0)
     lr_marker_source = (row.get("lr_marker_source", "") or "").strip()
+    lr_marker_method = (row.get("lr_marker_method", "") or "").strip().lower()
+    if not lr_marker_method:
+        lr_marker_method = "bundle" if lr_marker_source.startswith("bundle") else "classical"
     lr_marker_majority = (row.get("lr_marker_majority_label", "") or "").strip()
     lr_marker_best_label = (row.get("lr_marker_best_label", "") or "").strip()
     lr_marker_best_score = _safe_float(row.get("lr_marker_best_score", "0"), 0.0)
@@ -297,7 +306,7 @@ def _build_step_checks(
     )
     steps.append(
         {
-            "step": "orientamento_lr_marker_classico",
+            "step": "orientamento_lr_marker_bundle" if lr_marker_method == "bundle" else "orientamento_lr_marker_classico",
             "status": (
                 "ok"
                 if lr_marker_images > 0
@@ -309,7 +318,11 @@ def _build_step_checks(
             "best_score": lr_marker_best_score,
             "best_search_strategy": lr_marker_best_strategy,
             "source": lr_marker_source,
-            "mode": "classical_vendor_template_best_score",
+            "mode": (
+                "bundle_vendor_template_official_rect_axes"
+                if lr_marker_method == "bundle"
+                else "classical_vendor_template_best_score"
+            ),
         }
     )
     steps.append(
@@ -1789,6 +1802,7 @@ def _build_su_giu_per_image_evidence(
         "available": False,
         "error": "",
         "csv_path": csv_path.as_posix(),
+        "lr_marker_method": "",
         "images_total": 0,
         "label_counts": {"su": 0, "giu": 0, "other": 0},
         "items": [],
@@ -2074,6 +2088,8 @@ def _build_lr_marker_per_image_evidence(
                         except Exception:
                             image_rel = image_path_s
                 label = str(row.get("lr_label", "") or "").strip()
+                method = str(row.get("lr_marker_method", "") or "classical").strip() or "classical"
+                orientation_group = str(row.get("orientation_group", "") or "").strip().upper()
                 status = str(row.get("status", "") or "").strip()
                 strategy = str(row.get("search_strategy", "") or "").strip()
                 score = _safe_float(str(row.get("match_score", "") or "0"), 0.0)
@@ -2109,8 +2125,10 @@ def _build_lr_marker_per_image_evidence(
                     "image_height": int(image_height),
                     "canonical_image_size": _safe_int(str(row.get("canonical_image_size", "") or "0"), 0),
                     "vendor": str(row.get("vendor", "") or ""),
+                    "lr_marker_method": method,
                     "status": status,
                     "review_reason": str(row.get("review_reason", "") or ""),
+                    "orientation_group": orientation_group,
                     "lr_label": label,
                     "lr_label_it": str(row.get("lr_label_it", "") or ""),
                     "detected_marker_side": str(row.get("detected_marker_side", "") or ""),
@@ -2139,10 +2157,13 @@ def _build_lr_marker_per_image_evidence(
                     "folder_template_seed_db_template_path": str(row.get("folder_template_seed_db_template_path", "") or ""),
                     "folder_template_rank_json": str(row.get("folder_template_rank_json", "") or ""),
                     "template_path": template_path,
+                    "su_giu_model_pred": str(row.get("su_giu_model_pred", "") or ""),
                     "su_giu_pred": str(row.get("su_giu_pred", "") or ""),
                     "su_giu_conf": _safe_float(str(row.get("su_giu_conf", "") or "0"), 0.0),
                     "prob_su": _safe_float(str(row.get("prob_su", "") or "0"), 0.0),
                     "prob_giu": _safe_float(str(row.get("prob_giu", "") or "0"), 0.0),
+                    "dual_sugiu_search_used": _safe_int(str(row.get("dual_sugiu_search_used", "") or "0"), 0),
+                    "opposite_sugiu_match_score": _safe_float(str(row.get("opposite_sugiu_match_score", "") or "0"), 0.0),
                     "echo_rect_top_abs": rect_tlbr[0],
                     "echo_rect_left_abs": rect_tlbr[1],
                     "echo_rect_bottom_abs": rect_tlbr[2],
@@ -2155,6 +2176,8 @@ def _build_lr_marker_per_image_evidence(
                     "marker_cy_crop_norm": _safe_float(str(row.get("marker_cy_crop_norm", "") or "0"), 0.0),
                 }
                 quadrant_fields = _lr_marker_quadrant_fields_from_item(item)
+                if method == "bundle" and orientation_group in {"NF", "LR", "UD", "LRUD"}:
+                    quadrant_fields["quadrant_group"] = orientation_group
                 item.update(quadrant_fields)
                 quadrant_status = str(item.get("quadrant_status", "") or "unknown").strip().lower() or "unknown"
                 if quadrant_status in quadrant_counts:
@@ -2228,6 +2251,7 @@ def _build_lr_marker_per_image_evidence(
         out["dark_sample"] = sample_item
     if items:
         first_item = items[0]
+        out["lr_marker_method"] = str(first_item.get("lr_marker_method", "") or "")
         out["template_policy"] = str(first_item.get("template_policy", "") or "")
         out["template_policy_requested"] = str(first_item.get("template_policy_requested", "") or "")
         out["template_policy_effective"] = str(first_item.get("template_policy_effective", "") or "")
@@ -2235,7 +2259,12 @@ def _build_lr_marker_per_image_evidence(
         out["fixed_template_path"] = str(first_item.get("folder_fixed_template_path", "") or "")
         out["fixed_template_selection_score"] = float(first_item.get("folder_fixed_template_selection_score", 0.0) or 0.0)
         out["vendor_template_library"] = _load_lr_marker_vendor_library_preview(str(first_item.get("vendor", "") or ""))
-        if out["template_policy"] == "fixed_historical_best_template":
+        if out["lr_marker_method"] == "bundle":
+            out["note"] = (
+                "LR marker bundle: usa la libreria templates del bundle, il rettangolo ecografico ufficiale "
+                "e gli assi mediani del rect per assegnare NF/LR/UD/LRUD."
+            )
+        elif out["template_policy"] == "fixed_historical_best_template":
             out["note"] = "LR marker classico: seleziona il template storico best-match e cerca solo quello in ogni frame."
         elif out["template_policy"] == "fixed_derived_folder_template":
             out["note"] = "LR marker classico: deriva un template dalla nuova cartella e cerca solo quello in ogni frame."
@@ -3256,6 +3285,46 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--lr-marker-method",
+        type=str,
+        choices=("bundle", "classical"),
+        default="bundle",
+        help=(
+            "Metodo ufficiale LR marker. Default bundle: usa il detector del bundle "
+            "con assi mediani del rettangolo ecografico ufficiale."
+        ),
+    )
+    p.add_argument(
+        "--lr-marker-bundle-dir",
+        type=Path,
+        default=DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR,
+        help="Cartella unpacked del bundle orientation_marker_detector.",
+    )
+    p.add_argument(
+        "--lr-marker-bundle-zip",
+        type=Path,
+        default=DEFAULT_ORIENTATION_MARKER_BUNDLE_ZIP,
+        help="Zip del bundle orientation_marker_detector.",
+    )
+    p.add_argument(
+        "--lr-marker-bundle-library-root",
+        type=Path,
+        default=DEFAULT_ORIENTATION_MARKER_BUNDLE_LIBRARY_ROOT,
+        help="Root templates del bundle usata per i marker vendor.",
+    )
+    p.add_argument(
+        "--lr-marker-manual-seeds-file",
+        type=Path,
+        default=None,
+        help="JSON opzionale con rettangoli marker corretti da usare come seed del template LR.",
+    )
+    p.add_argument(
+        "--lr-marker-review-file",
+        type=Path,
+        default=DEFAULT_LR_MARKER_REVIEW_FILE,
+        help="JSON opzionale con template LR marker storici accettati/scartati per vendor.",
+    )
+    p.add_argument(
         "--lt-min-confidence",
         type=float,
         default=0.55,
@@ -3336,7 +3405,7 @@ def main() -> int:
     if run_dir.exists():
         if not run_dir.is_dir():
             raise RuntimeError(f"Run path esistente ma non directory: {run_dir}")
-        allowed_existing = {"run_state.json", "review_annotations.json"}
+        allowed_existing = {"run_state.json", "review_annotations.json", "manual_lr_marker_seeds.json"}
         existing_entries = {p.name for p in run_dir.iterdir()}
         disallowed = existing_entries.difference(allowed_existing)
         if disallowed:
@@ -3436,11 +3505,26 @@ def main() -> int:
         str(float(args.probe_min_confidence)),
         "--lr-marker-template-policy",
         str(args.lr_marker_template_policy),
+        "--lr-marker-method",
+        str(args.lr_marker_method),
+        "--lr-marker-bundle-dir",
+        args.lr_marker_bundle_dir.expanduser().resolve().as_posix(),
+        "--lr-marker-bundle-zip",
+        args.lr_marker_bundle_zip.expanduser().resolve().as_posix(),
+        "--lr-marker-bundle-library-root",
+        args.lr_marker_bundle_library_root.expanduser().resolve().as_posix(),
+        "--lr-marker-review-file",
+        args.lr_marker_review_file.expanduser().resolve().as_posix(),
         "--lt-min-confidence",
         str(float(args.lt_min_confidence)),
         "--lt-rect-checkpoint",
         args.lt_rect_checkpoint.expanduser().resolve().as_posix(),
     ]
+    if args.lr_marker_manual_seeds_file is not None:
+        cmd.extend([
+            "--lr-marker-manual-seeds-file",
+            args.lr_marker_manual_seeds_file.expanduser().resolve().as_posix(),
+        ])
     if bool(args.disable_lt_rect_classifier):
         cmd.append("--disable-lt-rect-classifier")
 
@@ -3844,7 +3928,12 @@ def main() -> int:
             if isinstance(pipeline_summary.get("su_giu_rect_class_names"), list)
             else []
         ),
+        "lr_marker_method": str(pipeline_summary.get("lr_marker_method", "") or row.get("lr_marker_method", "") or ""),
         "lr_marker_classical_enabled": bool(pipeline_summary.get("lr_marker_classical_enabled", False)),
+        "lr_marker_bundle_enabled": bool(pipeline_summary.get("lr_marker_bundle_enabled", False)),
+        "lr_marker_bundle_dir": str(pipeline_summary.get("lr_marker_bundle_dir", "") or ""),
+        "lr_marker_bundle_zip": str(pipeline_summary.get("lr_marker_bundle_zip", "") or ""),
+        "lr_marker_bundle_library_root": str(pipeline_summary.get("lr_marker_bundle_library_root", "") or ""),
         "lr_marker_template_roots": (
             pipeline_summary.get("lr_marker_template_roots")
             if isinstance(pipeline_summary.get("lr_marker_template_roots"), list)
@@ -3889,6 +3978,7 @@ def main() -> int:
         ),
         "pipeline_stage_line11_rect_echo": str(pipeline_summary.get("pipeline_stage_line11_rect_echo", "") or ""),
         "pipeline_stage_su_giu_rect": str(pipeline_summary.get("pipeline_stage_su_giu_rect", "") or ""),
+        "pipeline_stage_lr_marker": str(pipeline_summary.get("pipeline_stage_lr_marker", "") or ""),
         "pipeline_stage_lt_rect": str(pipeline_summary.get("pipeline_stage_lt_rect", "") or ""),
         "pipeline_stage_probe": str(pipeline_summary.get("pipeline_stage_probe", "") or ""),
         "pipeline_stage_line13_rect_name_echo": str(pipeline_summary.get("pipeline_stage_line13_rect_name_echo", "") or ""),

@@ -552,6 +552,74 @@ def build_review_html(
     th, td {{ border: 1px solid #e5e7eb; padding: 6px 8px; vertical-align: top; }}
     th {{ background: #f3f4f6; position: sticky; top: 0; }}
     img {{ width: 520px; max-width: 100%; border: 1px solid #cbd5e1; border-radius: 6px; }}
+    a[data-review-link] {{ cursor: zoom-in; display: inline-block; }}
+    .lightbox {{
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: none;
+      grid-template-rows: auto 1fr auto;
+      background: rgba(8, 13, 24, 0.96);
+      color: #f8fafc;
+    }}
+    .lightbox.is-open {{ display: grid; }}
+    .lightbox__bar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 10px 14px;
+      background: rgba(15, 23, 42, 0.9);
+      font-size: 14px;
+    }}
+    .lightbox__meta {{ min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .lightbox__stage {{
+      min-height: 0;
+      display: grid;
+      place-items: center;
+      padding: 12px 56px;
+      position: relative;
+    }}
+    .lightbox__img {{
+      width: auto;
+      max-width: 100%;
+      max-height: calc(100vh - 112px);
+      border: 0;
+      border-radius: 0;
+      object-fit: contain;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+    }}
+    .lightbox__btn {{
+      border: 1px solid rgba(226, 232, 240, 0.3);
+      background: rgba(15, 23, 42, 0.72);
+      color: #f8fafc;
+      border-radius: 6px;
+      min-width: 40px;
+      min-height: 36px;
+      padding: 6px 10px;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+    }}
+    .lightbox__btn:hover {{ background: rgba(30, 41, 59, 0.95); }}
+    .lightbox__nav {{
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 44px;
+      height: 72px;
+      font-size: 28px;
+    }}
+    .lightbox__prev {{ left: 10px; }}
+    .lightbox__next {{ right: 10px; }}
+    .lightbox__hint {{
+      padding: 8px 14px;
+      text-align: center;
+      color: #cbd5e1;
+      background: rgba(15, 23, 42, 0.7);
+      font-size: 12px;
+    }}
+    body.lightbox-open {{ overflow: hidden; }}
   </style>
 </head>
 <body>
@@ -565,6 +633,93 @@ def build_review_html(
       {''.join(trs)}
     </tbody>
   </table>
+  <div class="lightbox" id="reviewLightbox" aria-hidden="true">
+    <div class="lightbox__bar">
+      <button class="lightbox__btn" id="lightboxClose" type="button" aria-label="Close">x</button>
+      <div class="lightbox__meta" id="lightboxMeta"></div>
+      <div id="lightboxCount"></div>
+    </div>
+    <div class="lightbox__stage">
+      <button class="lightbox__btn lightbox__nav lightbox__prev" id="lightboxPrev" type="button" aria-label="Previous">&#8249;</button>
+      <img class="lightbox__img" id="lightboxImg" alt="" />
+      <button class="lightbox__btn lightbox__nav lightbox__next" id="lightboxNext" type="button" aria-label="Next">&#8250;</button>
+    </div>
+    <div class="lightbox__hint">Freccia sinistra/destra per scorrere, Esc per chiudere</div>
+  </div>
+  <script>
+    (() => {{
+      const links = Array.from(document.querySelectorAll('tbody a[href]'));
+      const items = links.map((link, index) => {{
+        const row = link.closest('tr');
+        const cells = row ? Array.from(row.children) : [];
+        const rank = cells[0] ? cells[0].textContent.trim() : String(index + 1);
+        const sample = cells[2] ? cells[2].textContent.trim() : '';
+        const score = cells[3] ? cells[3].textContent.trim() : '';
+        const xErr = cells[4] ? cells[4].textContent.trim() : '';
+        const yErr = cells[5] ? cells[5].textContent.trim() : '';
+        const source = cells[6] ? cells[6].textContent.trim() : '';
+        link.dataset.reviewLink = '1';
+        return {{
+          href: link.getAttribute('href'),
+          title: `#${{rank}} | sample ${{sample}} | score ${{score}} | x ${{xErr}} | y ${{yErr}} | ${{source}}`,
+          row,
+        }};
+      }});
+
+      const box = document.getElementById('reviewLightbox');
+      const img = document.getElementById('lightboxImg');
+      const meta = document.getElementById('lightboxMeta');
+      const count = document.getElementById('lightboxCount');
+      const closeBtn = document.getElementById('lightboxClose');
+      const prevBtn = document.getElementById('lightboxPrev');
+      const nextBtn = document.getElementById('lightboxNext');
+      let active = 0;
+
+      function setActive(index) {{
+        if (!items.length) return;
+        active = (index + items.length) % items.length;
+        const item = items[active];
+        img.src = item.href;
+        img.alt = item.title;
+        meta.textContent = item.title;
+        count.textContent = `${{active + 1}} / ${{items.length}}`;
+        if (item.row) item.row.scrollIntoView({{ block: 'center', behavior: 'smooth' }});
+      }}
+
+      function openAt(index) {{
+        setActive(index);
+        box.classList.add('is-open');
+        box.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('lightbox-open');
+      }}
+
+      function close() {{
+        box.classList.remove('is-open');
+        box.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('lightbox-open');
+      }}
+
+      links.forEach((link, index) => {{
+        link.addEventListener('click', (event) => {{
+          event.preventDefault();
+          openAt(index);
+        }});
+      }});
+
+      closeBtn.addEventListener('click', close);
+      prevBtn.addEventListener('click', () => setActive(active - 1));
+      nextBtn.addEventListener('click', () => setActive(active + 1));
+      box.addEventListener('click', (event) => {{
+        if (event.target === box) close();
+      }});
+      document.addEventListener('keydown', (event) => {{
+        if (!box.classList.contains('is-open')) return;
+        if (event.key === 'Escape') close();
+        if (event.key === 'ArrowLeft') setActive(active - 1);
+        if (event.key === 'ArrowRight') setActive(active + 1);
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """,

@@ -95,6 +95,42 @@ def _replace_stem_with_idx(stem_base: str, idx0: int, parent: Path) -> Optional[
     return None
 
 
+def _file_url(path: Path) -> str:
+    try:
+        return path.resolve().as_uri()
+    except Exception:
+        return path.as_posix()
+
+
+def _manual_variant_candidates(current: Path, sample_id: str) -> List[Dict[str, str]]:
+    """Candidate images from the same folder/depth for manual orientation selection."""
+    idx0 = _depth_idx0_from_sample(sample_id)
+    if idx0 is None:
+        idx0 = 0
+    parent = current.parent
+    stems = [
+        ("NF", "image_depth_find_no_flip_setup_"),
+        ("UD", "image_depth_find_flip_ud_setup_"),
+        ("LR", "image_depth_find_flip_lr_setup_"),
+        ("LRUD", "image_depth_find_flip_lrud_setup_"),
+        ("depth_value", "image_depth_value_setup_"),
+        ("biplana", "image_biplana_setup_"),
+        ("calgrid", "image_CalGrid_depth_"),
+    ]
+    out: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for label, stem in stems:
+        p = _replace_stem_with_idx(stem, idx0, parent)
+        if p is None:
+            continue
+        key = p.resolve().as_posix() if p.exists() else p.as_posix()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"label": label, "path": p.as_posix(), "src": _file_url(p), "name": p.name})
+    return out
+
+
 def _load_gray(path: Path) -> Optional[np.ndarray]:
     try:
         with Image.open(path) as im:
@@ -521,6 +557,11 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
     .img-actions {{ margin:10px 0; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }}
     .img-actions button {{ border:1px solid var(--line); background:#fff; color:var(--ink); border-radius:8px; padding:7px 10px; cursor:pointer; }}
     .img-actions button.active {{ background:#dbeafe; border-color:#60a5fa; color:#1e3a8a; font-weight:600; }}
+    .img-actions a.open-folder {{ border:1px solid var(--line); background:#fff; color:var(--ink); border-radius:8px; padding:7px 10px; text-decoration:none; }}
+    .img-actions a.open-folder:hover {{ background:#eff6ff; }}
+    .img-actions select,
+    .img-actions input[type="text"] {{ border:1px solid var(--line); background:#fff; color:var(--ink); border-radius:8px; padding:7px 10px; max-width:420px; }}
+    .img-actions input[type="file"] {{ max-width:240px; font-size:12px; color:var(--muted); }}
     .img-actions .btn-exclude {{ border-color:#fca5a5; color:#991b1b; background:#fff1f2; }}
     .img-actions .btn-exclude.active {{ border-color:#ef4444; background:#fee2e2; color:#7f1d1d; font-weight:700; }}
     .img-actions .btn-shift {{ min-width:64px; }}
@@ -590,21 +631,26 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
       function loadState() {{
         try {{
           const raw = localStorage.getItem(STORAGE_KEY);
-          if (!raw) return {{ variants: {{}}, excluded: {{}}, x_offsets: {{}} }};
+          if (!raw) return {{ variants: {{}}, manual_paths: {{}}, custom_paths: {{}}, upload_names: {{}}, excluded: {{}}, x_offsets: {{}} }};
           const obj = JSON.parse(raw);
-          if (!obj || typeof obj !== 'object') return {{ variants: {{}}, excluded: {{}}, x_offsets: {{}} }};
+          if (!obj || typeof obj !== 'object') return {{ variants: {{}}, manual_paths: {{}}, custom_paths: {{}}, upload_names: {{}}, excluded: {{}}, x_offsets: {{}} }};
           if (!obj.variants || typeof obj.variants !== 'object') obj.variants = {{}};
+          if (!obj.manual_paths || typeof obj.manual_paths !== 'object') obj.manual_paths = {{}};
+          if (!obj.custom_paths || typeof obj.custom_paths !== 'object') obj.custom_paths = {{}};
+          if (!obj.upload_names || typeof obj.upload_names !== 'object') obj.upload_names = {{}};
           if (!obj.excluded || typeof obj.excluded !== 'object') obj.excluded = {{}};
           if (!obj.x_offsets || typeof obj.x_offsets !== 'object') obj.x_offsets = {{}};
           return obj;
         }} catch (_err) {{
-          return {{ variants: {{}}, excluded: {{}}, x_offsets: {{}} }};
+          return {{ variants: {{}}, manual_paths: {{}}, custom_paths: {{}}, upload_names: {{}}, excluded: {{}}, x_offsets: {{}} }};
         }}
       }}
 
       function saveState() {{
         try {{
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          const saved = Object.assign({{}}, state);
+          delete saved.upload_object_urls;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
         }} catch (_err) {{}}
       }}
 
@@ -626,11 +672,26 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
         return s;
       }}
 
+      function fileUrlFromPath(path) {{
+        const p = String(path || '').trim();
+        if (!p) return '';
+        if (p.indexOf('file://') === 0 || p.indexOf('blob:') === 0 || p.indexOf('data:') === 0) return p;
+        if (p.charAt(0) === '/') return 'file://' + encodeURI(p);
+        return p;
+      }}
+
       function makeCard(r, i) {{
         const hasOpp = Boolean(r.opp_preview_rel);
         const oppStatus = String(r.opposite_status || (hasOpp ? 'ok' : 'missing'));
         const hasOppUsable = hasOpp && oppStatus === 'ok';
         const itemKey = rowKey(r);
+        const manualOptions = Array.isArray(r.manual_variants) ? r.manual_variants : [];
+        const manualSelect = manualOptions.length ? `
+          <select class="manual-variant" title="Scegli manualmente una immagine della stessa cartella e depth">
+            <option value="">Scegli variante...</option>
+            ${{manualOptions.map((v, idx) => `<option value="${{idx}}">${{esc(v.label || '')}} · ${{esc(v.name || '')}}</option>`).join('')}}
+          </select>
+        ` : '';
         let oppWarn = '';
         if (oppStatus === 'missing') {{
           oppWarn = '<span class="warn">Nessuna immagine opposta trovata nella stessa cartella</span>';
@@ -649,6 +710,11 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
             <div class="img-actions">
               <button type="button" class="btn-orig active">Originale</button>
               <button type="button" class="btn-opp" ${{hasOppUsable ? '' : 'disabled'}}>Opposta</button>
+              ${{manualSelect}}
+              <input type="text" class="custom-nf-path" placeholder="Percorso immagine NF..." />
+              <button type="button" class="btn-custom-nf">Usa NF</button>
+              <a class="open-folder" href="${{esc(r.image_folder_url || '')}}" target="_blank" rel="noopener noreferrer">Apri cartella</a>
+              <input type="file" class="upload-nf-file" accept="image/*" title="Carica immagine NF da vedere in questa card" />
               <button type="button" class="btn-shift btn-left5">← 5px</button>
               <button type="button" class="btn-shift btn-left1">← 1px</button>
               <button type="button" class="btn-shift btn-resetx">Reset X</button>
@@ -683,6 +749,10 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
         renderedCards.forEach((card, i) => {{
           const btnOrig = card.querySelector('.btn-orig');
           const btnOpp = card.querySelector('.btn-opp');
+          const manualVariant = card.querySelector('.manual-variant');
+          const customNfPath = card.querySelector('.custom-nf-path');
+          const btnCustomNf = card.querySelector('.btn-custom-nf');
+          const uploadNfFile = card.querySelector('.upload-nf-file');
           const btnLeft5 = card.querySelector('.btn-left5');
           const btnLeft1 = card.querySelector('.btn-left1');
           const btnResetX = card.querySelector('.btn-resetx');
@@ -753,11 +823,27 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
           function setVariant(v) {{
             if (v === 'opp' && (!row.opp_preview_rel || String(row.opposite_status || 'ok') !== 'ok')) return;
             card.dataset.variant = v;
-            const src = (v === 'opp' && row.opp_preview_rel) ? row.opp_preview_rel : row.orig_preview_rel;
+            let src = (v === 'opp' && row.opp_preview_rel) ? row.opp_preview_rel : row.orig_preview_rel;
+            if (v === 'manual') {{
+              const p = String(state.manual_paths && state.manual_paths[itemKey] || '');
+              const manual = (Array.isArray(row.manual_variants) ? row.manual_variants : []).find((it) => String(it.path || '') === p);
+              if (!manual) return;
+              src = manual.src || manual.path || row.orig_preview_rel;
+            }} else if (v === 'custom_path') {{
+              const p = String(state.custom_paths && state.custom_paths[itemKey] || '');
+              if (!p) return;
+              src = fileUrlFromPath(p);
+            }} else if (v === 'upload') {{
+              const p = String(state.upload_object_urls && state.upload_object_urls[itemKey] || '');
+              if (!p) return;
+              src = p;
+            }}
             img.src = src;
             link.href = src;
             btnOrig.classList.toggle('active', v === 'orig');
             btnOpp.classList.toggle('active', v === 'opp');
+            if (manualVariant) manualVariant.classList.toggle('active', v === 'manual');
+            if (btnCustomNf) btnCustomNf.classList.toggle('active', v === 'custom_path');
             if (img.complete) applyScaleOverlay();
             if (itemKey) {{
               state.variants[itemKey] = v;
@@ -782,6 +868,41 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
 
           btnOrig.addEventListener('click', () => setVariant('orig'));
           btnOpp.addEventListener('click', () => setVariant('opp'));
+          if (manualVariant) {{
+            manualVariant.addEventListener('change', () => {{
+              const idx = Number(manualVariant.value);
+              const manual = Array.isArray(row.manual_variants) ? row.manual_variants[idx] : null;
+              if (!manual) {{
+                delete state.manual_paths[itemKey];
+                setVariant('orig');
+                return;
+              }}
+              if (!state.manual_paths || typeof state.manual_paths !== 'object') state.manual_paths = {{}};
+              state.manual_paths[itemKey] = String(manual.path || '');
+              setVariant('manual');
+            }});
+          }}
+          if (btnCustomNf && customNfPath) {{
+            btnCustomNf.addEventListener('click', () => {{
+              const p = String(customNfPath.value || '').trim();
+              if (!p) return;
+              if (!state.custom_paths || typeof state.custom_paths !== 'object') state.custom_paths = {{}};
+              state.custom_paths[itemKey] = p;
+              setVariant('custom_path');
+            }});
+          }}
+          if (uploadNfFile) {{
+            uploadNfFile.addEventListener('change', () => {{
+              const file = uploadNfFile.files && uploadNfFile.files[0];
+              if (!file) return;
+              if (!state.upload_object_urls || typeof state.upload_object_urls !== 'object') state.upload_object_urls = {{}};
+              if (state.upload_object_urls[itemKey]) URL.revokeObjectURL(state.upload_object_urls[itemKey]);
+              state.upload_object_urls[itemKey] = URL.createObjectURL(file);
+              if (!state.upload_names || typeof state.upload_names !== 'object') state.upload_names = {{}};
+              state.upload_names[itemKey] = file.name || '';
+              setVariant('upload');
+            }});
+          }}
           btnLeft5.addEventListener('click', () => shiftOffsetPx(-5));
           btnLeft1.addEventListener('click', () => shiftOffsetPx(-1));
           btnResetX.addEventListener('click', () => setOffsetPx(0));
@@ -791,7 +912,15 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
           img.addEventListener('load', applyScaleOverlay);
 
           const savedVariant = String((state.variants && state.variants[itemKey]) || 'orig');
-          if (savedVariant === 'opp' && row.opp_preview_rel && String(row.opposite_status || 'ok') === 'ok') setVariant('opp');
+          if (manualVariant && state.manual_paths && state.manual_paths[itemKey]) {{
+            const opts = Array.isArray(row.manual_variants) ? row.manual_variants : [];
+            const idx = opts.findIndex((it) => String(it.path || '') === String(state.manual_paths[itemKey]));
+            if (idx >= 0) manualVariant.value = String(idx);
+          }}
+          if (customNfPath && state.custom_paths && state.custom_paths[itemKey]) customNfPath.value = String(state.custom_paths[itemKey]);
+          if (savedVariant === 'custom_path' && customNfPath && state.custom_paths && state.custom_paths[itemKey]) setVariant('custom_path');
+          else if (savedVariant === 'manual' && manualVariant && state.manual_paths && state.manual_paths[itemKey]) setVariant('manual');
+          else if (savedVariant === 'opp' && row.opp_preview_rel && String(row.opposite_status || 'ok') === 'ok') setVariant('opp');
           else setVariant('orig');
           setOffsetPx(getOffsetPx());
           const savedExcluded = Boolean(state.excluded && state.excluded[itemKey]);
@@ -822,16 +951,23 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
       function updateToolbar() {{
         statRows.textContent = `Righe: ${{cards.length}}`;
         let savedOpp = 0;
+        let savedManual = 0;
+        let savedCustom = 0;
+        let savedUpload = 0;
         let savedExcluded = 0;
         let movedX = 0;
         for (const r of ROWS) {{
           const k = rowKey(r);
-          if (String((state.variants && state.variants[k]) || 'orig') === 'opp') savedOpp += 1;
+          const variant = String((state.variants && state.variants[k]) || 'orig');
+          if (variant === 'opp') savedOpp += 1;
+          if (variant === 'manual') savedManual += 1;
+          if (variant === 'custom_path') savedCustom += 1;
+          if (variant === 'upload') savedUpload += 1;
           if (Boolean(state.excluded && state.excluded[k])) savedExcluded += 1;
           const xoff = Number(state.x_offsets && state.x_offsets[k]);
           if (Number.isFinite(xoff) && Math.round(xoff) !== 0) movedX += 1;
         }}
-        statSaved.textContent = `Correzioni: opposta=${{savedOpp}} | escluse=${{savedExcluded}} | spostateX=${{movedX}}`;
+        statSaved.textContent = `Correzioni: opposta=${{savedOpp}} | manuale=${{savedManual}} | pathNF=${{savedCustom}} | upload=${{savedUpload}} | escluse=${{savedExcluded}} | spostateX=${{movedX}}`;
         if (!oneCardMode) {{
           statPos.textContent = 'Vista: tutte le card';
           return;
@@ -915,6 +1051,7 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
           'split',
           'image_path',
           'selected_variant',
+          'selected_image_path',
           'excluded',
           'x_offset_px',
           'opposite_source_path',
@@ -929,13 +1066,21 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
         for (const r of ROWS) {{
           const k = rowKey(r);
           const sel = String((state.variants && state.variants[k]) || 'orig');
+          const selectedPath = sel === 'manual'
+            ? String((state.manual_paths && state.manual_paths[k]) || '')
+            : (sel === 'custom_path'
+              ? String((state.custom_paths && state.custom_paths[k]) || '')
+              : (sel === 'upload'
+                ? ('UPLOAD:' + String((state.upload_names && state.upload_names[k]) || ''))
+                : (sel === 'opp' ? String(r.opposite_source_path || '') : String(r.image_path || ''))));
           const excluded = Boolean(state.excluded && state.excluded[k]);
-          if (sel !== 'opp' && !excluded) continue;
+          if (sel !== 'opp' && sel !== 'manual' && sel !== 'custom_path' && sel !== 'upload' && !excluded) continue;
           outRows.push([
             r.sample_id || '',
             r.split || '',
             r.image_path || '',
             sel,
+            selectedPath,
             excluded ? 1 : 0,
             Number((state.x_offsets && state.x_offsets[k]) || 0),
             r.opposite_source_path || '',
@@ -948,7 +1093,7 @@ def build_html(output_html: Path, rows_payload: List[Dict[str, object]], summary
           ]);
         }}
         if (!outRows.length) {{
-          alert('Nessuna correzione da esportare. Seleziona \"Opposta\" o \"Escludi\" su almeno una card.');
+          alert('Nessuna correzione da esportare. Seleziona Opposta, una variante manuale, un path NF, upload o Escludi su almeno una card.');
           return;
         }}
         function csvEsc(v) {{
@@ -1147,6 +1292,8 @@ def main() -> int:
                 "sample_id": row.sample_id,
                 "split": row.split,
                 "image_path": img_path.as_posix(),
+                "image_folder_path": img_path.parent.as_posix(),
+                "image_folder_url": _file_url(img_path.parent),
                 "score_after": row.score_after,
                 "orientation_name": row.orientation_name or "",
                 "orientation_idx": row.orientation_idx,
@@ -1170,6 +1317,7 @@ def main() -> int:
                 "opposite_status": opposite_status,
                 "orig_preview_rel": f"{preview_dir.name}/{out_orig.name}",
                 "opp_preview_rel": out_opp_rel or "",
+                "manual_variants": _manual_variant_candidates(img_path, row.sample_id),
             }
         )
 
