@@ -1081,6 +1081,10 @@ def _has_non_depth_numeric_marker(text: str) -> bool:
     return bool(
         re.search(r"\bprint\b", low)
         or re.search(r"\b(?:m\s*hz|hz|d\s*b)\b", low)
+        or re.search(r"\bfr\s*\d", low)
+        # The depth marker must precede the number. A trailing D is an image
+        # mode (for example `2D`), never a depth label.
+        or re.search(r"\b\d+(?:\.\d+)?\s*d\b", low)
     )
 
 
@@ -1274,7 +1278,14 @@ def collect_depth_tokens(
         for other in local_words:
             if other is word:
                 continue
-            if _has_non_depth_numeric_marker(other.text) and _near_same_label_line(other, word, max_dx=150.0):
+            # A settings panel can place FR/Hz on the row immediately above a
+            # real D value. Treat it as a forbidden suffix only on the same
+            # typographic baseline, not merely in the same vertical column.
+            same_suffix_line = (
+                abs(other.y_center - word.y_center) <= max(12.0, 0.70 * max(other.height, word.height))
+                and abs(other.x_center - word.x_center) <= 150.0
+            )
+            if _has_non_depth_numeric_marker(other.text) and same_suffix_line:
                 non_depth_suffix_hint = True
             if _looks_like_mm(other.text) and _near_same_label_line(other, word, max_dx=130.0):
                 mm_hint = True

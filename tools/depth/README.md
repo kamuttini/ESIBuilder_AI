@@ -157,8 +157,14 @@ Modulo production-facing dopo le review manuali:
   cartella e i valori variano, quella diventa la strategia di cartella: i
   candidati scala/accessori vengono subordinati. Un frame con marker non letto
   ma valore+unità leggibili resta `review` direct, non ricade sulla scala;
+- la stessa regola vale per una serie coerente `D + numero` senza unità: se i
+  valori variano nella maggior parte della cartella, il direct diventa il solo
+  metodo selezionabile. Una serie piccola decimale (`D 2.0`, `D 2.5`, ...) viene
+  normalizzata in cm impliciti (`20`, `25`, ... mm) per l'intera cartella;
 - `Print`, `Hz`, `MHz` e `dB` sono marker non-depth: i loro valori non entrano
   neppure nel pool di candidati numerici;
+- anche `FR + numero` e un numero seguito da `D` (per esempio `2D`) sono
+  marker non-depth e non possono diventare direct né scala;
 - se non c'e' valore diretto affidabile, usa la scala come fallback e sceglie il
   valore massimo coerente;
 - la scala va cercata prioritariamente a destra del rettangolo ecografico; la

@@ -440,6 +440,15 @@ def _has_forbidden_marker_autonomous(text: str) -> bool:
     return _has_forbidden_marker(text) or _has_db_unit_suffix_text(text)
 
 
+def _has_non_depth_direct_marker(text: str) -> bool:
+    """Reject UI modes that resemble a letter-plus-number depth label."""
+    low = _clean_ocr_text(text).lower()
+    return bool(
+        re.search(r"\bfr\s*\d", low)
+        or re.search(r"\b\d+(?:\.\d+)?\s*d\b", low)
+    )
+
+
 def _box_from_token_or_cluster(cluster: DepthCluster, image_path: str, profile: DepthProfile) -> Tuple[Optional[DepthToken], Box]:
     tokens = [t for t in cluster.tokens if t.word.image_path.as_posix() == image_path]
     if not tokens:
@@ -897,7 +906,7 @@ def _scale_side_bands(rect_echo: Optional[Box], image_size: Tuple[int, int], pre
 
 def _is_scale_token_candidate(token: DepthToken, band: Box) -> bool:
     text = token.word.text or ""
-    if _has_fps_ips(text) or _has_forbidden_marker_autonomous(text) or _has_probe_model_marker(text) or _has_time_like_text(text):
+    if _has_fps_ips(text) or _has_forbidden_marker_autonomous(text) or _has_non_depth_direct_marker(text) or _has_probe_model_marker(text) or _has_time_like_text(text):
         return False
     if _bad_suffix_after_number_autonomous(text):
         return False
@@ -1506,6 +1515,83 @@ def _apply_folder_direct_unit_strategy(rows: List[Dict[str, object]]) -> None:
             if row.get("autonomous_mode") in {"scale", "numeric_accessory", "direct_label"}:
                 row["autonomous_score"] = f"{min(_f(row.get('autonomous_score')), 0.22):.5f}"
                 row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + "; subordinato a direct D/P/R/Depth + unita' della cartella"
+
+
+def _direct_d_value_without_unit(row: Dict[str, object]) -> Optional[float]:
+    """Parse the strict no-unit direct form used by a few vendor interfaces."""
+    text = _clean_ocr_text(str(row.get("ocr_text") or ""))
+    match = re.fullmatch(r"(?i)d\s*[:=./-]?\s*(\d+(?:\.\d+)?)", text)
+    if not match:
+        return None
+    try:
+        value = float(match.group(1))
+    except Exception:
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _apply_folder_direct_d_strategy(rows: List[Dict[str, object]]) -> None:
+    """Use repeated, varying ``D + number`` as one folder-wide method.
+
+    Without cm/mm a D label remains a strong direct clue only when it appears
+    across the folder with changing values.  Small decimal values in that
+    coherent method are interpreted as centimetres (D 2.0 -> 20 mm), matching
+    the vendor's unitless depth presentation.
+    """
+    images = sorted({str(row.get("source_image") or "") for row in rows if row.get("source_image")})
+    image_count = len(images)
+    if image_count < 4:
+        return
+    by_image: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        by_image[str(row.get("source_image") or "")].append(row)
+
+    selected_by_image: Dict[str, Tuple[Dict[str, object], float]] = {}
+    for image, image_rows in by_image.items():
+        candidates: List[Tuple[Dict[str, object], float]] = []
+        for row in image_rows:
+            if row.get("autonomous_mode") != "direct_label" or _f(row.get("autonomous_valid")) <= 0:
+                continue
+            value = _direct_d_value_without_unit(row)
+            if value is not None:
+                candidates.append((row, value))
+        if candidates:
+            selected_by_image[image] = max(candidates, key=lambda item: (_f(item[0].get("autonomous_score")), _f(item[0].get("ranker_score"))))
+
+    min_support = max(4, int(math.ceil(0.50 * image_count)))
+    if len(selected_by_image) < min_support:
+        return
+    values = {round(value, 3) for _row, value in selected_by_image.values()}
+    if len(values) < 3 or max(values) - min(values) < 0.8:
+        return
+    implicit_cm = max(values) <= 16.0
+    factor = 10.0 if implicit_cm else 1.0
+    strategy_reason = (
+        "strategia cartella: direct D + valore variabile senza unita' "
+        f"{len(selected_by_image)}/{image_count}; "
+        + ("interpretazione cm implicita" if implicit_cm else "interpretazione mm")
+    )
+
+    for image, image_rows in by_image.items():
+        selected_pair = selected_by_image.get(image)
+        if selected_pair is None:
+            continue
+        selected, raw_value = selected_pair
+        depth_mm = raw_value * factor
+        selected["autonomous_mode"] = "direct_label"
+        selected["autonomous_valid"] = "1"
+        selected["depth_mm"] = f"{depth_mm:.3f}"
+        selected["ocr_snapped_depth_mm"] = f"{depth_mm:.3f}"
+        selected["ocr_snap_mode"] = "direct_d_implicit_cm_x10" if implicit_cm else "direct_d_raw_mm"
+        selected["folder_strategy"] = "direct_label_d_stable"
+        selected["autonomous_score"] = f"{max(_f(selected.get('autonomous_score')), 0.92):.5f}"
+        selected["autonomous_reason"] = str(selected.get("autonomous_reason") or "") + f"; {strategy_reason}"
+        for row in image_rows:
+            if row is selected:
+                continue
+            if row.get("autonomous_mode") in {"scale", "numeric_accessory", "direct_label"}:
+                row["autonomous_score"] = f"{min(_f(row.get('autonomous_score')), 0.22):.5f}"
+                row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + "; subordinato a direct D variabile della cartella"
 
 
 def _apply_folder_strategy_rules(rows: List[Dict[str, object]]) -> None:
@@ -2590,6 +2676,9 @@ def _score_rows(rows: List[Dict[str, object]], profile: DepthProfile, ranker_mod
         if _flag(row, "ocr_has_fps_ips") or _flag(row, "ocr_has_forbidden_marker") or _flag(row, "ocr_has_db_suffix") or _flag(row, "ocr_has_probe_model") or _flag(row, "ocr_has_time_like_text"):
             valid = 0
             invalid_reasons.append("suffisso dB non valido" if _flag(row, "ocr_has_db_suffix") else "marker OCR non depth")
+        if _has_non_depth_direct_marker(str(row.get("ocr_text") or "")):
+            valid = 0
+            invalid_reasons.append("marker 2D/FR non valido per depth")
         if _flag(row, "ocr_bad_suffix_after_number"):
             valid = 0
             invalid_reasons.append("suffisso non valido")
@@ -2612,6 +2701,7 @@ def _score_rows(rows: List[Dict[str, object]], profile: DepthProfile, ranker_mod
     _apply_folder_strategy_rules(rows)
     _apply_folder_scale_unit_strategy(rows)
     _apply_folder_direct_unit_strategy(rows)
+    _apply_folder_direct_d_strategy(rows)
     for row in rows:
         score = _f(row.get("autonomous_score"))
         if _f(row.get("autonomous_valid")) <= 0 or score < 0.35:
