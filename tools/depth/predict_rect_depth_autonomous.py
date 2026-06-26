@@ -875,11 +875,35 @@ def _is_scale_token_candidate(token: DepthToken, band: Box) -> bool:
     return x0 <= token.word.x_center <= x1 and y0 <= token.word.y_center <= y1
 
 
-def _best_scale_column(tokens: Sequence[DepthToken], rect_echo: Optional[Box], image_size: Tuple[int, int], profile: DepthProfile) -> Optional[Tuple[str, List[DepthToken]]]:
+def _best_scale_column(
+    tokens: Sequence[DepthToken],
+    rect_echo: Optional[Box],
+    image_size: Tuple[int, int],
+    profile: DepthProfile,
+    visual_marks: Sequence[Box] = (),
+) -> Optional[Tuple[str, List[DepthToken]]]:
     candidates_by_side: Dict[str, List[DepthToken]] = {}
     preferred_side = _ordered_scale_sides(profile.scale_side_preference)[0]
     for side, band in _scale_side_bands(rect_echo, image_size, profile.scale_side_preference):
         side_candidates = [t for t in tokens if _is_scale_token_candidate(t, band)]
+        if visual_marks:
+            # Once we see actual ticks, the scale column must live alongside
+            # them.  A side band alone is too broad: it also contains values
+            # from controls and the settings panel.
+            side_candidates = [
+                t
+                for t in side_candidates
+                if any(
+                    abs(t.word.x_center - _box_center(mark)[0]) <= 115.0
+                    and abs(t.word.y_center - _box_center(mark)[1]) <= 55.0
+                    for mark in visual_marks
+                )
+            ]
+        else:
+            # Without detected ticks retain the old, confidence-based fallback
+            # for uncommon layouts.  Provisional OCR digits are only trusted
+            # in the explicit tick-lane branch above.
+            side_candidates = [t for t in side_candidates if t.word.conf >= 18.0]
         if side_candidates:
             candidates_by_side[side] = side_candidates
     if sum(len(v) for v in candidates_by_side.values()) < 2:
@@ -930,7 +954,13 @@ def _add_scale_column_rows(
 ) -> int:
     image_text = image_path.as_posix()
     size = _image_size(image_text)
-    best_column = _best_scale_column(image_tokens, rect_echo, size, profile)
+    best_column = _best_scale_column(
+        image_tokens,
+        rect_echo,
+        size,
+        profile,
+        visual_marks=_detect_visual_scale_marks(image_text),
+    )
     if not best_column:
         return 0
     side, column = best_column
@@ -939,6 +969,18 @@ def _add_scale_column_rows(
         depth_mm, mode = _scale_depth_mm(token, expected_depths)
         if depth_mm > 0 and math.isfinite(depth_mm):
             scored.append((depth_mm, mode, token))
+    # Thin digits next to tick marks are sometimes merged into a larger number
+    # (for example `1` plus noise becoming `15`). If the same column already
+    # contains a short regular sequence, keep its compatible values and drop a
+    # distant one-digit extension rather than treating it as the scale maximum.
+    raw_small = sorted({round(float(token.numeric_value), 3) for _depth, _mode, token in scored if 0 < token.numeric_value <= 12.0})
+    if len(raw_small) >= 3:
+        steps = [b - a for a, b in zip(raw_small, raw_small[1:]) if b - a > 0]
+        step = steps[len(steps) // 2] if steps else 1.0
+        ceiling = max(raw_small) + max(3.0, 3.0 * step)
+        compatible = [item for item in scored if item[2].numeric_value <= ceiling]
+        if compatible:
+            scored = compatible
     if not scored:
         return 0
     depth_mm, mode, token = max(scored, key=lambda item: item[0])
@@ -1166,6 +1208,85 @@ def _apply_scale_max_rule(rows: List[Dict[str, object]], profile: DepthProfile) 
                 row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + "; non massimo scala"
 
 
+def _enforce_scale_endpoint_rule(rows: List[Dict[str, object]]) -> None:
+    """Never promote a middle tick value as the depth of a scale.
+
+    The highest depth is necessarily one of the two scale endpoints.  This is
+    deliberately independent of the folder-level unit strategy: OCR may read
+    an isolated digit in the middle of a scale before it manages to read the
+    ``cm``/``mm`` label.  When tick detection is unavailable we do not invent
+    an endpoint from loose geometry; that case remains available for review.
+    """
+    by_image: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        by_image[str(row.get("source_image") or "")].append(row)
+
+    for image_rows in by_image.values():
+        image = next((str(row.get("source_image") or "") for row in image_rows if row.get("source_image")), "")
+        if len(_detect_visual_scale_marks(image)) < 2:
+            continue
+        for row in image_rows:
+            if row.get("autonomous_mode") != "scale":
+                continue
+            if not _row_is_in_visual_scale_lane(row):
+                row["autonomous_score"] = f"{min(_f(row.get('autonomous_score')), 0.22):.5f}"
+                row["autonomous_reason"] = (
+                    str(row.get("autonomous_reason") or "")
+                    + "; scartato: valore fuori dalla corsia delle tacche della scala"
+                )
+                continue
+            if _row_is_scale_endpoint(row, image_rows):
+                continue
+            row["autonomous_score"] = f"{min(_f(row.get('autonomous_score')), 0.22):.5f}"
+            row["autonomous_reason"] = (
+                str(row.get("autonomous_reason") or "")
+                + "; scartato: valore interno alla scala, la depth puo' essere solo a un'estremita'"
+            )
+
+
+def _enforce_scale_max_value_rule(rows: List[Dict[str, object]]) -> None:
+    """Require the selected scale reading to be the largest readable endpoint.
+
+    A learned score can be useful for OCR quality, but it must never overturn
+    the scale semantics: once two endpoint values are readable, the smaller
+    one is not the depth.  This also resolves duplicate OCR hypotheses on the
+    same tick (for example a raw ``2`` and its ``2 cm`` interpretation).
+    """
+    by_image: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        by_image[str(row.get("source_image") or "")].append(row)
+
+    for image_rows in by_image.values():
+        image = next((str(row.get("source_image") or "") for row in image_rows if row.get("source_image")), "")
+        if len(_detect_visual_scale_marks(image)) < 2:
+            continue
+        endpoints = [
+            row
+            for row in image_rows
+            if (
+                row.get("autonomous_mode") == "scale"
+                and _f(row.get("autonomous_valid")) > 0
+                and _f(row.get("depth_mm")) > 0
+                and _row_is_in_visual_scale_lane(row)
+                and _row_is_scale_endpoint(row, image_rows)
+                and _row_has_isolated_scale_number(row)
+            )
+        ]
+        if len(endpoints) < 2:
+            continue
+        max_depth = max(_f(row.get("depth_mm")) for row in endpoints)
+        tolerance = max(0.5, 0.01 * max_depth)
+        for row in endpoints:
+            depth = _f(row.get("depth_mm"))
+            if depth >= max_depth - tolerance:
+                continue
+            row["autonomous_score"] = f"{min(_f(row.get('autonomous_score')), 0.22):.5f}"
+            row["autonomous_reason"] = (
+                str(row.get("autonomous_reason") or "")
+                + f"; scartato: {depth:g} mm non e' il massimo endpoint OCR ({max_depth:g} mm)"
+            )
+
+
 def _apply_folder_consistency_rules(rows: List[Dict[str, object]]) -> None:
     images = {str(row.get("source_image") or "") for row in rows if row.get("source_image")}
     image_count = max(1, len(images))
@@ -1337,7 +1458,10 @@ def _row_has_isolated_scale_number(row: Dict[str, object]) -> bool:
     if not (source == "token" or source.startswith("scale_")):
         return False
     text = _clean_ocr_text(str(row.get("ocr_text") or "")).lower()
-    return bool(re.fullmatch(r"\d+(?:\.\d*)?\s*(?:cm|mm|c|em|tm)?", text))
+    # The tick can be fused to the digit (``6-``) and a tight OCR crop can
+    # leave harmless punctuation after a correct unit (``6cm*``).  Keep those
+    # local artifacts, but never admit an additional alphabetic suffix.
+    return bool(re.fullmatch(r"\d+(?:\.\d*)?(?:[-–])?\s*(?:cm|mm|c|em|tm)?[.,*]*", text))
 
 
 def _scale_unit_strategy_key(row: Dict[str, object]) -> Tuple[float, float, float, float]:
@@ -2331,6 +2455,8 @@ def _score_rows(rows: List[Dict[str, object]], profile: DepthProfile, ranker_mod
         row["autonomous_valid"] = str(valid)
         row["autonomous_reason"] = "; ".join(reasons + invalid_reasons)
     _apply_scale_max_rule(rows, profile)
+    _enforce_scale_endpoint_rule(rows)
+    _enforce_scale_max_value_rule(rows)
     _apply_folder_consistency_rules(rows)
     _apply_folder_strategy_rules(rows)
     _apply_folder_scale_unit_strategy(rows)

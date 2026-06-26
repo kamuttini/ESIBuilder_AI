@@ -181,7 +181,7 @@ def _candidate_depth_for_scale_mark(row: Dict[str, str]) -> float:
     if not (source == "token" or source.startswith("scale_")):
         return 0.0
     text = str(row.get("ocr_text") or "").strip().lower().replace(",", ".")
-    if not re.fullmatch(r"\d+(?:\.\d*)?\s*(?:cm|mm|c|em|tm)?", text):
+    if not re.fullmatch(r"\d+(?:\.\d*)?(?:[-–])?\s*(?:cm|mm|c|em|tm)?[.,*]*", text):
         return 0.0
     depth = _f(row.get("depth_mm"))
     if depth <= 0 or depth > 160:
@@ -294,7 +294,12 @@ def build_records(batch_dir: Path, output_html: Path, max_candidates: int) -> Tu
     missing_assets = 0
     copied_assets = 0
 
-    for run_dir in sorted(p for p in batch_dir.iterdir() if p.is_dir()):
+    # Accept both a batch container (many run subdirectories) and the output
+    # directory of one direct invocation of the predictor.
+    direct_prediction = batch_dir / "rect_depth_autonomous_predictions.csv"
+    direct_candidates = batch_dir / "rect_depth_autonomous_candidates.csv"
+    run_dirs = [batch_dir] if direct_prediction.exists() and direct_candidates.exists() else sorted(p for p in batch_dir.iterdir() if p.is_dir())
+    for run_dir in run_dirs:
         pred_csv = run_dir / "rect_depth_autonomous_predictions.csv"
         cand_csv = run_dir / "rect_depth_autonomous_candidates.csv"
         summary_json = run_dir / "summary.json"

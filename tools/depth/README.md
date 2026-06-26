@@ -170,6 +170,15 @@ Modulo production-facing dopo le review manuali:
   `s.5cm` vengono normalizzati a `3.5cm`; su Philips alcune letture OCR sporche
   della scala (`s0em`, `em`, `tm`) vengono trattate come deformazioni locali di
   `cm` solo nei crop scala;
+- per le scritte piccole sovrapposte all'ecografia aggiunge due recovery pass
+  locali: contrasto CLAHE e soppressione delle linee orizzontali, entrambi
+  limitati alle due estremita' della colonna di tacche; su macOS aggiunge anche
+  Vision OCR locale. Nessun passaggio invia immagini o testo fuori macchina;
+- una cifra OCR a confidenza bassa viene conservata solo come candidato
+  provvisorio di scala: deve poi essere nella corsia delle tacche, avere un
+  bounding box proprio e stare a un'estremita'. Un `cm` esatto letto nello
+  stesso crop/corsia puo' validare la cifra anche se Tesseract gli assegna
+  confidenza zero;
 - per Hitachi gestisce coppie OCR incollate tipo `R:9.00R:64`, scegliendo la prima
   coppia label-valore (`R:9.00` -> `90 mm`) e trattando la `R` successiva come nuova
   label, non come suffisso.
@@ -268,7 +277,8 @@ Regole operative implementate:
   allineati; tale geometria esclude valori del pannello laterale, ma non inventa
   mai millimetri. Nel report i marker sono gialli e il rosso indica soltanto il
   maggiore valore OCR effettivamente associato a un'estremita' della scala: un
-  valore interno non puo' mai essere selezionato come depth massima;
+  valore interno, fuori corsia o minore di un altro endpoint leggibile non puo'
+  mai essere selezionato come depth massima;
 - un cluster OCR non puo' mai essere il top: per selezionare una depth servono
   un token numerico isolato e il suo bounding box. Se nessun endpoint ha OCR
   leggibile, il report evidenzia entrambe le estremita' come `MAX? OCR assente`

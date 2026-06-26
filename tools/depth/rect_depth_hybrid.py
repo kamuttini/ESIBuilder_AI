@@ -23,6 +23,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -31,6 +32,11 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PIL import Image, ImageOps
+
+try:
+    import cv2
+except Exception:  # pragma: no cover - optional at runtime
+    cv2 = None
 
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
@@ -560,6 +566,43 @@ def _normalize_for_ocr(im: Image.Image, max_side: int) -> Image.Image:
     return im
 
 
+def _preprocess_ocr_image(im: Image.Image, max_side: int, variant: str) -> Image.Image:
+    """Prepare small scale labels that overlap the ultrasound texture.
+
+    The base OCR pass stays intentionally unchanged.  Enhanced passes are only
+    used on compact endpoint ROIs and make bright text survive a textured or
+    partly bright ultrasound background.
+    """
+    normalized = _normalize_for_ocr(im, max_side=max_side)
+    if variant == "base" or cv2 is None:
+        return normalized
+
+    array = np.asarray(normalized, dtype=np.uint8)
+
+    if variant == "scale_clahe":
+        clahe = cv2.createCLAHE(clipLimit=2.4, tileGridSize=(8, 8))
+        enhanced = clahe.apply(array)
+        blurred = cv2.GaussianBlur(enhanced, (0, 0), 1.0)
+        result = cv2.addWeighted(enhanced, 1.45, blurred, -0.45, 0)
+    elif variant == "scale_tophat":
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (19, 19))
+        bright = cv2.morphologyEx(array, cv2.MORPH_TOPHAT, kernel)
+        bright = cv2.normalize(bright, None, 0, 255, cv2.NORM_MINMAX)
+        binary = cv2.adaptiveThreshold(bright, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, -3)
+        result = 255 - binary
+    elif variant == "scale_line_suppressed":
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(array)
+        kernel_width = max(17, min(61, int(round(0.22 * enhanced.shape[1]))))
+        horizontal = cv2.morphologyEx(enhanced, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_width, 1)))
+        residual = cv2.subtract(enhanced, horizontal)
+        _ret, binary = cv2.threshold(residual, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        result = 255 - binary
+    else:
+        return normalized
+    return Image.fromarray(result.astype(np.uint8), mode="L")
+
+
 def _clamp_crop_box(
     box: Tuple[float, float, float, float],
     width: int,
@@ -637,12 +680,90 @@ def _ocr_roi_boxes(
     return boxes
 
 
+def _scale_endpoint_roi_boxes(image_path: Path) -> List[Tuple[int, int, int, int]]:
+    """Find compact OCR crops around the two ends of a vertical tick column."""
+    if cv2 is None:
+        return []
+    frame = cv2.imread(image_path.as_posix(), cv2.IMREAD_GRAYSCALE)
+    if frame is None:
+        return []
+    height, width = frame.shape[:2]
+    if width < 80 or height < 80:
+        return []
+    # Restrict the search to the imaging region.  The old global component
+    # scan could lock onto tiny UI controls in the lower settings panel and
+    # consequently OCR the wrong "endpoint".
+    y0, y1 = int(0.12 * height), int(0.78 * height)
+    _ret, binary = cv2.threshold(frame[y0:y1, :], 180, 255, cv2.THRESH_BINARY)
+    count, _labels, stats, centroids = cv2.connectedComponentsWithStats(binary, 8)
+    components: List[Tuple[float, float, float, float, float, float, float]] = []
+    tick_points: List[Tuple[float, float]] = []
+    for idx in range(1, count):
+        x, y, comp_w, comp_h, area = stats[idx]
+        if area < 5 or area > 1500 or comp_w < 2 or comp_h < 2:
+            continue
+        cx = float(centroids[idx][0])
+        cy = float(y0 + centroids[idx][1])
+        component = (float(x), float(y0 + y), float(comp_w), float(comp_h), float(area), cx, cy)
+        components.append(component)
+        if (
+            3 <= comp_w <= 18
+            and 2 <= comp_h <= 12
+            and 5 <= area <= 180
+            and 0.10 * width <= cx <= 0.90 * width
+        ):
+            tick_points.append((cx, cy))
+    if not tick_points:
+        return []
+
+    groups: Dict[int, List[Tuple[float, float]]] = {}
+    for x, y in tick_points:
+        groups.setdefault(int(round(x / 12.0)), []).append((x, y))
+    scored: List[Tuple[float, float, List[float]]] = []
+    for group in groups.values():
+        ys = [y for _x, y in group]
+        distinct_y = len({int(round(y / 30.0)) for y in ys})
+        span = max(ys) - min(ys) if ys else 0.0
+        if distinct_y < 2 or span < 80.0:
+            continue
+        lane_x = float(np.median([x for x, _y in group]))
+        # Values are normally just left of the tick column.  Require textual
+        # components on those rows so decorative tick-like controls lose.
+        label_ys: List[float] = []
+        for tick_y in ys:
+            if any(
+                lane_x - 95.0 <= item[5] <= lane_x - 8.0
+                and abs(item[6] - tick_y) <= 25.0
+                and item[4] >= 5.0
+                for item in components
+            ):
+                label_ys.append(tick_y)
+        if len(label_ys) < 2:
+            continue
+        right_bias = 0.35 if lane_x >= 0.50 * width else 0.0
+        scored.append((2.0 * len(label_ys) + distinct_y + min(5.0, span / 100.0) + right_bias, lane_x, label_ys))
+    if not scored:
+        return []
+
+    _score, lane_x, label_ys = max(scored, key=lambda item: item[0])
+    boxes: List[Tuple[int, int, int, int]] = []
+    # Ignore unlabeled terminal ticks: the depth is the outermost *numeric*
+    # scale label, not a decorative end-cap of the ultrasound rectangle.
+    for y in (min(label_ys), max(label_ys)):
+        box = _clamp_crop_box((lane_x - 135.0, y - 62.0, lane_x + 75.0, y + 62.0), width, height)
+        if box and box not in boxes:
+            boxes.append(box)
+    return boxes
+
+
 def run_tesseract_tsv_region(
     image_path: Path,
     timeout: float,
     max_side: int,
     crop_box: Optional[Tuple[float, float, float, float]] = None,
     psm: str = "11",
+    preprocess: str = "base",
+    char_whitelist: str = "0123456789.,:/-%aAcCmMdDeEpPrRtThHfFiIsSzZlL",
 ) -> Tuple[List[OCRWord], Tuple[float, float]]:
     try:
         with Image.open(image_path) as original:
@@ -657,7 +778,7 @@ def run_tesseract_tsv_region(
                 crop_left, crop_top = 0, 0
                 crop_right, crop_bottom = ow, oh
                 work = original.copy()
-            im = _normalize_for_ocr(work, max_side=max_side)
+            im = _preprocess_ocr_image(work, max_side=max_side, variant=preprocess)
     except Exception:
         return [], (1.0, 1.0)
 
@@ -677,7 +798,7 @@ def run_tesseract_tsv_region(
             "-l",
             "eng",
             "-c",
-            "tessedit_char_whitelist=0123456789.,:/-%aAcCmMdDeEpPrRtThHfFiIsSzZlL",
+            f"tessedit_char_whitelist={char_whitelist}",
             "tsv",
         ]
         try:
@@ -723,6 +844,100 @@ def run_tesseract_tsv(image_path: Path, timeout: float, max_side: int) -> Tuple[
     return run_tesseract_tsv_region(image_path, timeout=timeout, max_side=max_side, crop_box=None, psm="11")
 
 
+_VISION_OCR_BINARY: Optional[Path] = None
+_VISION_OCR_UNAVAILABLE = False
+
+
+def _vision_ocr_binary() -> Optional[Path]:
+    """Compile the optional macOS Vision OCR helper once per local machine."""
+    global _VISION_OCR_BINARY, _VISION_OCR_UNAVAILABLE
+    if _VISION_OCR_UNAVAILABLE:
+        return None
+    source = Path(__file__).resolve().with_name("vision_text_ocr.swift")
+    if not source.exists() or not shutil.which("swiftc"):
+        _VISION_OCR_UNAVAILABLE = True
+        return None
+    binary = Path(tempfile.gettempdir()) / "esi_builder_vision_text_ocr"
+    if binary.exists() and binary.stat().st_mtime >= source.stat().st_mtime:
+        _VISION_OCR_BINARY = binary
+        return binary
+    try:
+        compiled = subprocess.run(
+            ["swiftc", source.as_posix(), "-O", "-o", binary.as_posix()],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        _VISION_OCR_UNAVAILABLE = True
+        return None
+    if compiled.returncode != 0 or not binary.exists():
+        _VISION_OCR_UNAVAILABLE = True
+        return None
+    _VISION_OCR_BINARY = binary
+    return binary
+
+
+def run_vision_ocr_region(
+    image_path: Path,
+    timeout: float,
+    crop_box: Tuple[float, float, float, float],
+) -> List[OCRWord]:
+    """Use the local macOS Vision OCR engine on a supplied UI region."""
+    binary = _vision_ocr_binary()
+    if binary is None:
+        return []
+    try:
+        with Image.open(image_path) as image:
+            clamped = _clamp_crop_box(crop_box, image.size[0], image.size[1])
+    except Exception:
+        return []
+    if not clamped:
+        return []
+    try:
+        result = subprocess.run(
+            [binary.as_posix(), image_path.as_posix(), *(str(value) for value in clamped)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    out: List[OCRWord] = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 6:
+            continue
+        text = parts[0].strip()
+        if not text:
+            continue
+        try:
+            confidence = 100.0 * float(parts[1])
+            left, top, width, height = (float(value) for value in parts[2:6])
+        except Exception:
+            continue
+        if width <= 1.0 or height <= 1.0:
+            continue
+        out.append(
+            OCRWord(
+                image_path=image_path,
+                image_index=-1,
+                text=text,
+                norm_text=text.lower().replace(" ", ""),
+                conf=confidence,
+                left=left,
+                top=top,
+                width=width,
+                height=height,
+            )
+        )
+    return out
+
+
 def _dedupe_ocr_words(words: Sequence[OCRWord]) -> List[OCRWord]:
     kept: List[OCRWord] = []
     for word in sorted(words, key=lambda w: (-w.conf, w.top, w.left)):
@@ -744,6 +959,11 @@ def _dedupe_ocr_words(words: Sequence[OCRWord]) -> List[OCRWord]:
 
 def _numeric_value(text: str) -> Optional[float]:
     raw = text.strip().replace(",", ".")
+    # Vision commonly returns a scale number with the adjacent tick, for
+    # example ``2-``. It is still a clean numeric value when the dash is only
+    # the final character, never a separator between two numbers.
+    if re.fullmatch(r"\d+(?:\.\d+)?[-–]", raw):
+        raw = raw[:-1]
     if any(ch in raw for ch in ":/-"):
         return None
     cleaned = re.sub(r"[^0-9.]", "", raw)
@@ -953,6 +1173,14 @@ def collect_depth_tokens(
             except Exception:
                 roi_boxes = []
             roi_timeout = max(2.0, min(timeout, timeout * 0.65))
+            # Vision works best with the complete UI context; unlike Tesseract
+            # it can still localize small scale words over the echo image.
+            try:
+                with Image.open(image_path) as im:
+                    vision_box = (0.0, 0.0, float(im.size[0]), float(im.size[1]))
+                image_words.extend(run_vision_ocr_region(image_path, timeout=roi_timeout, crop_box=vision_box))
+            except Exception:
+                pass
             for box in roi_boxes:
                 psm_modes = ["6"]
                 if (box[3] - box[1]) <= max(230, int(0.22 * max(1, box[3]))):
@@ -968,6 +1196,24 @@ def collect_depth_tokens(
                         psm=psm,
                     )
                     image_words.extend(roi_words)
+
+            # Endpoint-only recovery OCR: scale labels can lie over the echo
+            # texture, where a broad ROI loses `cm` or a leading digit. These
+            # compact crops use a restricted alphabet and two contrast passes.
+            scale_timeout = max(1.5, min(timeout, timeout * 0.40))
+            for box in _scale_endpoint_roi_boxes(image_path):
+                for preprocess in ("scale_clahe", "scale_line_suppressed"):
+                    for psm in ("6", "11"):
+                        scale_words, _scale_factor = run_tesseract_tsv_region(
+                            image_path,
+                            timeout=scale_timeout,
+                            max_side=max_side,
+                            crop_box=box,
+                            psm=psm,
+                            preprocess=preprocess,
+                            char_whitelist="0123456789.,cmCM",
+                        )
+                        image_words.extend(scale_words)
         for word in _dedupe_ocr_words(image_words):
             all_words.append(
                 OCRWord(
@@ -990,9 +1236,15 @@ def collect_depth_tokens(
     tokens: List[DepthToken] = []
     for word in all_words:
         strong_embedded = _has_strong_embedded_depth_pattern(word.text)
-        if word.conf < min_conf and not strong_embedded:
-            continue
         values = _numeric_values(word.text)
+        # The tiny white labels printed on a scale often sit over horizontal
+        # echo texture.  Tesseract can locate a clean digit there but assign a
+        # near-zero confidence.  Preserve it as a *provisional* token; the
+        # predictor will only use it when it lies next to a real tick lane and
+        # at a scale endpoint.  Other low-confidence OCR remains discarded.
+        provisional_scale_digit = bool(values) and re.fullmatch(r"\d+(?:[.,]\d+)?[-–.]?", word.text.strip()) is not None
+        if word.conf < min_conf and not strong_embedded and not provisional_scale_digit:
+            continue
         if not values:
             continue
         local_words = words_by_image.get(word.image_index, [])
@@ -1004,6 +1256,9 @@ def collect_depth_tokens(
         r_hint = _looks_like_r_hint(word.text)
         scale_hint = _looks_like_scale_hint(word.text)
         fps_ips_hint = _looks_like_fps_ips(word.text)
+        image_height = max((other.bottom for other in local_words), default=1.0)
+        column_cm_hint = False
+        column_mm_hint = False
         for other in local_words:
             if other is word:
                 continue
@@ -1011,6 +1266,24 @@ def collect_depth_tokens(
                 mm_hint = True
             if _looks_like_cm(other.text) and _near_same_label_line(other, word, max_dx=130.0):
                 cm_hint = True
+            # A scale commonly prints the unit once (for example `0 cm`) and
+            # then shows only digits next to the remaining ticks.  Propagate
+            # that unit solely within the same narrow vertical scale column.
+            same_scale_column = (
+                abs(other.x_center - word.x_center) <= 105.0
+                and abs(other.y_center - word.y_center) <= max(220.0, 0.58 * image_height)
+            )
+            unit_fragment = re.sub(r"[^a-z]", "", other.text.lower())
+            # The compact, line-suppressed crop can recognize the literal
+            # ``cm`` perfectly while assigning it confidence 0.  Within the
+            # same narrow tick column that exact token is still reliable;
+            # fuzzier fragments keep the normal confidence threshold.
+            exact_cm = unit_fragment == "cm"
+            fuzzy_cm = len(unit_fragment) <= 3 and unit_fragment.endswith("cm")
+            if same_scale_column and (exact_cm or (other.conf >= 50.0 and fuzzy_cm)):
+                column_cm_hint = True
+            if same_scale_column and other.conf >= 75.0 and unit_fragment == "mm":
+                column_mm_hint = True
             if _looks_like_depth_hint(other.text) and (
                 _near_left_label(other, word, max_dx=190.0)
                 or (
@@ -1029,6 +1302,12 @@ def collect_depth_tokens(
                 scale_hint = True
             if _looks_like_fps_ips(other.text) and _near_value_context(other, word, max_dx=160.0, max_dy=75.0):
                 fps_ips_hint = True
+        if column_cm_hint:
+            cm_hint = True
+            if not _looks_like_mm(word.text):
+                mm_hint = False
+        elif column_mm_hint:
+            mm_hint = True
         if fps_ips_hint and not (cm_hint or mm_hint or depth_hint or d_hint or p_hint or r_hint or scale_hint):
             continue
         for value in values:
