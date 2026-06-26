@@ -355,11 +355,45 @@ def _first_direct_label_value(text: str) -> Optional[Tuple[int, float]]:
     return matches[0] if matches else None
 
 
+def _embedded_direct_unit_expression(text: str) -> Optional[Tuple[str, float]]:
+    """Extract a clean D/P/R/Depth + value + unit from a noisy OCR word.
+
+    OCR may concatenate nearby UI labels (for example ``13-TEID65mm/M42``).
+    The direct expression itself is still unambiguous, because it starts with
+    D/P/R/Depth and ends immediately after the only allowed suffix, mm or cm.
+    """
+    raw = _clean_ocr_text(text)
+    match = re.search(
+        r"(?i)(depth|dep|deph|dept|dpth|[dpr])\s*[:=./-]?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![a-z])",
+        raw,
+    )
+    if not match:
+        return None
+    try:
+        value = float(match.group(2).replace(",", "."))
+    except Exception:
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    label = match.group(1)
+    normalized_label = "Depth" if label.lower().startswith("d") and len(label) > 1 else label.upper()
+    unit = match.group(3).lower()
+    depth_mm = value if unit == "mm" else value * 10.0
+    return f"{normalized_label}{match.group(2).replace(',', '.')} {unit}", depth_mm
+
+
 def _token_matches_direct_label_value(token: DepthToken) -> float:
     first = _first_direct_label_value(token.word.text)
-    if not first:
-        return 0.0
-    _start, value = first
+    if first:
+        _start, value = first
+    else:
+        embedded = _embedded_direct_unit_expression(token.word.text)
+        if not embedded:
+            return 0.0
+        raw_match = re.search(r"\d+(?:[.,]\d+)?", embedded[0])
+        if not raw_match:
+            return 0.0
+        value = float(raw_match.group(0).replace(",", "."))
     tolerance = max(0.03, 0.015 * max(1.0, abs(value)))
     return 1.0 if abs(float(token.numeric_value) - value) <= tolerance else 0.0
 
@@ -675,12 +709,14 @@ def _candidate_row(
     pred_box: Box,
     profile: DepthProfile,
 ) -> Dict[str, object]:
-    ocr_text = _candidate_ocr_text(cluster, image_path, token)
+    raw_ocr_text = _candidate_ocr_text(cluster, image_path, token)
+    embedded_direct = _embedded_direct_unit_expression(raw_ocr_text) if token is not None else None
+    ocr_text = embedded_direct[0] if embedded_direct else raw_ocr_text
     digit_groups = _digit_group_count(ocr_text)
     pred_width = pred_box[2] - pred_box[0]
     pred_height = pred_box[3] - pred_box[1]
     aspect = pred_width / max(1.0, pred_height)
-    depth_mm = _candidate_depth_mm(token)
+    depth_mm = embedded_direct[1] if embedded_direct else _candidate_depth_mm(token)
     source = "token" if token else "cluster"
     row: Dict[str, object] = {
         "sample_key": Path(image_path).name,
@@ -1355,6 +1391,121 @@ def _best_by_score(rows: Iterable[Dict[str, object]]) -> Optional[Dict[str, obje
             best = row
             best_score = score
     return best
+
+
+def _row_has_direct_unit_evidence(row: Dict[str, object]) -> bool:
+    """True only for the full direct grammar with an explicit depth unit."""
+    text = _clean_ocr_text(str(row.get("ocr_text") or ""))
+    return bool(
+        re.fullmatch(
+            r"(?i)(?:depth|dep|deph|dept|dpth|[dpr])\s*[:=./-]?\s*\d+(?:\.\d+)?\s*(?:mm|cm)",
+            text,
+        )
+    )
+
+
+def _apply_folder_direct_unit_strategy(rows: List[Dict[str, object]]) -> None:
+    """Lock a repeated, varying D/P/R/Depth + unit method for a folder.
+
+    This is stronger than a single-image ranker score.  If an explicit direct
+    expression occurs across most images and its value changes, it is the
+    common depth method for that folder.  A fixed accessory value such as
+    ``Print 4`` cannot compete with it.
+    """
+    images = sorted({str(row.get("source_image") or "") for row in rows if row.get("source_image")})
+    image_count = len(images)
+    if image_count < 4:
+        return
+    by_image: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        by_image[str(row.get("source_image") or "")].append(row)
+
+    selected_by_image: Dict[str, Dict[str, object]] = {}
+    for image, image_rows in by_image.items():
+        candidates = [
+            row
+            for row in image_rows
+            if (
+                row.get("autonomous_mode") == "direct_label"
+                and _f(row.get("autonomous_valid")) > 0
+                and _f(row.get("depth_mm")) > 0
+                and _row_has_direct_unit_evidence(row)
+            )
+        ]
+        if not candidates:
+            continue
+        selected_by_image[image] = max(
+            candidates,
+            key=lambda row: (
+                1 if str(row.get("box_variant") or "") == "direct_label_unit_window" else 0,
+                _f(row.get("autonomous_score")),
+                _f(row.get("ranker_score")),
+            ),
+        )
+
+    min_support = max(4, int(math.ceil(0.50 * image_count)))
+    if len(selected_by_image) < min_support:
+        return
+    values = {_value_bucket(_f(row.get("depth_mm"))) for row in selected_by_image.values() if _f(row.get("depth_mm")) > 0}
+    if len(values) < 3 or max(values) - min(values) < 4.0:
+        return
+
+    strategy_reason = (
+        "strategia cartella: direct D/P/R/Depth + cm/mm variabile "
+        f"{len(selected_by_image)}/{image_count}; altri candidati subordinati"
+    )
+    for image, image_rows in by_image.items():
+        selected = selected_by_image.get(image)
+        if selected is None:
+            # The folder has already established the direct method.  If one
+            # frame loses the D/P/R glyph but still reads a clean unit value,
+            # keep that frame in the direct workflow as a review candidate
+            # rather than silently falling back to the scale.
+            unit_fallbacks = [
+                row
+                for row in image_rows
+                if (
+                    str(row.get("candidate_source") or "") == "token"
+                    and _f(row.get("autonomous_valid")) > 0
+                    and not _flag(row, "ocr_has_forbidden_marker")
+                    and not _flag(row, "ocr_has_db_suffix")
+                    and not _flag(row, "ocr_has_time_like_text")
+                    and _unit_value_depth_mm(str(row.get("ocr_text") or "")) > 0
+                    and _unit_value_depth_mm(str(row.get("ocr_text") or "")) <= 350.0
+                )
+            ]
+            if unit_fallbacks:
+                selected = max(
+                    unit_fallbacks,
+                    key=lambda row: (
+                        _unit_value_depth_mm(str(row.get("ocr_text") or "")),
+                        _f(row.get("autonomous_score")),
+                    ),
+                )
+                fallback_depth = _unit_value_depth_mm(str(selected.get("ocr_text") or ""))
+                selected["autonomous_mode"] = "direct_label"
+                selected["depth_mm"] = f"{fallback_depth:.3f}"
+                selected["ocr_snapped_depth_mm"] = f"{fallback_depth:.3f}"
+                selected["autonomous_valid"] = "1"
+                selected["autonomous_score"] = "0.58000"
+                selected["folder_strategy"] = "direct_label_unit_stable"
+                selected["autonomous_reason"] = (
+                    str(selected.get("autonomous_reason") or "")
+                    + "; review direct: la cartella usa D/P/R/Depth + unita', marker non letto in questo frame"
+                )
+            else:
+                continue
+        selected["folder_strategy"] = "direct_label_unit_stable"
+        selected["autonomous_valid"] = "1"
+        if _row_has_direct_unit_evidence(selected):
+            selected["autonomous_score"] = f"{max(_f(selected.get('autonomous_score')), 0.92):.5f}"
+        selected["autonomous_reason"] = str(selected.get("autonomous_reason") or "") + f"; {strategy_reason}"
+        for row in image_rows:
+            if row is selected:
+                continue
+            if row.get("autonomous_mode") in {"scale", "numeric_accessory", "direct_label"}:
+                row["autonomous_score"] = f"{min(_f(row.get('autonomous_score')), 0.22):.5f}"
+                row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + "; subordinato a direct D/P/R/Depth + unita' della cartella"
 
 
 def _apply_folder_strategy_rules(rows: List[Dict[str, object]]) -> None:
@@ -2460,6 +2611,7 @@ def _score_rows(rows: List[Dict[str, object]], profile: DepthProfile, ranker_mod
     _apply_folder_consistency_rules(rows)
     _apply_folder_strategy_rules(rows)
     _apply_folder_scale_unit_strategy(rows)
+    _apply_folder_direct_unit_strategy(rows)
     for row in rows:
         score = _f(row.get("autonomous_score"))
         if _f(row.get("autonomous_valid")) <= 0 or score < 0.35:

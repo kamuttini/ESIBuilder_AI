@@ -125,6 +125,25 @@ def _embedded_value_windows(token: Optional[DepthToken]) -> List[Tuple[str, Box]
     out: List[Tuple[str, Box]] = []
     n = max(1, len(text))
     target = float(token.numeric_value)
+    # A wide OCR word can contain neighbouring UI text, while the useful
+    # direct expression is compact (D/P/R/Depth + value + mm/cm).  Add an
+    # exact crop spanning that expression so the final RECT_DEPTH box begins
+    # at the marker and finishes after the unit instead of retaining noise.
+    for direct in re.finditer(
+        r"(?i)(depth|dep|deph|dept|dpth|[dpr])\s*[:=./-]?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![a-z])",
+        text,
+    ):
+        try:
+            value = float(direct.group(2).replace(",", "."))
+        except Exception:
+            continue
+        if abs(value - target) > max(0.015, 0.01 * max(1.0, abs(target))):
+            continue
+        x0 = token.word.left + token.word.width * direct.start(1) / n
+        x1 = token.word.left + token.word.width * direct.end(3) / n
+        y0 = token.word.top - max(5.0, 0.30 * token.word.height)
+        y1 = token.word.bottom + max(6.0, 0.40 * token.word.height)
+        out.append(("direct_label_unit_window", (x0 - 4.0, y0, x1 + 4.0, y1)))
     for match in matches:
         try:
             value = float(match.group(0).replace(",", "."))

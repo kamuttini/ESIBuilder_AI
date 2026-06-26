@@ -153,6 +153,12 @@ Modulo production-facing dopo le review manuali:
   candidati con marker non-depth;
 - preferisce valori informativi diretti: `Depth`, `D`, `P`, `R` prima del numero;
 - accetta solo suffissi `cm`, `mm` o nessun suffisso;
+- se una coppia diretta con unità esplicita ricorre nella maggior parte della
+  cartella e i valori variano, quella diventa la strategia di cartella: i
+  candidati scala/accessori vengono subordinati. Un frame con marker non letto
+  ma valore+unità leggibili resta `review` direct, non ricade sulla scala;
+- `Print`, `Hz`, `MHz` e `dB` sono marker non-depth: i loro valori non entrano
+  neppure nel pool di candidati numerici;
 - se non c'e' valore diretto affidabile, usa la scala come fallback e sceglie il
   valore massimo coerente;
 - la scala va cercata prioritariamente a destra del rettangolo ecografico; la
@@ -249,6 +255,9 @@ Regole operative implementate:
   del numero; `Depth` puo' stare a sinistra o sopra. Dopo il numero sono ammessi
   solo `cm`, `mm` o nessuna lettera. Il crop deve quindi contenere una sola
   espressione depth pulita, senza testo UI estraneo;
+- quando l'OCR concatena la riga direct con testo vicino, viene estratto solo il
+  frammento `D/P/R/Depth + valore + cm/mm`; il bounding box preferito parte dal
+  marker e termina subito dopo l'unità, non sull'intera riga OCR;
 - se in una cartella molti candidati scala affidabili sono accompagnati da `cm`
   o `mm`, la cartella passa in strategia unita' obbligatoria. Un numero nella
   stessa corsia/tacca con unita' OCR assente puo' comunque vincere soltanto se

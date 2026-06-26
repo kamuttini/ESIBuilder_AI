@@ -1075,6 +1075,15 @@ def _looks_like_fps_ips(text: str) -> bool:
     return t in {"fps", "ips", "fp", "ip"} or "fps" in t or "ips" in t
 
 
+def _has_non_depth_numeric_marker(text: str) -> bool:
+    """Reject UI numbers that are explicitly unrelated to a depth."""
+    low = str(text or "").lower()
+    return bool(
+        re.search(r"\bprint\b", low)
+        or re.search(r"\b(?:m\s*hz|hz|d\s*b)\b", low)
+    )
+
+
 def _near_same_label_line(a: OCRWord, b: OCRWord, max_dx: float = 150.0) -> bool:
     if abs(a.y_center - b.y_center) > max(24.0, 1.6 * max(a.height, b.height)):
         return False
@@ -1235,6 +1244,8 @@ def collect_depth_tokens(
 
     tokens: List[DepthToken] = []
     for word in all_words:
+        if _has_non_depth_numeric_marker(word.text):
+            continue
         strong_embedded = _has_strong_embedded_depth_pattern(word.text)
         values = _numeric_values(word.text)
         # The tiny white labels printed on a scale often sit over horizontal
@@ -1259,9 +1270,12 @@ def collect_depth_tokens(
         image_height = max((other.bottom for other in local_words), default=1.0)
         column_cm_hint = False
         column_mm_hint = False
+        non_depth_suffix_hint = False
         for other in local_words:
             if other is word:
                 continue
+            if _has_non_depth_numeric_marker(other.text) and _near_same_label_line(other, word, max_dx=150.0):
+                non_depth_suffix_hint = True
             if _looks_like_mm(other.text) and _near_same_label_line(other, word, max_dx=130.0):
                 mm_hint = True
             if _looks_like_cm(other.text) and _near_same_label_line(other, word, max_dx=130.0):
@@ -1308,6 +1322,8 @@ def collect_depth_tokens(
                 mm_hint = False
         elif column_mm_hint:
             mm_hint = True
+        if non_depth_suffix_hint:
+            continue
         if fps_ips_hint and not (cm_hint or mm_hint or depth_hint or d_hint or p_hint or r_hint or scale_hint):
             continue
         for value in values:
