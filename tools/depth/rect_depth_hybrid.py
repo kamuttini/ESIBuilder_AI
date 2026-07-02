@@ -984,7 +984,7 @@ def _has_strong_embedded_depth_pattern(text: str) -> bool:
         return False
     if re.search(r"(depth|dep|dept|dpth)", low):
         return True
-    if re.search(r"[dpr]\s*[:./-]?\s*\d", low):
+    if _has_strict_dpr_value_hint(low):
         return True
     if re.search(r"\d+(?:\.\d+)?\s*(cm|mm)\b", low):
         return True
@@ -1045,22 +1045,32 @@ def _looks_like_depth_hint(text: str) -> bool:
     return "depth" in t or t in {"dep", "deph", "dept", "dpth"}
 
 
+def _strict_dpr_value_hint(text: str, letter: str) -> bool:
+    low = str(text or "").lower().replace(" ", "")
+    target = re.escape(letter.lower())
+    return bool(re.search(rf"(?<![a-z0-9]){target}(?![a-z])\s*[:./-]?\s*\d", low))
+
+
+def _has_strict_dpr_value_hint(text: str) -> bool:
+    return any(_strict_dpr_value_hint(text, letter) for letter in ("d", "p", "r"))
+
+
 def _looks_like_d_hint(text: str) -> bool:
     low = text.lower().replace(" ", "")
     t = re.sub(r"[^a-z]", "", low)
-    return (t == "d" and not re.search(r"\d", low)) or bool(re.search(r"d\s*[:./-]?\s*\d", low))
+    return (t == "d" and not re.search(r"\d", low)) or _strict_dpr_value_hint(low, "d")
 
 
 def _looks_like_p_hint(text: str) -> bool:
     low = text.lower().replace(" ", "")
     t = re.sub(r"[^a-z]", "", low)
-    return (t == "p" and not re.search(r"\d", low)) or bool(re.search(r"p\s*[:./-]?\s*\d", low))
+    return (t == "p" and not re.search(r"\d", low)) or _strict_dpr_value_hint(low, "p")
 
 
 def _looks_like_r_hint(text: str) -> bool:
     low = text.lower().replace(" ", "")
     t = re.sub(r"[^a-z]", "", low)
-    return (t == "r" and not re.search(r"\d", low)) or bool(re.search(r"r\s*[:./-]?\s*\d", low))
+    return (t == "r" and not re.search(r"\d", low)) or _strict_dpr_value_hint(low, "r")
 
 
 def _looks_like_scale_hint(text: str) -> bool:
@@ -1082,6 +1092,8 @@ def _has_non_depth_numeric_marker(text: str) -> bool:
         re.search(r"\bprint\b", low)
         or re.search(r"\b(?:m\s*hz|hz|d\s*b)\b", low)
         or re.search(r"\bfr\s*\d", low)
+        or re.search(r"(?<![a-z0-9])x\s*\d", low)
+        or re.search(r"\d+\s*x\s*\d", low)
         # The depth marker must precede the number. A trailing D is an image
         # mode (for example `2D`), never a depth label.
         or re.search(r"\b\d+(?:\.\d+)?\s*d\b", low)

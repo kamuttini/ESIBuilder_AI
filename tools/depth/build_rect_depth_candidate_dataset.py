@@ -130,7 +130,7 @@ def _embedded_value_windows(token: Optional[DepthToken]) -> List[Tuple[str, Box]
     # exact crop spanning that expression so the final RECT_DEPTH box begins
     # at the marker and finishes after the unit instead of retaining noise.
     for direct in re.finditer(
-        r"(?i)(depth|dep|deph|dept|dpth|[dpr])\s*[:=./-]?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![a-z])",
+        r"(?i)(depth|dep|deph|dept|dpth|(?<![a-z0-9])[dpr](?![a-z]))\s*[:=./-]?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![a-z])",
         text,
     ):
         try:
@@ -257,21 +257,30 @@ def _has_time_like_text(text: str) -> bool:
     return bool(re.search(r"(?<![a-z0-9])(?:[01]?\d|2[0-3])\s*:\s*[0-5]\d(?:\s*:\s*[0-5]\d)?(?![a-z0-9])", low))
 
 
+def _normalize_unit_ocr_confusions(text: str) -> str:
+    clean = re.sub(r"\s+", " ", str(text or "").replace(",", ".").strip())
+    clean = re.sub(r"(?<=\d)[il|](?=\s*(?:cm|c|em|tm)(?![a-z]))", "1", clean, flags=re.I)
+    clean = re.sub(r"(?<=\d)(?:em|tm)(?![a-z])", "cm", clean, flags=re.I)
+    return clean
+
+
 def _bad_suffix_after_number(text: str) -> bool:
-    low = str(text or "").lower().replace(",", ".")
+    low = _normalize_unit_ocr_confusions(text).lower()
     for match in re.finditer(r"\d+(?:\.\d+)?\s*([a-z%]+)", low):
         suffix = match.group(1)
         if suffix.startswith(("cm", "mm")):
+            continue
+        if suffix == "c" and re.fullmatch(r"\s*\d+(?:\.\d+)?\s*c[^a-z0-9]*", low):
             continue
         return True
     return False
 
 
 def _ocr_has_letter_hint(text: str) -> bool:
-    low = str(text or "").lower()
+    low = _normalize_unit_ocr_confusions(text).lower()
     return bool(
         re.search(r"\bdepth\b", low)
-        or re.search(r"(^|[^a-z0-9])[dpr]\s*[:./-]?\s*\d", low)
+        or re.search(r"(?<![a-z0-9])[dpr](?![a-z])\s*[:./-]?\s*\d", low.replace(" ", ""))
         or re.search(r"\d\s*(cm|mm)\b", low)
     )
 
@@ -279,13 +288,16 @@ def _ocr_has_letter_hint(text: str) -> bool:
 def _ocr_text_has_hint_letter(text: str, letter: str) -> bool:
     low = str(text or "").lower().replace(" ", "")
     target = re.escape(letter.lower())
-    return bool(re.search(rf"{target}\s*[:./-]?\s*\d", low) or re.search(rf"\d\s*{target}($|[^a-z0-9])", low))
+    return bool(
+        re.search(rf"(?<![a-z0-9]){target}(?![a-z])\s*[:./-]?\s*\d", low)
+        or re.search(rf"\d\s*{target}($|[^a-z0-9])", low)
+    )
 
 
 def _hint_left_of_number(text: str, letter: str) -> bool:
     low = str(text or "").lower().replace(" ", "")
     target = re.escape(letter.lower())
-    return bool(re.search(rf"{target}\s*[:./-]?\s*\d", low))
+    return bool(re.search(rf"(?<![a-z0-9]){target}(?![a-z])\s*[:./-]?\s*\d", low))
 
 
 def _hint_right_of_number(text: str, letter: str) -> bool:

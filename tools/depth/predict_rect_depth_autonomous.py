@@ -45,6 +45,7 @@ from rect_depth_hybrid import (
     iter_images,
     parse_rect_depth_checks,
     parse_rect_echo,
+    run_tesseract_tsv_region,
 )
 from build_rect_depth_candidate_dataset import (
     Box,
@@ -313,6 +314,14 @@ def _clean_ocr_text(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").replace(",", ".").strip())
 
 
+def _normalize_unit_ocr_confusions(text: str) -> str:
+    """Normalize tiny OCR unit mistakes without changing unrelated UI text."""
+    clean = _clean_ocr_text(text)
+    clean = re.sub(r"(?<=\d)[il|](?=\s*(?:cm|c|em|tm)(?![a-z]))", "1", clean, flags=re.I)
+    clean = re.sub(r"(?<=\d)(?:em|tm)(?![a-z])", "cm", clean, flags=re.I)
+    return clean
+
+
 def _clean_numeric_expression(text: str, *, require_unit: bool = False) -> bool:
     """True only for one number with an optional allowed depth unit.
 
@@ -321,7 +330,12 @@ def _clean_numeric_expression(text: str, *, require_unit: bool = False) -> bool:
     check that the selected box does not contain unrelated OCR text.
     """
     unit = r"(?:\s*(?:cm|mm))" if require_unit else r"(?:\s*(?:cm|mm))?"
-    return bool(re.fullmatch(rf"\d+(?:\.\d+)?{unit}\s*", _clean_ocr_text(text), flags=re.I))
+    return bool(re.fullmatch(rf"\d+(?:\.\d+)?{unit}\s*", _normalize_unit_ocr_confusions(text), flags=re.I))
+
+
+def _strict_dpr_left_regex(letter: str) -> str:
+    target = re.escape(letter.lower())
+    return rf"(?<![a-z0-9]){target}(?![a-z])\s*[:=./-]?\s*\d"
 
 
 def _direct_label_value_matches(text: str) -> List[Tuple[int, float]]:
@@ -332,10 +346,10 @@ def _direct_label_value_matches(text: str) -> List[Tuple[int, float]]:
     ``cm``/``mm`` unit.  This makes a local label a strong signal without
     turning incidental letters or wide OCR crops into a direct depth.
     """
-    raw = _clean_ocr_text(text)
+    raw = _normalize_unit_ocr_confusions(text)
     patterns = (
         r"(?i)(depth|dep|deph|dept|dpth)\s*[:=./-]?\s*(\d+(?:\.\d+)?)(?:\s*(?:cm|mm))?\s*",
-        r"(?i)([dpr])\s*[:=./-]?\s*(\d+(?:\.\d+)?)(?:\s*(?:cm|mm))?\s*",
+        r"(?i)(?<![a-z0-9])([dpr])(?![a-z])\s*[:=./-]?\s*(\d+(?:\.\d+)?)(?:\s*(?:cm|mm))?\s*",
     )
     for pattern in patterns:
         match = re.fullmatch(pattern, raw)
@@ -362,9 +376,9 @@ def _embedded_direct_unit_expression(text: str) -> Optional[Tuple[str, float]]:
     The direct expression itself is still unambiguous, because it starts with
     D/P/R/Depth and ends immediately after the only allowed suffix, mm or cm.
     """
-    raw = _clean_ocr_text(text)
+    raw = _normalize_unit_ocr_confusions(text)
     match = re.search(
-        r"(?i)(depth|dep|deph|dept|dpth|[dpr])\s*[:=./-]?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![a-z])",
+        r"(?i)(depth|dep|deph|dept|dpth|(?<![a-z0-9])[dpr](?![a-z]))\s*[:=./-]?\s*(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![a-z])",
         raw,
     )
     if not match:
@@ -380,6 +394,128 @@ def _embedded_direct_unit_expression(text: str) -> Optional[Tuple[str, float]]:
     unit = match.group(3).lower()
     depth_mm = value if unit == "mm" else value * 10.0
     return f"{normalized_label}{match.group(2).replace(',', '.')} {unit}", depth_mm
+
+
+def _embedded_unit_expression(text: str) -> Optional[Tuple[str, float]]:
+    """Extract a value followed by cm/mm even when OCR joined left UI text.
+
+    This is intentionally weaker than a D/P/R/Depth direct label: the marker is
+    not trusted when it touches other letters.  The unit itself is still useful
+    for the folder-level stable-interface rule, which can promote it to direct
+    only when the same UI position recurs across the folder.
+    """
+    raw = _normalize_unit_ocr_confusions(text)
+    best: Optional[Tuple[str, float]] = None
+    for match in re.finditer(r"(?i)(\d+(?:[.,]\d+)?)\s*(mm|cm)(?![a-z])", raw):
+        try:
+            value = float(match.group(1).replace(",", "."))
+        except Exception:
+            continue
+        if not math.isfinite(value) or value <= 0:
+            continue
+        unit = match.group(2).lower()
+        depth_mm = value if unit == "mm" else value * 10.0
+        if depth_mm <= 0 or depth_mm > 350.0:
+            continue
+        normalized = f"{match.group(1).replace(',', '.')} {unit}"
+        # In a noisy UI string, prefer the largest plausible explicit unit
+        # value; smaller values are often M2/2-style mode fragments.
+        if best is None or depth_mm > best[1]:
+            best = (normalized, depth_mm)
+    return best
+
+
+def _embedded_direct_value_expression(text: str) -> Optional[Tuple[str, float]]:
+    raw = _clean_ocr_text(text)
+    match = re.search(
+        r"(?i)(depth|dep|deph|dept|dpth|(?<![a-z0-9])[dpr](?![a-z]))\s*[:=./-]?\s*(\d+(?:[.,:]\d+)?)",
+        raw,
+    )
+    if not match:
+        return None
+    try:
+        number_text = match.group(2).replace(",", ".").replace(":", ".")
+        value = float(number_text)
+    except Exception:
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    label = match.group(1)
+    normalized_label = "Depth" if label.lower().startswith("d") and len(label) > 1 else label.upper()
+    if "." in number_text and value <= 16.0:
+        depth_mm = value * 10.0
+    elif value <= 16.0:
+        depth_mm = value * 10.0
+    else:
+        depth_mm = value
+    if depth_mm <= 0 or depth_mm > 350.0:
+        return None
+    return f"{normalized_label} {number_text}", depth_mm
+
+
+def _implicit_direct_depth_mm(number_text: str) -> float:
+    try:
+        clean = str(number_text).replace(",", ".").replace(":", ".")
+        value = float(clean)
+    except Exception:
+        return 0.0
+    if not math.isfinite(value) or value <= 0:
+        return 0.0
+    if "." in clean and value <= 16.0:
+        return value * 10.0
+    if value <= 16.0:
+        return value * 10.0
+    return value if value <= 350.0 else 0.0
+
+
+def _hitachi_embedded_direct_value_with_span(text: str) -> Optional[Tuple[str, str, float, float, int, int]]:
+    """Extract Hitachi bottom-interface labels like ``FND-7.5SR:10.0BG``.
+
+    Hitachi often presents depth as a unitless ``R:3.50``/``R:10.0`` field in
+    the lower interface line, followed by unrelated settings such as ``BG`` and
+    ``BD``.  OCR frequently fuses the probe/mode text with the R label, so this
+    parser is intentionally used only by the Hitachi bottom-ROI strategy.
+    """
+    compact = re.sub(r"\s+", "", _clean_ocr_text(text))
+    if not compact:
+        return None
+    context_ok = bool(re.search(r"(?i)fnd|hdt|tat|probe|bg[:=]?|bd[:=]?", compact))
+    best: Optional[Tuple[str, str, float, float, int, int]] = None
+    for match in re.finditer(r"(?i)([dpr])\s*[:=./-]?\s*(\d+(?:[.,:]\d+)?)", compact):
+        label = match.group(1).upper()
+        number_text = match.group(2).replace(",", ".").replace(":", ".")
+        if "." not in number_text:
+            # Avoid promoting OCR strings such as R350 when the decimal point
+            # was lost; another OCR pass usually reads R:3.50 cleanly.
+            continue
+        start = match.start(1)
+        previous = compact[start - 1].lower() if start > 0 else ""
+        following = compact[match.end(2) : match.end(2) + 3].lower()
+        if previous.isalpha() and not (context_ok and label == "R" and previous in {"s", "r"}):
+            continue
+        if following and not (following.startswith(("bg", "bd")) or following[:1] in {"e", "b"}):
+            continue
+        depth = _implicit_direct_depth_mm(number_text)
+        if depth <= 0 or depth > 350.0:
+            continue
+        try:
+            raw_value = float(number_text)
+        except Exception:
+            raw_value = depth / 10.0 if depth <= 160.0 else depth
+        parsed = (label, number_text, depth, raw_value, match.start(1), match.end(2))
+        if label == "R":
+            return parsed
+        if best is None:
+            best = parsed
+    return best
+
+
+def _hitachi_embedded_direct_value(text: str) -> Optional[Tuple[str, str, float, float]]:
+    parsed = _hitachi_embedded_direct_value_with_span(text)
+    if not parsed:
+        return None
+    label, number_text, depth, raw_value, _start, _end = parsed
+    return label, number_text, depth, raw_value
 
 
 def _token_matches_direct_label_value(token: DepthToken) -> float:
@@ -399,7 +535,7 @@ def _token_matches_direct_label_value(token: DepthToken) -> float:
 
 
 def _bad_suffix_after_number_autonomous(text: str) -> bool:
-    low = str(text or "").lower().replace(",", ".")
+    low = _normalize_unit_ocr_confusions(text).lower()
     first_pair = _first_direct_label_value(low)
     first_pair_start = first_pair[0] if first_pair else None
     for match in re.finditer(r"\d+(?:\.\d+)?\s*([a-z%]+)", low):
@@ -444,7 +580,10 @@ def _has_non_depth_direct_marker(text: str) -> bool:
     """Reject UI modes that resemble a letter-plus-number depth label."""
     low = _clean_ocr_text(text).lower()
     return bool(
-        re.search(r"\bfr\s*\d", low)
+        re.search(r"\bprint\b", low)
+        or re.search(r"\bfr\s*\d", low)
+        or re.search(r"(?<![a-z0-9])x\s*\d", low)
+        or re.search(r"\d+\s*x\s*\d", low)
         or re.search(r"\b\d+(?:\.\d+)?\s*d\b", low)
     )
 
@@ -503,16 +642,401 @@ def _row_has_depth_above_number_context(row: Dict[str, object]) -> bool:
     return _clean_numeric_expression(str(row.get("ocr_text") or "")) and _f(row.get("depth_hint_ratio")) >= 0.35
 
 
+def _row_context_direct_hint_score(row: Dict[str, object]) -> float:
+    return max(
+        _f(row.get("depth_hint_ratio")),
+        _f(row.get("d_hint_ratio")),
+        _f(row.get("p_hint_ratio")),
+        _f(row.get("r_hint_ratio")),
+    )
+
+
+def _row_has_left_context_direct_hint(row: Dict[str, object]) -> bool:
+    """A clean numeric crop can still be a direct label if OCR saw D/P/R nearby.
+
+    GE often reads the value as an isolated number (`5.0`) while the left label
+    (`D`) is a separate OCR word.  Treat that as direct only when the value is a
+    compact numeric expression and the folder-level token cluster has strong
+    D/P/R/Depth support.  The raw numeric cap keeps non-depth UI rows such as
+    `DR 66` and `FR 27` out of this path.
+    """
+    if str(row.get("candidate_source") or "") != "token":
+        return False
+    text = str(row.get("ocr_text") or "")
+    if not _clean_numeric_expression(text):
+        return False
+    raw_value = _f(row.get("ocr_numeric_value"))
+    if raw_value <= 0 or raw_value > 16.0:
+        return False
+    if _row_context_direct_hint_score(row) < 0.35:
+        return False
+    if _flag(row, "ocr_has_forbidden_marker") or _flag(row, "ocr_has_db_suffix") or _flag(row, "ocr_has_time_like_text") or _flag(row, "ocr_has_probe_model"):
+        return False
+    return True
+
+
+def _left_context_candidate_depth_mm(row: Dict[str, object]) -> float:
+    if str(row.get("candidate_source") or "") != "token":
+        return 0.0
+    text = str(row.get("ocr_text") or "")
+    if not _clean_numeric_expression(text):
+        return 0.0
+    raw_value = _f(row.get("ocr_numeric_value"))
+    if raw_value <= 0 or raw_value > 160.0:
+        return 0.0
+    if _row_context_direct_hint_score(row) < 0.35:
+        return 0.0
+    if _flag(row, "ocr_has_forbidden_marker") or _flag(row, "ocr_has_db_suffix") or _flag(row, "ocr_has_time_like_text") or _flag(row, "ocr_has_probe_model"):
+        return 0.0
+    if "." in text or raw_value <= 16.0:
+        return raw_value * 10.0
+    return raw_value
+
+
+def _direct_label_word(text: str) -> bool:
+    letters = re.sub(r"[^a-z]", "", str(text or "").lower())
+    return letters in {"d", "p", "r", "depth", "dep", "deph", "dept", "dpth"}
+
+
+def _direct_numeric_word_depth(text: str) -> Tuple[float, str]:
+    raw = str(text or "").strip().replace(",", ".").replace(":", ".")
+    match = re.search(r"\d+(?:\.\d+)?", raw)
+    if not match:
+        return 0.0, ""
+    number_text = match.group(0)
+    try:
+        value = float(number_text)
+    except Exception:
+        return 0.0, ""
+    if not math.isfinite(value) or value <= 0:
+        return 0.0, ""
+    if "." in number_text and value <= 16.0:
+        depth = value * 10.0
+    elif value <= 16.0:
+        depth = value * 10.0
+    else:
+        depth = value
+    return (depth, number_text) if 0 < depth <= 350.0 else (0.0, "")
+
+
+def _direct_left_context_roi_match(image: str, stable_box: Box) -> Optional[Tuple[str, float, Box, str]]:
+    width, height = _image_size(image)
+    if width <= 1 or height <= 1:
+        return None
+    left, top, right, bottom = stable_box
+    crop = (
+        max(0.0, left - 70.0),
+        max(0.0, top - 24.0),
+        min(float(width), min(right + 16.0, left + 190.0)),
+        min(float(height), bottom + 26.0),
+    )
+    matches: List[Tuple[float, str, float, Box, str]] = []
+    for psm in ("6", "11"):
+        for preprocess in ("base", "scale_line_suppressed", "scale_clahe"):
+            words, _scale = run_tesseract_tsv_region(
+                Path(image),
+                timeout=2.5,
+                max_side=1800,
+                crop_box=crop,
+                psm=psm,
+                preprocess=preprocess,
+                char_whitelist="0123456789.,:/-%aAcCmMdDeEpPrRtThHfFiIsSzZlL",
+            )
+            if not words:
+                continue
+            for label in words:
+                if not _direct_label_word(label.text):
+                    continue
+                for value_word in words:
+                    if value_word is label:
+                        continue
+                    if value_word.x_center <= label.x_center:
+                        continue
+                    if value_word.x_center - label.x_center > 145.0:
+                        continue
+                    if abs(value_word.y_center - label.y_center) > max(18.0, 1.4 * max(value_word.height, label.height)):
+                        continue
+                    depth, number_text = _direct_numeric_word_depth(value_word.text)
+                    if depth <= 0:
+                        continue
+                    box = (
+                        max(0.0, min(label.left, value_word.left) - 4.0),
+                        max(0.0, min(label.top, value_word.top) - 5.0),
+                        min(float(width), max(label.right, value_word.right) + 5.0),
+                        min(float(height), max(label.bottom, value_word.bottom) + 6.0),
+                    )
+                    text = f"{re.sub(r'[^A-Za-z]', '', label.text).upper()} {number_text}"
+                    score = max(0.0, label.conf) + max(0.0, value_word.conf) + (12.0 if "." in number_text else 0.0)
+                    matches.append((score, text, depth, box, f"roi_direct_left_context:{psm}:{preprocess}"))
+            if not matches:
+                joined = " ".join(word.text for word in words)
+                embedded = _embedded_direct_value_expression(joined)
+                if embedded:
+                    text, depth = embedded
+                    matches.append((20.0, text, depth, crop, f"roi_direct_left_context_text:{psm}:{preprocess}"))
+    if not matches:
+        return None
+    _score, text, depth, box, reason = max(matches, key=lambda item: item[0])
+    return text, depth, box, reason
+
+
+def _hitachi_bottom_direct_roi_boxes(image: str) -> List[Box]:
+    width, height = _image_size(image)
+    if width <= 1 or height <= 1:
+        return []
+    w = float(width)
+    h = float(height)
+    candidates = [
+        (0.26 * w, 0.685 * h, 0.43 * w, 0.775 * h),
+        (0.23 * w, 0.675 * h, 0.50 * w, 0.790 * h),
+        (0.16 * w, 0.650 * h, 0.62 * w, 0.825 * h),
+        (0.22 * w, 0.710 * h, 0.54 * w, 0.805 * h),
+        (0.14 * w, 0.610 * h, 0.66 * w, 0.875 * h),
+    ]
+    boxes: List[Box] = []
+    seen: set[Tuple[int, int, int, int]] = set()
+    for left, top, right, bottom in candidates:
+        box = (
+            max(0.0, left),
+            max(0.0, top),
+            min(w, right),
+            min(h, bottom),
+        )
+        if box[2] - box[0] < 45.0 or box[3] - box[1] < 22.0:
+            continue
+        key = (round(box[0]), round(box[1]), round(box[2]), round(box[3]))
+        if key in seen:
+            continue
+        seen.add(key)
+        boxes.append(box)
+    return boxes
+
+
+def _hitachi_text_column_groups(image: str, box: Box) -> List[Tuple[float, float]]:
+    try:
+        left, top, right, bottom = box
+        with Image.open(image) as im:
+            gray = im.convert("L")
+            crop = gray.crop((int(max(0, math.floor(left))), int(max(0, math.floor(top))), int(math.ceil(right)), int(math.ceil(bottom))))
+            width, height = crop.size
+            if width <= 1 or height <= 1:
+                return []
+            pixels = crop.load()
+            max_px = max(pixels[x, y] for y in range(height) for x in range(width))
+            threshold = max(70, min(155, max_px - 35))
+            cols: List[int] = []
+            for x in range(width):
+                if any(pixels[x, y] >= threshold for y in range(height)):
+                    cols.append(x)
+    except Exception:
+        return []
+    if not cols:
+        return []
+    groups: List[Tuple[float, float]] = []
+    start_col = cols[0]
+    prev = cols[0]
+    for col in cols[1:]:
+        if col - prev > 1:
+            groups.append((float(start_col), float(prev)))
+            start_col = col
+        prev = col
+    groups.append((float(start_col), float(prev)))
+    return groups
+
+
+def _hitachi_visual_substring_box(image: str, text: str, box: Box, start: int, end: int) -> Optional[Box]:
+    compact = re.sub(r"\s+", "", _clean_ocr_text(text))
+    if not compact or end <= start:
+        return None
+    groups = _hitachi_text_column_groups(image, box)
+    target_chars = len(compact[start:end])
+    if not groups or target_chars <= 0 or len(groups) < max(2, target_chars - 1):
+        return None
+    left, top, right, bottom = box
+    width = max(1.0, right - left)
+    approx_left = width * max(0.0, min(1.0, float(start) / float(len(compact))))
+    approx_right = width * max(0.0, min(1.0, float(end) / float(len(compact))))
+
+    best: Optional[Tuple[float, float, float]] = None
+    for count in (target_chars, target_chars - 1):
+        if count <= 0 or count > len(groups):
+            continue
+        for idx in range(0, len(groups) - count + 1):
+            run = groups[idx : idx + count]
+            run_left = run[0][0]
+            run_right = run[-1][1]
+            # The start of the substring is the reliable anchor: it is the R/P/D
+            # label.  The proportional right edge is often too far right because
+            # OCR words such as R:10.0BG are not monospaced.
+            score = (
+                2.4 * abs(run_left - approx_left)
+                + 0.7 * abs(run_right - approx_right)
+                + 0.08 * abs((run_right - run_left) - (approx_right - approx_left))
+                + (0.0 if count == target_chars else 12.0)
+            )
+            if best is None or score < best[0]:
+                best = (score, run_left, run_right)
+        if best is not None:
+            break
+    if best is None:
+        return None
+    _score, run_left, run_right = best
+    pad_left = 2.0
+    pad_right = 1.2
+    pad_y = max(1.5, min(4.0, 0.18 * (bottom - top)))
+    return (
+        max(0.0, left + run_left - pad_left),
+        max(0.0, top - pad_y),
+        min(right, left + run_right + pad_right),
+        bottom + pad_y,
+    )
+
+
+def _hitachi_substring_box(image: str, text: str, box: Box, start: int, end: int) -> Box:
+    visual = _hitachi_visual_substring_box(image, text, box, start, end)
+    if visual is not None:
+        return visual
+    compact = re.sub(r"\s+", "", _clean_ocr_text(text))
+    if not compact or end <= start:
+        return box
+    left, top, right, bottom = box
+    if right <= left or bottom <= top:
+        return box
+    char_w = (right - left) / max(1.0, float(len(compact)))
+    pad_left = max(1.5, min(3.0, 0.20 * char_w))
+    pad_right = max(0.8, min(1.8, 0.12 * char_w))
+    pad_y = max(1.5, min(4.0, 0.18 * (bottom - top)))
+    sub_left = left + char_w * max(0.0, float(start) - 0.05) - pad_left
+    sub_right = left + char_w * min(float(len(compact)), float(end)) + pad_right
+    return (
+        max(0.0, sub_left),
+        max(0.0, top - pad_y),
+        min(right, sub_right),
+        bottom + pad_y,
+    )
+
+
+def _hitachi_word_box(word: object) -> Box:
+    return (float(word.left), float(word.top), float(word.right), float(word.bottom))
+
+
+def _hitachi_direct_match_box_from_group(image: str, raw_text: str, group: Sequence[object], fallback_box: Box) -> Box:
+    if not group:
+        return fallback_box
+    for word in group:
+        parsed = _hitachi_embedded_direct_value_with_span(str(getattr(word, "text", "")))
+        if not parsed:
+            continue
+        _label, _number_text, _depth, _raw_value, start, end = parsed
+        return _hitachi_substring_box(image, str(getattr(word, "text", "")), _hitachi_word_box(word), start, end)
+    if len(group) == 1:
+        parsed = _hitachi_embedded_direct_value_with_span(raw_text)
+        if parsed:
+            _label, _number_text, _depth, _raw_value, start, end = parsed
+            return _hitachi_substring_box(image, raw_text, _hitachi_word_box(group[0]), start, end)
+    box = _union_word_box(group)
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return fallback_box
+    return box
+
+
+def _hitachi_direct_match_conf(group: Sequence[object], label: str, number_text: str) -> float:
+    best = -1.0
+    for word in group:
+        parsed = _hitachi_embedded_direct_value_with_span(str(getattr(word, "text", "")))
+        if not parsed:
+            continue
+        parsed_label, parsed_number, _depth, _raw_value, _start, _end = parsed
+        if parsed_label == label and parsed_number == number_text:
+            best = max(best, float(getattr(word, "conf", 0.0)))
+    if best >= 0.0:
+        return best
+    # Joined OCR groups can contain the right text plus unrelated high-conf
+    # words.  Penalize those so a noisy joined line cannot beat repeated exact
+    # reads of the R:value word itself.
+    return max((float(getattr(word, "conf", 0.0)) for word in group), default=0.0) - 55.0
+
+
+def _hitachi_bottom_direct_roi_match(image: str) -> Optional[Tuple[str, float, float, Box, str]]:
+    """OCR the lower Hitachi interface line and extract R/P/D direct depth."""
+    width, height = _image_size(image)
+    if width <= 1 or height <= 1:
+        return None
+    matches: List[Tuple[int, int, float, float, str, float, float, Box, str]] = []
+    depth_votes: Dict[float, set[Tuple[int, str, str]]] = defaultdict(set)
+
+    def best_for_depth(depth_key: float) -> Tuple[str, float, float, Box, str]:
+        _label_bonus, _context, _tight, _conf, text, depth, raw_value, box, reason = max(
+            [item for item in matches if round(item[5], 1) == depth_key],
+            key=lambda item: (item[0], item[1], item[2], item[3], -max(1.0, item[7][2] - item[7][0])),
+        )
+        return text, depth, raw_value, box, reason
+
+    for crop_index, crop in enumerate(_hitachi_bottom_direct_roi_boxes(image)):
+        crop_width = crop[2] - crop[0]
+        for psm in ("7", "11", "6"):
+            for preprocess in ("base", "scale_line_suppressed", "scale_clahe"):
+                words, _scale = run_tesseract_tsv_region(
+                    Path(image),
+                    timeout=2.3,
+                    max_side=2200,
+                    crop_box=crop,
+                    psm=psm,
+                    preprocess=preprocess,
+                    char_whitelist="0123456789.,:=/-DdPpRrFfNnHhTtAaSsBbGgEe",
+                )
+                if not words:
+                    continue
+                ordered = sorted(words, key=lambda word: (word.top, word.left))
+                text_groups: List[Tuple[str, Sequence[object]]] = []
+                for word in ordered:
+                    text_groups.append((word.text, [word]))
+                for start in range(len(ordered)):
+                    for end in range(start + 2, min(len(ordered), start + 5) + 1):
+                        group = ordered[start:end]
+                        text_groups.append((" ".join(word.text for word in group), group))
+                text_groups.append((" ".join(word.text for word in ordered), ordered))
+                for raw_text, group in text_groups:
+                    parsed = _hitachi_embedded_direct_value(raw_text)
+                    if not parsed:
+                        continue
+                    label, number_text, depth, raw_value = parsed
+                    box = _hitachi_direct_match_box_from_group(image, raw_text, group, crop)
+                    if box[2] - box[0] > max(220.0, 0.70 * crop_width):
+                        # A whole-line OCR word is useful as text evidence, but
+                        # too wide for the final overlay. Keep it as a fallback.
+                        box = crop
+                    box_width = max(1.0, box[2] - box[0])
+                    conf = _hitachi_direct_match_conf(group, label, number_text)
+                    context = 1 if re.search(r"(?i)fnd|hdt|tat|bg|bd", raw_text) else 0
+                    label_bonus = 2 if label == "R" else 1
+                    tight = 1 if box_width <= 180.0 else 0
+                    text = f"{label}:{number_text}"
+                    reason = f"hitachi_bottom_direct_roi:{psm}:{preprocess}"
+                    matches.append((label_bonus, context, tight, conf, text, depth, raw_value, box, reason))
+                    depth_key = round(depth, 1)
+                    depth_votes[depth_key].add((crop_index, psm, preprocess))
+                    if label == "R" and tight and len(depth_votes[depth_key]) >= 2:
+                        return best_for_depth(depth_key)
+    if not matches:
+        return None
+    votes = {key: len(value) for key, value in depth_votes.items()}
+    _label_bonus, _context, _tight, _conf, text, depth, raw_value, box, reason = max(
+        matches,
+        key=lambda item: (votes.get(round(item[5], 1), 0), item[0], item[1], item[2], item[3], -max(1.0, item[7][2] - item[7][0])),
+    )
+    return text, depth, raw_value, box, reason
+
+
 def _row_has_direct_evidence(row: Dict[str, object]) -> bool:
-    return _row_has_strict_direct_text(row) or _row_has_depth_above_number_context(row)
+    return _row_has_strict_direct_text(row) or _row_has_depth_above_number_context(row) or _row_has_left_context_direct_hint(row)
 
 
 def _unit_value_match(text: str) -> Optional[Tuple[float, str]]:
-    low = str(text or "").lower().replace(",", ".")
+    low = _normalize_unit_ocr_confusions(text).lower()
     if re.search(r"(?<![a-z0-9])s\.\d+\s*(?:cm|c)(?![a-z])", low):
         low = re.sub(r"(?<![a-z0-9])s(?=\.\d+\s*(?:cm|c)(?![a-z]))", "3", low)
     low = re.sub(r"(?<![a-z0-9])s0(?=\s*(?:cm|c|em|tm)(?![a-z]))", "3.0", low)
-    low = re.sub(r"(?<=\d)(?:em|tm)(?![a-z])", "cm", low)
     for pattern, unit in (
         (r"(?<![a-z0-9])(\d+(?:\.\d+)?)\s*cm\b", "cm"),
         (r"(?<![a-z0-9])(\d+(?:\.\d+)?)\s*mm\b", "mm"),
@@ -557,13 +1081,34 @@ def _unit_value_depth_mm(text: str) -> float:
     return 0.0
 
 
+def _row_has_ambiguous_compact_cm_value(row: Dict[str, object]) -> bool:
+    text = _normalize_unit_ocr_confusions(str(row.get("ocr_text") or "")).lower()
+    match = re.fullmatch(r"\s*(\d{2,3})\s*cm[^a-z0-9]*", text)
+    if not match:
+        return False
+    try:
+        value = float(match.group(1))
+    except Exception:
+        return False
+    # OCR often turns 12cm into 42cm on Philips right-scale labels. Values in
+    # this band (and larger compact cm integers such as 142cm) are not plausible
+    # ultrasound depths in centimeters, so keep them for review instead of
+    # accepting them as confident readings.
+    return value >= 36.0
+
+
+def _row_has_low_confidence_scale_unit_value(row: Dict[str, object]) -> bool:
+    depth = _unit_value_depth_mm(str(row.get("ocr_text") or ""))
+    return 0.0 < depth < 45.0
+
+
 def _row_has_zero_depth_value_text(row: Dict[str, object]) -> bool:
     text = str(row.get("ocr_text") or "").lower().replace(",", ".")
     return bool(re.search(r"(?<![\d.])0(?:\.0+)?\s*(?:cm|mm|c|m)?(?![\d.])", text))
 
 
 def _row_has_decimal_unit_value(row: Dict[str, object]) -> bool:
-    text = str(row.get("ocr_text") or "").lower().replace(",", ".")
+    text = _normalize_unit_ocr_confusions(str(row.get("ocr_text") or "")).lower()
     return bool(
         re.search(r"(?<![a-z0-9])\d+\.\d+\s*(?:cm|mm|c)(?![a-z])", text)
         or re.search(r"(?<![a-z0-9])s\.\d+\s*(?:cm|c)(?![a-z])", text)
@@ -572,7 +1117,7 @@ def _row_has_decimal_unit_value(row: Dict[str, object]) -> bool:
 
 
 def _row_has_dirty_scale_cm_text(row: Dict[str, object]) -> bool:
-    text = str(row.get("ocr_text") or "").lower().replace(",", ".")
+    text = _normalize_unit_ocr_confusions(str(row.get("ocr_text") or "")).lower()
     return bool(
         re.search(r"(?<![a-z0-9])\d+\.\d+\s*(?:m|cem)(?![a-z])", text)
         or re.search(r"(?<![a-z0-9])\d{2,3}\s*(?:m|cem)(?![a-z])", text)
@@ -580,7 +1125,7 @@ def _row_has_dirty_scale_cm_text(row: Dict[str, object]) -> bool:
 
 
 def _scale_endpoint_corrected_depth_mm(row: Dict[str, object]) -> float:
-    text = str(row.get("ocr_text") or "").lower().replace(",", ".").strip()
+    text = _normalize_unit_ocr_confusions(str(row.get("ocr_text") or "")).lower().strip()
     current = _f(row.get("depth_mm"))
     match = re.fullmatch(r"(\d+\.\d+)\s*(?:m|cem)[^a-z0-9]*", text)
     if match:
@@ -605,6 +1150,8 @@ def _row_has_scale_endpoint_number_text(row: Dict[str, object]) -> bool:
     text = str(row.get("ocr_text") or "").lower().replace(",", ".")
     if _flag(row, "ocr_multi_number"):
         return False
+    if _scale_text_has_disallowed_letters(text):
+        return False
     if _has_fps_ips(text) or _has_forbidden_marker_autonomous(text) or _has_probe_model_marker(text) or _has_time_like_text(text):
         return False
     return bool(
@@ -615,6 +1162,8 @@ def _row_has_scale_endpoint_number_text(row: Dict[str, object]) -> bool:
 
 
 def _looks_like_scale_edge_value(row: Dict[str, object]) -> bool:
+    if _scale_text_has_disallowed_letters(str(row.get("ocr_text") or "")):
+        return False
     if str(row.get("candidate_source") or "").startswith("scale_") and str(row.get("candidate_source") or "").endswith("_column"):
         return True
     if _row_has_strict_direct_text(row):
@@ -679,10 +1228,10 @@ def _row_direct_hint_ratio(row: Dict[str, object]) -> float:
 
 def _candidate_mode(row: Dict[str, object]) -> str:
     text = str(row.get("ocr_text") or "")
+    if _row_has_strict_direct_text(row) or _row_has_depth_above_number_context(row) or _row_has_left_context_direct_hint(row):
+        return "direct_label"
     if _looks_like_scale_edge_value(row):
         return "scale"
-    if _row_has_strict_direct_text(row) or _row_has_depth_above_number_context(row):
-        return "direct_label"
     unit_or_scale = (
         _f(row.get("scale_hint_ratio")) > 0
         or _f(row.get("cm_ratio")) > 0
@@ -690,20 +1239,39 @@ def _candidate_mode(row: Dict[str, object]) -> str:
         or _f(row.get("ocr_has_cm_text")) > 0
         or _f(row.get("ocr_has_mm_text")) > 0
     )
-    if unit_or_scale:
+    if unit_or_scale and not _scale_text_has_disallowed_letters(text):
         return "scale"
     return "numeric_accessory"
 
 
 def _strict_hint_left_of_number(text: str, letter: str) -> bool:
     low = str(text or "").lower().replace(" ", "")
-    target = re.escape(letter.lower())
-    return bool(re.search(rf"(?<![a-z0-9]){target}\s*[:./-]?\s*\d", low))
+    return bool(re.search(_strict_dpr_left_regex(letter), low))
 
 
 def _has_depth_hint_text(text: str) -> bool:
     compact = re.sub(r"[^a-z]", "", str(text or "").lower())
     return "depth" in compact or compact in {"dep", "deph", "dept", "dpth"}
+
+
+def _scale_text_has_disallowed_letters(text: str) -> bool:
+    """Scale labels are numeric ticks, optionally followed only by a unit.
+
+    If an OCR value is accompanied by D/P/R/Depth or by any other UI letter, it
+    belongs to the interface text layer and must not be promoted as a scale
+    value.  The few allowed letters below are unit suffixes or known OCR
+    variants of ``cm`` used by the scale recovery passes.
+    """
+    raw = _normalize_unit_ocr_confusions(text).lower()
+    if not re.search(r"\d", raw) or not re.search(r"[a-z]", raw):
+        return False
+    compact = re.sub(r"\s+", "", raw)
+    return not bool(
+        re.fullmatch(
+            r"(?:\d+(?:\.\d*)?|s0|s\.\d+)(?:cm|mm|c|em|tm|m|cem)?[-–.,*]*",
+            compact,
+        )
+    )
 
 
 def _candidate_row(
@@ -720,12 +1288,13 @@ def _candidate_row(
 ) -> Dict[str, object]:
     raw_ocr_text = _candidate_ocr_text(cluster, image_path, token)
     embedded_direct = _embedded_direct_unit_expression(raw_ocr_text) if token is not None else None
-    ocr_text = embedded_direct[0] if embedded_direct else raw_ocr_text
+    embedded_unit = _embedded_unit_expression(raw_ocr_text) if token is not None and embedded_direct is None else None
+    ocr_text = embedded_direct[0] if embedded_direct else embedded_unit[0] if embedded_unit else raw_ocr_text
     digit_groups = _digit_group_count(ocr_text)
     pred_width = pred_box[2] - pred_box[0]
     pred_height = pred_box[3] - pred_box[1]
     aspect = pred_width / max(1.0, pred_height)
-    depth_mm = embedded_direct[1] if embedded_direct else _candidate_depth_mm(token)
+    depth_mm = embedded_direct[1] if embedded_direct else embedded_unit[1] if embedded_unit else _candidate_depth_mm(token)
     source = "token" if token else "cluster"
     row: Dict[str, object] = {
         "sample_key": Path(image_path).name,
@@ -763,6 +1332,8 @@ def _candidate_row(
         "plausible_ratio": f"{cluster.plausible_ratio:.5f}",
         "ocr_conf": f"{token.word.conf:.3f}" if token else "",
         "ocr_text": ocr_text,
+        "ocr_raw_text": raw_ocr_text,
+        "ocr_embedded_unit_only": int(embedded_unit is not None and embedded_direct is None),
         "ocr_text_len": len(ocr_text),
         "ocr_digit_group_count": digit_groups,
         "ocr_has_fps_ips": int(_has_fps_ips(ocr_text) or (token.has_fps_ips_hint if token else cluster.fps_ips_ratio > 0.0)),
@@ -906,6 +1477,8 @@ def _scale_side_bands(rect_echo: Optional[Box], image_size: Tuple[int, int], pre
 
 def _is_scale_token_candidate(token: DepthToken, band: Box) -> bool:
     text = token.word.text or ""
+    if _scale_text_has_disallowed_letters(text):
+        return False
     if _has_fps_ips(text) or _has_forbidden_marker_autonomous(text) or _has_non_depth_direct_marker(text) or _has_probe_model_marker(text) or _has_time_like_text(text):
         return False
     if _bad_suffix_after_number_autonomous(text):
@@ -1106,6 +1679,9 @@ def _rule_score(row: Dict[str, object], profile: DepthProfile) -> Tuple[float, L
         elif _row_has_depth_above_number_context(row):
             score += 0.18
             reasons.append("Depth sopra/al fianco del numero pulito")
+        elif _row_has_left_context_direct_hint(row):
+            score += 0.18
+            reasons.append("lettera target a sinistra del valore numerico")
         if _row_has_unit_value_text(row):
             score += 0.16
             reasons.append("unità esplicita sul direct")
@@ -1168,6 +1744,9 @@ def _rule_score(row: Dict[str, object], profile: DepthProfile) -> Tuple[float, L
     if _flag(row, "ocr_bad_suffix_after_number"):
         score -= 0.18
         reasons.append("reject suffisso non cm/mm")
+    if scale and _scale_text_has_disallowed_letters(ocr_text):
+        score -= 0.30
+        reasons.append("reject scala con lettere accanto al valore")
     if _flag(row, "ocr_d_right_of_number") and not _flag(row, "ocr_d_left_of_number"):
         score -= 0.18
         reasons.append("reject D dopo numero")
@@ -1362,7 +1941,13 @@ def _apply_folder_consistency_rules(rows: List[Dict[str, object]]) -> None:
         by_image[str(row.get("source_image") or "")].append(row)
     for image_rows in by_image.values():
         direct_best = max(
-            [_f(row.get("autonomous_score")) for row in image_rows if row.get("autonomous_mode") == "direct_label" and _f(row.get("autonomous_valid")) > 0],
+            [
+                _f(row.get("autonomous_score"))
+                for row in image_rows
+                if row.get("autonomous_mode") == "direct_label"
+                and _f(row.get("autonomous_valid")) > 0
+                and (_row_has_direct_unit_evidence(row) or _row_has_depth_above_number_context(row) or _flag(row, "interface_unit_promoted"))
+            ],
             default=0.0,
         )
         if direct_best < 0.52:
@@ -1404,7 +1989,7 @@ def _best_by_score(rows: Iterable[Dict[str, object]]) -> Optional[Dict[str, obje
 
 def _row_has_direct_unit_evidence(row: Dict[str, object]) -> bool:
     """True only for the full direct grammar with an explicit depth unit."""
-    text = _clean_ocr_text(str(row.get("ocr_text") or ""))
+    text = _normalize_unit_ocr_confusions(str(row.get("ocr_text") or ""))
     return bool(
         re.fullmatch(
             r"(?i)(?:depth|dep|deph|dept|dpth|[dpr])\s*[:=./-]?\s*\d+(?:\.\d+)?\s*(?:mm|cm)",
@@ -1594,6 +2179,355 @@ def _apply_folder_direct_d_strategy(rows: List[Dict[str, object]]) -> None:
                 row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + "; subordinato a direct D variabile della cartella"
 
 
+def _profile_is_hitachi(profile: DepthProfile) -> bool:
+    text = " ".join([profile.vendor, profile.probe, " ".join(profile.notes)]).lower()
+    return bool(re.search(r"hitachi|arietta|aloka", text))
+
+
+def _add_hitachi_bottom_direct_row(
+    rows: List[Dict[str, object]],
+    image: str,
+    image_rows: List[Dict[str, object]],
+    match: Tuple[str, float, float, Box, str],
+    strategy_reason: str,
+) -> Dict[str, object]:
+    text, depth, raw_value, box, reason = match
+    left, top, right, bottom = box
+    label = text.split(":", 1)[0].upper()
+    template = dict(image_rows[0] if image_rows else rows[0])
+    template.update(
+        {
+            "sample_key": Path(image).name,
+            "source_image": image,
+            "depth_mm": f"{depth:.3f}",
+            "candidate_rank": "0.05",
+            "candidate_source": "hitachi_bottom_direct_roi",
+            "box_variant": "hitachi_bottom_direct_roi",
+            "box_variant_expanded": "1",
+            "box_variant_embedded": "1",
+            "cluster_score": "10.00000",
+            "token_count": "1",
+            "image_support": "",
+            "unique_values": "",
+            "cm_ratio": "0.00000",
+            "mm_ratio": "0.00000",
+            "depth_hint_ratio": "0.00000",
+            "d_hint_ratio": "1.00000" if label == "D" else "0.00000",
+            "p_hint_ratio": "1.00000" if label == "P" else "0.00000",
+            "r_hint_ratio": "1.00000" if label == "R" else "0.00000",
+            "scale_hint_ratio": "0.00000",
+            "fps_ips_ratio": "0.00000",
+            "side_score": "1.00000",
+            "accessory_score": "1.00000",
+            "echo_center_penalty": "0.00000",
+            "ocr_text": text,
+            "ocr_raw_text": text,
+            "ocr_text_len": str(len(text)),
+            "ocr_digit_group_count": "1",
+            "ocr_has_fps_ips": "0",
+            "ocr_has_forbidden_marker": "0",
+            "ocr_has_db_suffix": "0",
+            "ocr_has_probe_model": "0",
+            "ocr_has_time_like_text": "0",
+            "ocr_bad_suffix_after_number": "0",
+            "ocr_has_letter_hint": "1",
+            "ocr_text_has_d": "1" if label == "D" else "0",
+            "ocr_text_has_p": "1" if label == "P" else "0",
+            "ocr_text_has_r": "1" if label == "R" else "0",
+            "ocr_text_has_depth": "0",
+            "ocr_d_left_of_number": "1" if label == "D" else "0",
+            "ocr_p_left_of_number": "1" if label == "P" else "0",
+            "ocr_r_left_of_number": "1" if label == "R" else "0",
+            "ocr_has_cm_text": "0",
+            "ocr_has_mm_text": "0",
+            "ocr_numeric_value": f"{raw_value:.3f}",
+            "ocr_snapped_depth_mm": f"{depth:.3f}",
+            "ocr_snap_mode": reason,
+            "ocr_multi_number": "0",
+            "ocr_single_depth_expr": "1",
+            "wide_text_box": "0",
+            "snap_error_mm": "",
+            "pred_width": f"{right - left:.2f}",
+            "pred_height": f"{bottom - top:.2f}",
+            "pred_left": f"{left:.2f}",
+            "pred_top": f"{top:.2f}",
+            "pred_right": f"{right:.2f}",
+            "pred_bottom": f"{bottom:.2f}",
+            "cluster_reason": "hitachi_bottom_direct_roi; R/P/D nella riga informativa bassa",
+            "autonomous_mode": "direct_label",
+            "ranker_score": "0.00000",
+            "autonomous_rule_delta": "0.00000",
+            "autonomous_score": "0.95000",
+            "autonomous_valid": "1",
+            "autonomous_reason": f"accepted: direct Hitachi {label} nella riga interfaccia bassa; {strategy_reason}",
+            "folder_strategy": "hitachi_bottom_direct_stable",
+        }
+    )
+    rows.append(template)
+    image_rows.append(template)
+    return template
+
+
+def _add_hitachi_bottom_direct_review_row(
+    rows: List[Dict[str, object]],
+    image: str,
+    image_rows: List[Dict[str, object]],
+    stable_box: Box,
+    strategy_reason: str,
+) -> Dict[str, object]:
+    left, top, right, bottom = stable_box
+    template = dict(image_rows[0] if image_rows else rows[0])
+    template.update(
+        {
+            "sample_key": Path(image).name,
+            "source_image": image,
+            "depth_mm": "",
+            "candidate_rank": "999",
+            "candidate_source": "hitachi_bottom_direct_roi_missing",
+            "box_variant": "hitachi_bottom_direct_roi_missing",
+            "box_variant_expanded": "1",
+            "box_variant_embedded": "0",
+            "ocr_text": "OCR non letto nella posizione R Hitachi",
+            "ocr_raw_text": "",
+            "ocr_text_len": "0",
+            "ocr_digit_group_count": "0",
+            "ocr_has_fps_ips": "0",
+            "ocr_has_forbidden_marker": "0",
+            "ocr_has_db_suffix": "0",
+            "ocr_has_probe_model": "0",
+            "ocr_has_time_like_text": "0",
+            "ocr_bad_suffix_after_number": "0",
+            "ocr_has_letter_hint": "1",
+            "ocr_text_has_r": "1",
+            "ocr_numeric_value": "",
+            "ocr_snapped_depth_mm": "",
+            "ocr_snap_mode": "hitachi_bottom_direct_roi_missing",
+            "ocr_multi_number": "0",
+            "ocr_single_depth_expr": "0",
+            "pred_width": f"{right - left:.2f}",
+            "pred_height": f"{bottom - top:.2f}",
+            "pred_left": f"{left:.2f}",
+            "pred_top": f"{top:.2f}",
+            "pred_right": f"{right:.2f}",
+            "pred_bottom": f"{bottom:.2f}",
+            "cluster_reason": "hitachi_bottom_direct_roi_missing; posizione stabile della cartella",
+            "autonomous_mode": "direct_label",
+            "ranker_score": "0.00000",
+            "autonomous_rule_delta": "0.00000",
+            "autonomous_score": "0.50000",
+            "autonomous_valid": "1",
+            "autonomous_reason": f"review: la cartella usa direct Hitachi R/P/D, ma l'OCR mirato non ha letto il numero in questo frame; {strategy_reason}",
+            "folder_strategy": "hitachi_bottom_direct_stable",
+        }
+    )
+    rows.append(template)
+    image_rows.append(template)
+    return template
+
+
+def _apply_hitachi_bottom_direct_strategy(rows: List[Dict[str, object]], profile: DepthProfile) -> None:
+    """Lock Hitachi Arietta bottom-line R/P/D direct labels before scale fallback wins."""
+    if not _profile_is_hitachi(profile):
+        return
+    images = sorted({str(row.get("source_image") or "") for row in rows if row.get("source_image")})
+    image_count = len(images)
+    if image_count < 4:
+        return
+    by_image: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        by_image[str(row.get("source_image") or "")].append(row)
+
+    selected_by_image: Dict[str, Tuple[str, float, float, Box, str]] = {}
+    for image in images:
+        match = _hitachi_bottom_direct_roi_match(image)
+        if match is not None:
+            selected_by_image[image] = match
+
+    min_support = max(4, int(math.ceil(0.35 * image_count)))
+    if len(selected_by_image) < min_support:
+        return
+    raw_values = {round(match[2], 2) for match in selected_by_image.values() if match[2] > 0}
+    depth_values = {_value_bucket(match[1]) for match in selected_by_image.values() if match[1] > 0}
+    if len(raw_values) < 3 or max(raw_values) - min(raw_values) < 0.8 or len(depth_values) < 3:
+        return
+
+    stable_box = (
+        _median([match[3][0] for match in selected_by_image.values()]),
+        _median([match[3][1] for match in selected_by_image.values()]),
+        _median([match[3][2] for match in selected_by_image.values()]),
+        _median([match[3][3] for match in selected_by_image.values()]),
+    )
+    strategy_reason = (
+        "strategia cartella: direct Hitachi R/P/D nella riga bassa "
+        f"{len(selected_by_image)}/{image_count}; valori variabili; la scala e' subordinata"
+    )
+    for image in images:
+        image_rows = by_image.get(image, [])
+        selected = None
+        match = selected_by_image.get(image)
+        if match is not None:
+            selected = _add_hitachi_bottom_direct_row(rows, image, image_rows, match, strategy_reason)
+        elif stable_box[2] > stable_box[0] and stable_box[3] > stable_box[1]:
+            selected = _add_hitachi_bottom_direct_review_row(rows, image, image_rows, stable_box, strategy_reason)
+        for row in image_rows:
+            if row is selected:
+                continue
+            if row.get("autonomous_mode") in {"scale", "numeric_accessory", "direct_label"}:
+                row["autonomous_score"] = f"{min(_f(row.get('autonomous_score')), 0.18):.5f}"
+                row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + "; subordinato a direct Hitachi R/P/D stabile di cartella"
+
+
+def _apply_folder_left_context_direct_strategy(rows: List[Dict[str, object]]) -> None:
+    """Use D/P/R/Depth seen just left of clean numeric values as a folder method."""
+    images = sorted({str(row.get("source_image") or "") for row in rows if row.get("source_image")})
+    image_count = len(images)
+    if image_count < 4:
+        return
+    by_image: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        by_image[str(row.get("source_image") or "")].append(row)
+
+    min_support = max(4, int(math.ceil(0.50 * image_count)))
+    grouped: Dict[Tuple[int, int], List[Tuple[Dict[str, object], float]]] = defaultdict(list)
+    for row in rows:
+        depth = _left_context_candidate_depth_mm(row)
+        if depth <= 0:
+            continue
+        cx, cy = _row_center(row)
+        grouped[(int(round(cx / 70.0)), int(round(cy / 32.0)))].append((row, depth))
+
+    viable_groups: List[Tuple[Tuple[int, int], List[Tuple[Dict[str, object], float]], int, set[float], float]] = []
+    for key, group in grouped.items():
+        support = len({str(row.get("source_image") or "") for row, _depth in group})
+        if support < min_support:
+            continue
+        depths = {_value_bucket(depth) for _row, depth in group if depth > 0}
+        if len(depths) < 3 or max(depths) - min(depths) < 8.0:
+            continue
+        median_score = _median([_row_context_direct_hint_score(row) for row, _depth in group])
+        viable_groups.append((key, group, support, depths, median_score))
+    if not viable_groups:
+        return
+
+    _key, stable_group, support, depth_values, median_hint = max(
+        viable_groups,
+        key=lambda item: (item[2], len(item[3]), max(item[3]) - min(item[3]), item[4]),
+    )
+    selected_by_image: Dict[str, Tuple[Dict[str, object], float]] = {}
+    for row, depth in stable_group:
+        image = str(row.get("source_image") or "")
+        old = selected_by_image.get(image)
+        if old is None or (
+            _row_context_direct_hint_score(row),
+            _f(row.get("autonomous_score")),
+            _f(row.get("ranker_score")),
+            -_f(row.get("pred_width")),
+        ) > (
+            _row_context_direct_hint_score(old[0]),
+            _f(old[0].get("autonomous_score")),
+            _f(old[0].get("ranker_score")),
+            -_f(old[0].get("pred_width")),
+        ):
+            selected_by_image[image] = (row, depth)
+
+    if len(selected_by_image) < min_support:
+        return
+    stable_box = (
+        _median([_f(row.get("pred_left")) for row, _depth in selected_by_image.values()]),
+        _median([_f(row.get("pred_top")) for row, _depth in selected_by_image.values()]),
+        _median([_f(row.get("pred_right")) for row, _depth in selected_by_image.values()]),
+        _median([_f(row.get("pred_bottom")) for row, _depth in selected_by_image.values()]),
+    )
+    strategy_reason = (
+        "strategia cartella: valore direct con lettera target a sinistra "
+        f"{len(selected_by_image)}/{image_count}; posizione stabile; valori variabili"
+    )
+
+    for image, image_rows in by_image.items():
+        selected_pair = selected_by_image.get(image)
+        if selected_pair is None:
+            roi_match = _direct_left_context_roi_match(image, stable_box)
+            if roi_match is None:
+                continue
+            text, depth_mm, roi_box, roi_reason = roi_match
+            template = image_rows[0] if image_rows else rows[0]
+            selected = dict(template)
+            selected.update(
+                {
+                    "sample_key": Path(image).name,
+                    "source_image": image,
+                    "candidate_rank": "998",
+                    "candidate_source": "direct_left_context_roi",
+                    "box_variant": "stable_direct_context_roi",
+                    "box_variant_expanded": "0",
+                    "box_variant_embedded": "0",
+                    "depth_mm": f"{depth_mm:.3f}",
+                    "ocr_text": text,
+                    "ocr_raw_text": text,
+                    "ocr_text_len": str(len(text)),
+                    "ocr_digit_group_count": "1",
+                    "ocr_has_letter_hint": "1",
+                    "ocr_text_has_d": "1" if re.search(r"(?i)\bD\b", text) else "0",
+                    "ocr_text_has_p": "1" if re.search(r"(?i)\bP\b", text) else "0",
+                    "ocr_text_has_r": "1" if re.search(r"(?i)\bR\b", text) else "0",
+                    "ocr_text_has_depth": "1" if re.search(r"(?i)depth", text) else "0",
+                    "ocr_numeric_value": f"{depth_mm / 10.0:.3f}" if depth_mm <= 160.0 else f"{depth_mm:.3f}",
+                    "ocr_snapped_depth_mm": f"{depth_mm:.3f}",
+                    "ocr_snap_mode": roi_reason,
+                    "ocr_multi_number": "0",
+                    "ocr_single_depth_expr": "1",
+                    "pred_width": f"{roi_box[2] - roi_box[0]:.2f}",
+                    "pred_height": f"{roi_box[3] - roi_box[1]:.2f}",
+                    "pred_left": f"{roi_box[0]:.2f}",
+                    "pred_top": f"{roi_box[1]:.2f}",
+                    "pred_right": f"{roi_box[2]:.2f}",
+                    "pred_bottom": f"{roi_box[3]:.2f}",
+                    "cluster_reason": f"stable_direct_context_roi; support={support}; median_hint={median_hint:.2f}",
+                    "ranker_score": "0.00000",
+                    "autonomous_rule_delta": "0.00000",
+                }
+            )
+            rows.append(selected)
+            image_rows.append(selected)
+        else:
+            selected, depth_mm = selected_pair
+            raw_text = _clean_ocr_text(str(selected.get("ocr_text") or ""))
+            raw_value = _f(selected.get("ocr_numeric_value"))
+            if raw_value <= 16.0 and "." not in raw_text and _clean_numeric_expression(raw_text):
+                roi_match = _direct_left_context_roi_match(image, stable_box)
+                if roi_match is not None:
+                    roi_text, roi_depth, roi_box, roi_reason = roi_match
+                    if roi_depth > 0 and abs(roi_depth - depth_mm) >= 4.0:
+                        selected["ocr_text"] = roi_text
+                        selected["ocr_raw_text"] = roi_text
+                        selected["ocr_text_len"] = str(len(roi_text))
+                        selected["depth_mm"] = f"{roi_depth:.3f}"
+                        selected["ocr_snapped_depth_mm"] = f"{roi_depth:.3f}"
+                        selected["ocr_snap_mode"] = roi_reason
+                        selected["pred_width"] = f"{roi_box[2] - roi_box[0]:.2f}"
+                        selected["pred_height"] = f"{roi_box[3] - roi_box[1]:.2f}"
+                        selected["pred_left"] = f"{roi_box[0]:.2f}"
+                        selected["pred_top"] = f"{roi_box[1]:.2f}"
+                        selected["pred_right"] = f"{roi_box[2]:.2f}"
+                        selected["pred_bottom"] = f"{roi_box[3]:.2f}"
+                        depth_mm = roi_depth
+        selected["autonomous_mode"] = "direct_label"
+        selected["autonomous_valid"] = "1"
+        selected["depth_mm"] = f"{depth_mm:.3f}"
+        selected["ocr_snapped_depth_mm"] = f"{depth_mm:.3f}"
+        if not selected.get("ocr_snap_mode"):
+            selected["ocr_snap_mode"] = "direct_left_context_stable"
+        selected["folder_strategy"] = "direct_left_context_stable"
+        selected["autonomous_score"] = f"{max(_f(selected.get('autonomous_score')), 0.94):.5f}"
+        selected["autonomous_reason"] = str(selected.get("autonomous_reason") or "") + f"; {strategy_reason}"
+        for row in image_rows:
+            if row is selected:
+                continue
+            if row.get("autonomous_mode") in {"scale", "numeric_accessory", "direct_label"}:
+                row["autonomous_score"] = f"{min(_f(row.get('autonomous_score')), 0.20):.5f}"
+                row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + "; subordinato a direct con lettera target a sinistra"
+
+
 def _apply_folder_strategy_rules(rows: List[Dict[str, object]]) -> None:
     images = sorted({str(row.get("source_image") or "") for row in rows if row.get("source_image")})
     image_count = len(images)
@@ -1658,6 +2592,8 @@ def _apply_folder_strategy_rules(rows: List[Dict[str, object]]) -> None:
 def _is_scale_unit_strategy_candidate(row: Dict[str, object]) -> bool:
     if row.get("autonomous_mode") != "scale":
         return False
+    if _scale_text_has_disallowed_letters(str(row.get("ocr_text") or "")):
+        return False
     if _flag(row, "ocr_has_fps_ips") or _flag(row, "ocr_has_forbidden_marker") or _flag(row, "ocr_has_db_suffix") or _flag(row, "ocr_has_probe_model") or _flag(row, "ocr_has_time_like_text"):
         return False
     if _flag(row, "ocr_bad_suffix_after_number") and not _row_has_dirty_scale_cm_text(row):
@@ -1668,9 +2604,6 @@ def _is_scale_unit_strategy_candidate(row: Dict[str, object]) -> bool:
 
 
 def _scale_unit_strategy_depth_mm(row: Dict[str, object]) -> float:
-    current = _f(row.get("depth_mm"))
-    if 0 < current <= 160.0:
-        return current
     source = str(row.get("candidate_source") or "")
     if not (source == "token" or source.startswith("scale_")):
         return 0.0
@@ -1680,11 +2613,14 @@ def _scale_unit_strategy_depth_mm(row: Dict[str, object]) -> float:
     if _flag(row, "ocr_multi_number"):
         return 0.0
     parsed = _unit_value_depth_mm(text)
-    if 0 < parsed <= 160.0:
+    if 0 < parsed <= 350.0:
         return parsed
+    current = _f(row.get("depth_mm"))
+    if 0 < current <= 350.0:
+        return current
     if _row_has_dirty_scale_cm_text(row):
         corrected = _scale_endpoint_corrected_depth_mm(row)
-        if 0 < corrected <= 160.0:
+        if 0 < corrected <= 350.0:
             return corrected
     return 0.0
 
@@ -1694,7 +2630,7 @@ def _row_has_isolated_scale_number(row: Dict[str, object]) -> bool:
     source = str(row.get("candidate_source") or "")
     if not (source == "token" or source.startswith("scale_")):
         return False
-    text = _clean_ocr_text(str(row.get("ocr_text") or "")).lower()
+    text = _normalize_unit_ocr_confusions(str(row.get("ocr_text") or "")).lower()
     # The tick can be fused to the digit (``6-``) and a tight OCR crop can
     # leave harmless punctuation after a correct unit (``6cm*``).  Keep those
     # local artifacts, but never admit an additional alphabetic suffix.
@@ -1724,6 +2660,8 @@ def _scale_unit_numeric_fallback_depth_mm(row: Dict[str, object]) -> float:
 
 def _is_scale_unit_numeric_fallback_candidate(row: Dict[str, object], lane_min_x: float, lane_max_x: float) -> bool:
     if row.get("autonomous_mode") != "scale":
+        return False
+    if _scale_text_has_disallowed_letters(str(row.get("ocr_text") or "")):
         return False
     if _f(row.get("autonomous_valid")) <= 0:
         return False
@@ -1781,6 +2719,8 @@ def _is_scale_unit_cluster_review_candidate(row: Dict[str, object]) -> bool:
     if source == "token" or source.startswith("scale_"):
         return False
     if row.get("autonomous_mode") != "scale":
+        return False
+    if _scale_text_has_disallowed_letters(str(row.get("ocr_text") or "")):
         return False
     if _flag(row, "ocr_has_fps_ips") or _flag(row, "ocr_has_forbidden_marker") or _flag(row, "ocr_has_db_suffix") or _flag(row, "ocr_has_probe_model") or _flag(row, "ocr_has_time_like_text"):
         return False
@@ -1898,10 +2838,12 @@ def _row_is_in_visual_scale_lane(row: Dict[str, object]) -> bool:
     image = str(row.get("source_image") or "")
     marks = _detect_visual_scale_marks(image)
     source = str(row.get("candidate_source") or "")
-    if not marks:
+    if len(marks) < 2:
         return source.startswith("scale_") or _looks_like_scale_edge_value(row)
     cx, cy = _row_center(row)
-    return any(abs(cx - _box_center(mark)[0]) <= 115.0 and abs(cy - _box_center(mark)[1]) <= 55.0 for mark in marks)
+    if any(abs(cx - _box_center(mark)[0]) <= 115.0 and abs(cy - _box_center(mark)[1]) <= 55.0 for mark in marks):
+        return True
+    return bool(_row_has_explicit_depth_unit_text(row) and _looks_like_scale_edge_value(row))
 
 
 def _box_center(box: Box) -> Tuple[float, float]:
@@ -1947,14 +2889,29 @@ def _row_is_scale_endpoint(row: Dict[str, object], image_rows: Sequence[Dict[str
     marks = _detect_visual_scale_marks(image)
     if len(marks) >= 2:
         idx = _row_scale_mark_index(row, marks)
-        return idx is not None and idx in _scale_endpoint_indices(image_rows)
+        if idx is not None and idx in _scale_endpoint_indices(image_rows):
+            return True
+        if _row_has_explicit_depth_unit_text(row) and _looks_like_scale_edge_value(row):
+            _cx, cy = _row_center(row)
+            mark_ys = [_box_center(mark)[1] for mark in marks]
+            return bool(mark_ys and (cy <= min(mark_ys) + 42.0 or cy >= max(mark_ys) - 42.0))
+        return False
 
     # Conservative fallback for layouts where tick detection failed: use only
     # the top/bottom rows of the already validated scale lane.
-    lane_rows = [candidate for candidate in image_rows if _row_is_in_visual_scale_lane(candidate)]
+    lane_rows = [
+        candidate
+        for candidate in image_rows
+        if (
+            _row_is_in_visual_scale_lane(candidate)
+            and _f(candidate.get("autonomous_valid")) > 0
+            and _f(candidate.get("depth_mm")) > 0
+            and _row_has_isolated_scale_number(candidate)
+        )
+    ]
     ys = [_row_center(candidate)[1] for candidate in lane_rows]
     if len(ys) < 2:
-        return False
+        return bool(_row_has_explicit_depth_unit_text(row) and _looks_like_scale_edge_value(row))
     top_y, bottom_y = min(ys), max(ys)
     cy = _row_center(row)[1]
     top_zero = any(abs(_row_center(candidate)[1] - top_y) <= 42.0 and _row_has_zero_depth_value_text(candidate) for candidate in lane_rows)
@@ -1986,6 +2943,8 @@ def _scale_mark_depth_from_nearby_rows(mark: Box, image_rows: Sequence[Dict[str,
     depths: List[float] = []
     for row in image_rows:
         if _flag(row, "ocr_has_fps_ips") or _flag(row, "ocr_has_forbidden_marker") or _flag(row, "ocr_has_db_suffix") or _flag(row, "ocr_has_probe_model") or _flag(row, "ocr_has_time_like_text"):
+            continue
+        if _scale_text_has_disallowed_letters(str(row.get("ocr_text") or "")):
             continue
         if row.get("autonomous_mode") != "scale" and str(row.get("candidate_source") or "") != "token":
             continue
@@ -2132,6 +3091,307 @@ def _add_visual_scale_review_row(rows: List[Dict[str, object]], image: str, imag
     return template
 
 
+def _unit_family(text: str) -> str:
+    match = _unit_value_match(text)
+    if not match:
+        return ""
+    _value, unit = match
+    return "cm" if str(unit).startswith("cm") else "mm" if unit == "mm" else ""
+
+
+def _dominant_unit_family(rows: Sequence[Dict[str, object]]) -> str:
+    counts = Counter(_unit_family(str(row.get("ocr_text") or "")) for row in rows)
+    counts.pop("", None)
+    return counts.most_common(1)[0][0] if counts else ""
+
+
+def _stable_scale_unit_lane_box(rows: Sequence[Dict[str, object]]) -> Optional[Box]:
+    if len(rows) < 4:
+        return None
+    lefts = [_f(row.get("pred_left")) for row in rows if _f(row.get("pred_right")) > _f(row.get("pred_left"))]
+    rights = [_f(row.get("pred_right")) for row in rows if _f(row.get("pred_right")) > _f(row.get("pred_left"))]
+    heights = [_f(row.get("pred_height")) for row in rows if _f(row.get("pred_height")) > 0]
+    if not lefts or not rights:
+        return None
+    left = _median(lefts)
+    right = _median(rights)
+    height = _median(heights) if heights else 24.0
+    if right <= left:
+        return None
+    # Keep the reread tight horizontally.  A too-wide crop can pull in a nearby
+    # tick/graphic stroke and turn "12cm" into OCR such as "42cm" or "142cm".
+    pad_x = max(18.0, min(32.0, 0.35 * (right - left)))
+    pad_y = max(22.0, min(42.0, 1.15 * height))
+    return left - pad_x, -pad_y, right + pad_x, pad_y
+
+
+def _stable_scale_unit_reference_box(rows: Sequence[Dict[str, object]]) -> Optional[Box]:
+    if len(rows) < 4:
+        return None
+    boxes = [
+        _row_box(row)
+        for row in rows
+        if _f(row.get("pred_right")) > _f(row.get("pred_left")) and _f(row.get("pred_bottom")) > _f(row.get("pred_top"))
+    ]
+    if not boxes:
+        return None
+    box = (
+        _median([item[0] for item in boxes]),
+        _median([item[1] for item in boxes]),
+        _median([item[2] for item in boxes]),
+        _median([item[3] for item in boxes]),
+    )
+    return box if box[2] > box[0] and box[3] > box[1] else None
+
+
+def _reference_anchor_row(template: Dict[str, object], reference_box: Box) -> Dict[str, object]:
+    anchor = dict(template)
+    left, top, right, bottom = reference_box
+    anchor.update(
+        {
+            "pred_left": f"{left:.2f}",
+            "pred_top": f"{top:.2f}",
+            "pred_right": f"{right:.2f}",
+            "pred_bottom": f"{bottom:.2f}",
+            "pred_width": f"{right - left:.2f}",
+            "pred_height": f"{bottom - top:.2f}",
+        }
+    )
+    return anchor
+
+
+def _scale_unit_roi_anchor_row(
+    image_rows: Sequence[Dict[str, object]],
+    selected: Optional[Dict[str, object]],
+    lane_box: Box,
+    reference_box: Optional[Box],
+) -> Optional[Dict[str, object]]:
+    if selected:
+        if reference_box:
+            sx, sy = _row_center(selected)
+            rx, ry = _box_center(reference_box)
+            if abs(sx - rx) > 130.0 or abs(sy - ry) > 170.0:
+                return _reference_anchor_row(selected, reference_box)
+        return selected
+    left, _top_pad, right, _bottom_pad = lane_box
+    lane_cx = 0.5 * (left + right)
+    candidates = [
+        row
+        for row in image_rows
+        if row.get("autonomous_mode") == "scale"
+        and _f(row.get("depth_mm")) > 0
+        and abs(_row_center(row)[0] - lane_cx) <= 95.0
+        and not _scale_text_has_disallowed_letters(str(row.get("ocr_text") or ""))
+    ]
+    if not candidates:
+        candidates = [
+            row
+            for row in image_rows
+            if row.get("autonomous_mode") == "scale"
+            and abs(_row_center(row)[0] - lane_cx) <= 115.0
+        ]
+    if not candidates:
+        if reference_box and image_rows:
+            return _reference_anchor_row(dict(image_rows[0]), reference_box)
+        return None
+    anchor = max(candidates, key=lambda row: (_f(row.get("autonomous_score")), _f(row.get("ranker_score")), _f(row.get("depth_mm"))))
+    if reference_box:
+        ax, ay = _row_center(anchor)
+        rx, ry = _box_center(reference_box)
+        if abs(ax - rx) > 130.0 or abs(ay - ry) > 170.0:
+            return _reference_anchor_row(anchor, reference_box)
+    return anchor
+
+
+def _scale_unit_roi_boxes(image: str, lane_box: Box, anchor: Dict[str, object]) -> List[Box]:
+    width, height = _image_size(image)
+    if width <= 1 or height <= 1:
+        return []
+    lane_left, _top_pad, lane_right, _bottom_pad = lane_box
+    a_top = _f(anchor.get("pred_top"))
+    a_bottom = _f(anchor.get("pred_bottom"))
+    a_cy = 0.5 * (a_top + a_bottom)
+    if a_bottom <= a_top:
+        a_top, a_bottom = a_cy - 8.0, a_cy + 8.0
+    x0 = max(0.0, lane_left)
+    x1 = min(float(width), lane_right)
+    spans = [
+        (a_top - 35.0, a_bottom + 35.0),
+        (a_top - 22.0, a_bottom + 32.0),
+        (a_top - 8.0, a_bottom + 34.0),
+        (a_top + 20.0, a_bottom + 48.0),
+        (a_top + 14.0, a_bottom + 48.0),
+        (a_cy - 12.0, a_cy + 36.0),
+    ]
+    boxes: List[Box] = []
+    seen: set[Tuple[int, int, int, int]] = set()
+    for top, bottom in spans:
+        y0 = max(0.0, top)
+        y1 = min(float(height), bottom)
+        if y1 - y0 < 20.0 or x1 - x0 < 35.0:
+            continue
+        key = (round(x0), round(y0), round(x1), round(y1))
+        if key in seen:
+            continue
+        seen.add(key)
+        boxes.append((x0, y0, x1, y1))
+    return boxes
+
+
+def _union_word_box(words: Sequence[object]) -> Box:
+    left = min(float(word.left) for word in words)
+    top = min(float(word.top) for word in words)
+    right = max(float(word.right) for word in words)
+    bottom = max(float(word.bottom) for word in words)
+    return left, top, right, bottom
+
+
+def _stable_scale_unit_roi_parse(text: str, dominant_unit: str) -> Optional[Tuple[str, float, bool, bool]]:
+    clean = _normalize_unit_ocr_confusions(text)
+    if _has_fps_ips(clean) or _has_forbidden_marker_autonomous(clean) or _has_probe_model_marker(clean) or _has_time_like_text(clean):
+        return None
+    if _has_non_depth_direct_marker(clean) or _has_db_unit_suffix_text(clean):
+        return None
+    if _scale_text_has_disallowed_letters(clean):
+        return None
+    depth = _unit_value_depth_mm(clean)
+    exact_unit = depth > 0
+    normalized = clean.strip()
+    if depth <= 0 and dominant_unit == "cm":
+        match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*m[^a-z0-9]*\s*", clean, flags=re.I)
+        if match:
+            value = float(match.group(1))
+            if math.isfinite(value) and value > 0:
+                depth = value if value > 35.0 else value * 10.0
+                normalized = f"{match.group(1)}cm?"
+    if depth <= 0 or depth > 350.0:
+        return None
+    temp_row = {"ocr_text": normalized}
+    risky = _row_has_ambiguous_compact_cm_value(temp_row) or _row_has_low_confidence_scale_unit_value(temp_row)
+    return normalized, depth, exact_unit, risky
+
+
+def _stable_scale_unit_roi_match(image: str, lane_box: Box, anchor: Dict[str, object], dominant_unit: str) -> Optional[Tuple[str, float, Box, str, bool]]:
+    matches: List[Tuple[int, float, float, str, float, Box, str, bool]] = []
+    for crop in _scale_unit_roi_boxes(image, lane_box, anchor):
+        for psm in ("6", "7", "8"):
+            for preprocess in ("base", "scale_line_suppressed"):
+                words, _scale = run_tesseract_tsv_region(
+                    Path(image),
+                    timeout=1.5,
+                    max_side=2200,
+                    crop_box=crop,
+                    psm=psm,
+                    preprocess=preprocess,
+                    char_whitelist="0123456789.,cCmMmMxX",
+                )
+                if not words:
+                    continue
+                ordered = sorted(words, key=lambda word: (word.top, word.left))
+                candidates: List[Tuple[str, Sequence[object]]] = []
+                for word in ordered:
+                    candidates.append((word.text, [word]))
+                for start in range(len(ordered)):
+                    for end in range(start + 2, min(len(ordered), start + 3) + 1):
+                        group = ordered[start:end]
+                        candidates.append((" ".join(word.text for word in group), group))
+                candidates.append((" ".join(word.text for word in ordered), ordered))
+                for raw_text, group in candidates:
+                    parsed = _stable_scale_unit_roi_parse(raw_text, dominant_unit)
+                    if not parsed:
+                        continue
+                    text, depth, exact_unit, risky = parsed
+                    box = _union_word_box(group)
+                    conf = max((float(getattr(word, "conf", 0.0)) for word in group), default=0.0)
+                    quality = (0 if risky else 1, 1 if exact_unit else 0)
+                    matches.append(
+                        (
+                            quality[0],
+                            quality[1],
+                            conf,
+                            text,
+                            depth,
+                            box,
+                            f"stable_scale_unit_roi:{psm}:{preprocess}",
+                            risky,
+                        )
+                    )
+                    if exact_unit and not risky:
+                        return text, depth, box, f"stable_scale_unit_roi:{psm}:{preprocess}", risky
+    if not matches:
+        return None
+    _safe, _exact, _conf, text, depth, box, reason, risky = max(matches, key=lambda item: (item[0], item[1], item[2], item[4]))
+    return text, depth, box, reason, risky
+
+
+def _add_stable_scale_unit_roi_row(
+    rows: List[Dict[str, object]],
+    image: str,
+    image_rows: List[Dict[str, object]],
+    lane_box: Box,
+    anchor: Dict[str, object],
+    dominant_unit: str,
+    strategy_reason: str,
+) -> Optional[Dict[str, object]]:
+    match = _stable_scale_unit_roi_match(image, lane_box, anchor, dominant_unit)
+    if not match:
+        return None
+    text, depth, box, reason, risky = match
+    left, top, right, bottom = box
+    template = dict(anchor if anchor else image_rows[0])
+    unit = _unit_family(text)
+    numeric = re.search(r"\d+(?:\.\d+)?", text.replace(",", "."))
+    score = 0.60 if risky or text.endswith("?") else 0.86
+    template.update(
+        {
+            "depth_mm": f"{depth:.3f}",
+            "candidate_rank": "0.25",
+            "candidate_source": "scale_stable_unit_roi",
+            "box_variant": "stable_scale_unit_roi",
+            "box_variant_expanded": "1",
+            "box_variant_embedded": "0",
+            "ocr_text": text,
+            "ocr_text_len": str(len(text)),
+            "ocr_digit_group_count": "1",
+            "ocr_has_fps_ips": "0",
+            "ocr_has_forbidden_marker": "0",
+            "ocr_has_probe_model": "0",
+            "ocr_has_time_like_text": "0",
+            "ocr_bad_suffix_after_number": "0",
+            "ocr_has_cm_text": "1" if unit == "cm" else "0",
+            "ocr_has_mm_text": "1" if unit == "mm" else "0",
+            "ocr_numeric_value": numeric.group(0) if numeric else "",
+            "ocr_snapped_depth_mm": f"{depth:.3f}",
+            "ocr_snap_mode": reason,
+            "ocr_multi_number": "0",
+            "ocr_single_depth_expr": "1",
+            "stable_roi_unit_inferred": "1" if text.endswith("?") else "0",
+            "wide_text_box": "0",
+            "snap_error_mm": "",
+            "pred_width": f"{right - left:.2f}",
+            "pred_height": f"{bottom - top:.2f}",
+            "pred_left": f"{left:.2f}",
+            "pred_top": f"{top:.2f}",
+            "pred_right": f"{right:.2f}",
+            "pred_bottom": f"{bottom:.2f}",
+            "cluster_reason": f"stable_scale_unit_roi; dominant_unit={dominant_unit or 'unknown'}",
+            "autonomous_mode": "scale",
+            "ranker_score": "0.00000",
+            "autonomous_rule_delta": "0.00000",
+            "autonomous_score": f"{score:.5f}",
+            "autonomous_valid": "1",
+            "autonomous_reason": (
+                f"{'review' if score < 0.62 else 'accepted'}: OCR mirato nella corsia stabile della cartella; "
+                f"{strategy_reason}"
+            ),
+            "folder_strategy": "scale_unit_required",
+        }
+    )
+    rows.append(template)
+    image_rows.append(template)
+    return template
+
+
 def _folder_prefers_scale(rows: Sequence[Dict[str, object]]) -> bool:
     """Choose one family-level strategy before applying the unit rule.
 
@@ -2147,6 +3407,37 @@ def _folder_prefers_scale(rows: Sequence[Dict[str, object]]) -> bool:
     by_image: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     for row in rows:
         by_image[str(row.get("source_image") or "")].append(row)
+
+    scale_unit_by_image: Dict[str, Dict[str, object]] = {}
+    direct_unit_by_image: Dict[str, Dict[str, object]] = {}
+    for image, image_rows in by_image.items():
+        scale_unit = [
+            row
+            for row in image_rows
+            if _is_scale_unit_strategy_candidate(row) and _row_is_scale_endpoint(row, image_rows)
+        ]
+        direct_unit = [
+            row
+            for row in image_rows
+            if (
+                row.get("autonomous_mode") == "direct_label"
+                and _f(row.get("autonomous_valid")) > 0
+                and _row_has_direct_unit_evidence(row)
+                and _f(row.get("depth_mm")) > 0
+            )
+        ]
+        if scale_unit:
+            scale_unit_by_image[image] = max(scale_unit, key=_scale_unit_strategy_key)
+        if direct_unit:
+            direct_unit_by_image[image] = max(direct_unit, key=lambda row: (_f(row.get("autonomous_score")), _f(row.get("ranker_score"))))
+
+    scale_unit_values = {_value_bucket(_scale_unit_strategy_depth_mm(row)) for row in scale_unit_by_image.values() if _scale_unit_strategy_depth_mm(row) > 0}
+    direct_unit_values = {_value_bucket(_f(row.get("depth_mm"))) for row in direct_unit_by_image.values() if _f(row.get("depth_mm")) > 0}
+    min_scale_unit = max(4, int(math.ceil(0.30 * image_count)))
+    scale_unit_varies = len(scale_unit_values) >= 3 and (max(scale_unit_values) - min(scale_unit_values) >= 8.0)
+    direct_unit_support = len(direct_unit_by_image)
+    if len(scale_unit_by_image) >= min_scale_unit and scale_unit_varies and direct_unit_support < len(scale_unit_by_image):
+        return True
 
     direct_by_image: Dict[str, Dict[str, object]] = {}
     scale_by_image: Dict[str, Dict[str, object]] = {}
@@ -2219,6 +3510,34 @@ def _apply_folder_scale_unit_strategy(rows: List[Dict[str, object]]) -> None:
     lane_centers = [_row_center(row)[0] for row in selected_by_image.values()]
     lane_min_x = min(lane_centers) if lane_centers else 0.0
     lane_max_x = max(lane_centers) if lane_centers else 0.0
+    stable_lane_box = _stable_scale_unit_lane_box(list(selected_by_image.values()))
+    stable_reference_box = _stable_scale_unit_reference_box(list(selected_by_image.values()))
+    dominant_unit = _dominant_unit_family(list(selected_by_image.values()))
+
+    if stable_lane_box and dominant_unit:
+        for image, image_rows in by_image.items():
+            selected = selected_by_image.get(image)
+            needs_stable_roi = (
+                selected is None
+                or _row_has_ambiguous_compact_cm_value(selected)
+                or _row_has_low_confidence_scale_unit_value(selected)
+            )
+            if not needs_stable_roi:
+                continue
+            anchor = _scale_unit_roi_anchor_row(image_rows, selected, stable_lane_box, stable_reference_box)
+            if not anchor:
+                continue
+            roi_row = _add_stable_scale_unit_roi_row(
+                rows,
+                image,
+                image_rows,
+                stable_lane_box,
+                anchor,
+                dominant_unit,
+                strategy_reason,
+            )
+            if roi_row:
+                selected_by_image[image] = roi_row
 
     fallback_by_image: Dict[str, Dict[str, object]] = {}
     for image, image_rows in by_image.items():
@@ -2255,6 +3574,10 @@ def _apply_folder_scale_unit_strategy(rows: List[Dict[str, object]]) -> None:
             and fallback_depth_for_override > selected_depth_for_override + max(0.5, 0.01 * selected_depth_for_override)
         )
         for row in image_rows:
+            if row.get("autonomous_mode") == "scale" and _row_has_ambiguous_compact_cm_value(row) and row is not selected:
+                row["autonomous_score"] = f"{min(_f(row.get('autonomous_score')), 0.58):.5f}"
+                row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + "; review: valore cm compatto ambiguo, possibile cifra OCR errata"
+                continue
             if row.get("autonomous_mode") == "scale" and not _row_has_isolated_scale_number(row):
                 row["autonomous_score"] = f"{min(_f(row.get('autonomous_score')), 0.22):.5f}"
                 row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + "; scartato: cluster OCR senza token numerico e box affidabile"
@@ -2280,8 +3603,23 @@ def _apply_folder_scale_unit_strategy(rows: List[Dict[str, object]]) -> None:
                 row["ocr_snapped_depth_mm"] = f"{selected_depth:.3f}"
                 if not row.get("ocr_snap_mode"):
                     row["ocr_snap_mode"] = "scale_unit_required_unit_text"
-                row["autonomous_score"] = f"{max(_f(row.get('autonomous_score')), 0.84):.5f}"
-                row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + f"; {strategy_reason}"
+                if _row_has_ambiguous_compact_cm_value(row) or _row_has_low_confidence_scale_unit_value(row) or _flag(row, "stable_roi_unit_inferred"):
+                    row["autonomous_score"] = f"{min(max(_f(row.get('autonomous_score')), 0.50), 0.58):.5f}"
+                    review_reason = (
+                        "review: valore cm compatto ambiguo, possibile cifra OCR errata"
+                        if _row_has_ambiguous_compact_cm_value(row)
+                        else "review: unita' inferita dalla corsia stabile, OCR non pienamente esplicito"
+                        if _flag(row, "stable_roi_unit_inferred")
+                        else "review: valore scala con unita' molto basso, possibile contaminazione OCR"
+                    )
+                    row["autonomous_reason"] = (
+                        str(row.get("autonomous_reason") or "")
+                        + f"; {review_reason}"
+                        + f"; {strategy_reason}"
+                    )
+                else:
+                    row["autonomous_score"] = f"{max(_f(row.get('autonomous_score')), 0.84):.5f}"
+                    row["autonomous_reason"] = str(row.get("autonomous_reason") or "") + f"; {strategy_reason}"
                 continue
             selected_depth = _scale_unit_strategy_depth_mm(selected) if selected else 0.0
             row_depth = _scale_unit_strategy_depth_mm(row)
@@ -2331,6 +3669,8 @@ def _scale_endpoint_candidate(row: Dict[str, object], profile: DepthProfile) -> 
         return False
     if str(row.get("candidate_source") or "") != "token":
         return False
+    if _scale_text_has_disallowed_letters(str(row.get("ocr_text") or "")):
+        return False
     if _flag(row, "ocr_has_fps_ips") or _flag(row, "ocr_has_forbidden_marker") or _flag(row, "ocr_has_db_suffix") or _flag(row, "ocr_has_probe_model") or _flag(row, "ocr_has_time_like_text"):
         return False
     if _flag(row, "ocr_bad_suffix_after_number") and not _row_has_dirty_scale_cm_text(row):
@@ -2363,6 +3703,8 @@ def _scale_endpoint_key(row: Dict[str, object]) -> Tuple[float, float, float, fl
 
 def _scale_endpoint_review_fallback_candidate(row: Dict[str, object], lane_cx: float) -> bool:
     if str(row.get("candidate_source") or "") == "token":
+        return False
+    if _scale_text_has_disallowed_letters(str(row.get("ocr_text") or "")):
         return False
     if _flag(row, "ocr_has_fps_ips") or _flag(row, "ocr_has_forbidden_marker") or _flag(row, "ocr_has_db_suffix") or _flag(row, "ocr_has_probe_model") or _flag(row, "ocr_has_time_like_text"):
         return False
@@ -2629,9 +3971,8 @@ def _promote_stable_unit_interface_rows(rows: List[Dict[str, object]]) -> None:
     candidates = [
         row
         for row in rows
-        if row.get("autonomous_mode") == "scale"
+        if row.get("autonomous_mode") in {"scale", "numeric_accessory"}
         and not str(row.get("candidate_source") or "").startswith("scale_")
-        and not _looks_like_scale_edge_value(row)
         and not _row_is_in_visual_scale_lane(row)
         and _clean_numeric_expression(str(row.get("ocr_text") or ""), require_unit=True)
         and _f(row.get("depth_mm")) > 0
@@ -2649,6 +3990,7 @@ def _promote_stable_unit_interface_rows(rows: List[Dict[str, object]]) -> None:
         if support >= min_support:
             row["autonomous_mode"] = "direct_label"
             row["interface_unit_promoted"] = "1"
+            row["folder_strategy"] = "direct_interface_unit_stable"
             row["cluster_reason"] = str(row.get("cluster_reason") or "") + f"; stable_unit_interface={support}/{image_count}"
 
 
@@ -2679,6 +4021,9 @@ def _score_rows(rows: List[Dict[str, object]], profile: DepthProfile, ranker_mod
         if _has_non_depth_direct_marker(str(row.get("ocr_text") or "")):
             valid = 0
             invalid_reasons.append("marker 2D/FR non valido per depth")
+        if row.get("autonomous_mode") == "scale" and _scale_text_has_disallowed_letters(str(row.get("ocr_text") or "")):
+            valid = 0
+            invalid_reasons.append("valore scala accompagnato da lettere non ammesse")
         if _flag(row, "ocr_bad_suffix_after_number"):
             valid = 0
             invalid_reasons.append("suffisso non valido")
@@ -2698,10 +4043,12 @@ def _score_rows(rows: List[Dict[str, object]], profile: DepthProfile, ranker_mod
     _enforce_scale_endpoint_rule(rows)
     _enforce_scale_max_value_rule(rows)
     _apply_folder_consistency_rules(rows)
+    _apply_folder_left_context_direct_strategy(rows)
     _apply_folder_strategy_rules(rows)
     _apply_folder_scale_unit_strategy(rows)
     _apply_folder_direct_unit_strategy(rows)
     _apply_folder_direct_d_strategy(rows)
+    _apply_hitachi_bottom_direct_strategy(rows, profile)
     for row in rows:
         score = _f(row.get("autonomous_score"))
         if _f(row.get("autonomous_valid")) <= 0 or score < 0.35:
