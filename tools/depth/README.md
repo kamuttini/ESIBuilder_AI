@@ -2,6 +2,35 @@
 
 Modulo mirato per lavorare sulle depth legacy senza avviare subito training costosi.
 
+## Checkpoint integrazione 2026-07-02
+
+Per l'integrazione nella pipeline completa usare questi documenti:
+
+- `docs/rect_depth_autonomous_integration.md`: guida operativa con input, output,
+  status, strategie di cartella e comandi consigliati.
+- `docs/rect_depth_autonomous_checkpoint_2026-07-02.md`: stato del modulo,
+  decisioni consolidate e ultimo checkpoint Hitachi.
+- `tools/depth/rect_depth_module_contract.json`: contratto machine-readable per
+  entrypoint, campi CSV, status policy e regole principali.
+
+Entry point production-facing:
+
+```bash
+python3 tools/depth/predict_rect_depth_autonomous.py \
+  --folder "/path/cartella" \
+  --output-dir artifacts/24_rect_depth_hybrid/pipeline_runs/NOME_RUN \
+  --context-json "/path/context_pipeline.json" \
+  --max-images 0
+```
+
+Nota importante: `--max-images` ha default `80` per il launcher/review interattiva.
+In pipeline completa passare `--max-images 0` se bisogna processare tutta la
+cartella.
+
+Ultimo checkpoint validato: `hitachi_arietta_v60_l441_bottom_r_direct_v5`
+(`28/28 accepted`, `0 mismatch` diagnostici, box stretto su `R:valore` senza
+includere `BG/BD`).
+
 ## 1. Manifest da configurazioni legacy
 
 Estrae la riga `#17 RECT_DEPTH` e la riga `#18 VECT_DEPTH` dai `.fss`, collega ogni
@@ -153,6 +182,17 @@ Modulo production-facing dopo le review manuali:
   candidati con marker non-depth;
 - preferisce valori informativi diretti: `Depth`, `D`, `P`, `R` prima del numero;
 - accetta solo suffissi `cm`, `mm` o nessun suffisso;
+- `D`, `P` e `R` contano come marker solo se sono lettere isolate subito a
+  sinistra del valore; se toccano altre lettere non vengono usate come marker.
+  `Depth` resta l'unica parola-marker accettata;
+- un valore con `cm/mm` incollato a testo OCR vicino puo' ancora essere promosso
+  a direct, ma solo come "unita' stabile in interfaccia" a livello cartella, non
+  come scala e non come `D/P/R` valido;
+- se il numero e' letto da solo ma l'OCR vede una label target valida ancora più
+  a sinistra sulla stessa riga, il valore viene trattato come direct di
+  interfaccia. Se il pattern e' stabile nella cartella, le immagini in cui il
+  numero non viene letto bene vengono rilette con un crop locale sulla stessa
+  posizione invece di ricadere sulla scala;
 - se una coppia diretta con unità esplicita ricorre nella maggior parte della
   cartella e i valori variano, quella diventa la strategia di cartella: i
   candidati scala/accessori vengono subordinati. Un frame con marker non letto
@@ -258,17 +298,48 @@ Regole operative implementate:
 - i soli suffissi ammessi sono `mm`, `cm` oppure nessun suffisso;
 - `dB` non e' mai un suffisso/unità depth valida;
 - `D`, `P` e `R` sono validi solo come singola lettera immediatamente a sinistra
-  del numero; `Depth` puo' stare a sinistra o sopra. Dopo il numero sono ammessi
-  solo `cm`, `mm` o nessuna lettera. Il crop deve quindi contenere una sola
-  espressione depth pulita, senza testo UI estraneo;
+  del numero e senza altre lettere adiacenti; `Depth` puo' stare a sinistra o
+  sopra. Dopo il numero sono ammessi solo `cm`, `mm` o nessuna lettera. Il crop
+  deve quindi contenere una sola espressione depth pulita, senza testo UI
+  estraneo;
+- marker di orientamento o UI come `X3`, `1X3`, `4X3`, `2D`, `FR`, `Hz`, `MHz`,
+  `Print` e suffissi `dB` sono sempre non-depth. Una `P` isolata del vendor
+  Philips non diventa direct se non e' seguita da un valore numerico valido;
+- errori OCR piccoli sull'unita' vengono normalizzati solo in contesti stretti:
+  per esempio `1icm`, `1lcm` o `1|cm` possono diventare `11cm`, mentre testo
+  accessorio non vicino a `cm/mm` non viene riscritto;
 - quando l'OCR concatena la riga direct con testo vicino, viene estratto solo il
   frammento `D/P/R/Depth + valore + cm/mm`; il bounding box preferito parte dal
   marker e termina subito dopo l'unità, non sull'intera riga OCR;
+- quando il marker `D/P/R` non e' affidabile perche' incollato ad altre lettere
+  ma il frammento `valore + cm/mm` e' leggibile e ricorre nella stessa posizione
+  della cartella, il modulo lo tratta come direct di interfaccia con strategia
+  `direct_interface_unit_stable`;
+- quando la label target e' una parola OCR separata a sinistra del numero
+  (`D 5.0` letto come due token), il modulo usa la strategia
+  `direct_left_context_stable`: sceglie prima la posizione direct stabile della
+  cartella e poi rilegge localmente quella ROI nei frame in cui il numero e'
+  troncato o non agganciato;
 - se in una cartella molti candidati scala affidabili sono accompagnati da `cm`
   o `mm`, la cartella passa in strategia unita' obbligatoria. Un numero nella
   stessa corsia/tacca con unita' OCR assente puo' comunque vincere soltanto se
   e' il massimo reale della scala: viene marcato `review` come "unita' attesa ma
   non letta", mai accettato ciecamente;
+- se la cartella ha scelto la scala con `cm/mm`, il metodo resta unico per tutte
+  le immagini: i falsi direct da lettere di orientamento vengono subordinati. Un
+  valore `cm/mm` sul bordo scala puo' essere endpoint anche se il detector vede
+  solo tacche intermedie; se la maggior parte dei valori validi cade nella stessa
+  corsia, i reject/rilevamenti ambigui vengono riletti con OCR mirato in quella
+  zona prima di arrendersi. La ROI resta stretta per non inglobare tratti grafici
+  che trasformano, per esempio, `12cm` in `42cm` o `142cm`. Se il miglior
+  candidato locale e' lontano dalla posizione ricorrente della cartella, la
+  rilettura usa un anchor mediano della cartella; per testi molto compatti viene
+  tentato anche `psm 8`;
+- i valori compatti ambigui `>=36cm` restano in review per possibile cifra OCR
+  errata o contaminazione; un valore in centimetri plausibile deve restare entro
+  il range fisico della depth ecografica. Anche valori con unita' sotto 45 mm
+  restano in review, perche' spesso derivano da marker vicini come `X3` o da una
+  prima cifra persa;
 - i cluster OCR con testo tipo `5cm` ma senza token numerico agganciato all'immagine
   non sono accettati automaticamente: vengono convertiti in valore solo come review
   debole, cosi' il tool mostra un candidato numerico correggibile invece di un box
