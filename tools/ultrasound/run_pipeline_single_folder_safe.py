@@ -228,6 +228,16 @@ def _build_step_checks(
     lr_marker_best_label = (row.get("lr_marker_best_label", "") or "").strip()
     lr_marker_best_score = _safe_float(row.get("lr_marker_best_score", "0"), 0.0)
     lr_marker_best_strategy = (row.get("lr_marker_best_search_strategy", "") or "").strip()
+    rect_depth_status = (row.get("rect_depth_status", "") or "").strip() or "review"
+    rect_depth_images = _safe_int(row.get("rect_depth_images_predicted", "0"), 0)
+    rect_depth_accepted = _safe_int(row.get("rect_depth_accepted_count", "0"), 0)
+    rect_depth_review = _safe_int(row.get("rect_depth_review_count", "0"), 0)
+    rect_depth_reject = _safe_int(row.get("rect_depth_reject_count", "0"), 0)
+    rect_depth_missing = _safe_int(row.get("rect_depth_missing_count", "0"), 0)
+    rect_depth_ratio = _safe_float(row.get("rect_depth_acceptance_ratio", "0"), 0.0)
+    rect_depth_mode = (row.get("rect_depth_majority_mode", "") or "").strip()
+    rect_depth_depths = (row.get("rect_depth_unique_depths_json", "") or "").strip()
+    rect_depth_source = (row.get("rect_depth_source", "") or "").strip()
     lt_images = _safe_int(row.get("lt_images_predicted", "0"), 0)
     lt_source = (row.get("lt_source", "") or "").strip()
     lt_majority = (row.get("lt_majority_label", "") or "").strip().upper()
@@ -339,6 +349,22 @@ def _build_step_checks(
             "threshold": float(lt_min_conf),
             "source": lt_source,
             "mode": "per_frame_only",
+        }
+    )
+    steps.append(
+        {
+            "step": "rect_depth_autonomous",
+            "status": rect_depth_status if rect_depth_source != "disabled" else "ok",
+            "images_predicted": rect_depth_images,
+            "accepted": rect_depth_accepted,
+            "review": rect_depth_review,
+            "reject": rect_depth_reject,
+            "missing": rect_depth_missing,
+            "accepted_ratio": rect_depth_ratio,
+            "majority_mode": rect_depth_mode,
+            "depths_mm": rect_depth_depths,
+            "source": rect_depth_source,
+            "mode": "ocr_classical_ranker_per_frame",
         }
     )
     steps.append(
@@ -2489,6 +2515,100 @@ def _build_lt_per_image_evidence(
     return out
 
 
+def _build_rect_depth_per_image_evidence(
+    *,
+    run_dir: Path,
+    pipeline_output: Path,
+) -> Dict[str, object]:
+    csv_path = pipeline_output / "rect_depth_autonomous_predictions.csv"
+    out: Dict[str, object] = {
+        "available": False,
+        "error": "",
+        "csv_path": csv_path.as_posix(),
+        "images_total": 0,
+        "status_counts": {"accepted": 0, "review": 0, "reject": 0, "missing": 0},
+        "mode_counts": {},
+        "accepted_ratio": 0.0,
+        "items": [],
+        "note": "Riconoscimento RECT_DEPTH autonomo per singolo frame (OCR + regole classiche + ranker tabellare).",
+    }
+    if not csv_path.is_file():
+        out["error"] = "file rect_depth_autonomous_predictions.csv non trovato"
+        return out
+
+    items: List[Dict[str, object]] = []
+    status_counts: Dict[str, int] = {"accepted": 0, "review": 0, "reject": 0, "missing": 0}
+    mode_counts: Dict[str, int] = {}
+    try:
+        with csv_path.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                image_path_s = str(row.get("image_path", "") or "").strip()
+                status = str(row.get("status", "") or "missing").strip().lower() or "missing"
+                mode = str(row.get("mode", "") or "").strip()
+                image_idx = _safe_int(str(row.get("image_index", "") or "0"), 0)
+                depth_mm = _safe_float(str(row.get("depth_mm", "") or "0"), 0.0)
+                score = _safe_float(str(row.get("score", "") or "0"), 0.0)
+                left = _safe_int(str(row.get("left", "") or "0"), 0)
+                top = _safe_int(str(row.get("top", "") or "0"), 0)
+                right = _safe_int(str(row.get("right", "") or "0"), 0)
+                bottom = _safe_int(str(row.get("bottom", "") or "0"), 0)
+
+                image_rel = image_path_s
+                if image_path_s:
+                    try:
+                        image_rel = Path(image_path_s).expanduser().relative_to(run_dir).as_posix()
+                    except Exception:
+                        try:
+                            image_rel = Path(image_path_s).expanduser().resolve().relative_to(run_dir).as_posix()
+                        except Exception:
+                            image_rel = image_path_s
+
+                if status not in status_counts:
+                    status_counts[status] = 0
+                status_counts[status] += 1
+                if mode:
+                    mode_counts[mode] = int(mode_counts.get(mode, 0)) + 1
+                items.append(
+                    {
+                        "image_index": int(image_idx),
+                        "image_rel": image_rel,
+                        "status": status,
+                        "score": float(score),
+                        "mode": mode,
+                        "depth_mm": float(depth_mm),
+                        "left": int(left),
+                        "top": int(top),
+                        "right": int(right),
+                        "bottom": int(bottom),
+                        "ocr_text": str(row.get("ocr_text", "") or ""),
+                        "reason": str(row.get("reason", "") or ""),
+                        "candidates": _safe_int(str(row.get("candidates", "") or "0"), 0),
+                        "run_dir": str(row.get("rect_depth_run_dir", "") or ""),
+                    }
+                )
+    except Exception as exc:
+        out["error"] = f"errore lettura rect_depth_autonomous_predictions.csv: {exc}"
+        return out
+
+    items.sort(
+        key=lambda x: (
+            int(x.get("image_index", 0)),
+            str(x.get("image_rel", "")),
+        )
+    )
+    accepted = int(status_counts.get("accepted", 0))
+    out["items"] = items
+    out["images_total"] = len(items)
+    out["status_counts"] = status_counts
+    out["mode_counts"] = mode_counts
+    out["accepted_ratio"] = float(accepted / max(1, len(items)))
+    out["available"] = bool(items)
+    if not items:
+        out["error"] = "nessuna riga valida nel CSV rect_depth_autonomous_predictions.csv"
+    return out
+
+
 def _build_lt_split_folders(
     *,
     run_dir: Path,
@@ -3342,6 +3462,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disattiva step classificazione L/T sui crop del rect.",
     )
     p.add_argument(
+        "--disable-rect-depth-autonomous",
+        action="store_true",
+        help="Disattiva lo step ufficiale RECT_DEPTH autonomo OCR/classico/ranker.",
+    )
+    p.add_argument(
+        "--rect-depth-max-images",
+        type=int,
+        default=0,
+        help="Numero massimo immagini per RECT_DEPTH autonomo (0=tutta la cartella).",
+    )
+    p.add_argument(
+        "--rect-depth-min-accepted-ratio",
+        type=float,
+        default=0.80,
+        help="Quota minima accepted per considerare ok lo step RECT_DEPTH.",
+    )
+    p.add_argument(
+        "--rect-depth-subprocess-timeout-sec",
+        type=float,
+        default=0.0,
+        help="Timeout globale subprocess RECT_DEPTH (0=nessun timeout globale).",
+    )
+    p.add_argument(
         "--no-generated-images",
         action="store_true",
         help="Non genera PNG di preview/overlay nelle evidenze; usa solo riferimenti agli originali.",
@@ -3519,6 +3662,12 @@ def main() -> int:
         str(float(args.lt_min_confidence)),
         "--lt-rect-checkpoint",
         args.lt_rect_checkpoint.expanduser().resolve().as_posix(),
+        "--rect-depth-max-images",
+        str(int(args.rect_depth_max_images)),
+        "--rect-depth-min-accepted-ratio",
+        str(float(args.rect_depth_min_accepted_ratio)),
+        "--rect-depth-subprocess-timeout-sec",
+        str(float(args.rect_depth_subprocess_timeout_sec)),
     ]
     if args.lr_marker_manual_seeds_file is not None:
         cmd.extend([
@@ -3527,6 +3676,8 @@ def main() -> int:
         ])
     if bool(args.disable_lt_rect_classifier):
         cmd.append("--disable-lt-rect-classifier")
+    if bool(args.disable_rect_depth_autonomous):
+        cmd.append("--disable-rect-depth-autonomous")
 
     _emit_event("pipeline_started", command=" ".join(cmd))
     stdout_lines: List[str] = []
@@ -3912,6 +4063,22 @@ def main() -> int:
             "lt_split_folders_skipped",
             reason=str(lt_split_folders.get("error", "") or "unknown"),
         )
+    rect_depth_per_image_evidence = _build_rect_depth_per_image_evidence(
+        run_dir=run_dir,
+        pipeline_output=pipeline_output,
+    )
+    if bool(rect_depth_per_image_evidence.get("available", False)):
+        _emit_event(
+            "rect_depth_per_image_built",
+            items=int(rect_depth_per_image_evidence.get("images_total", 0)),
+            status_counts=rect_depth_per_image_evidence.get("status_counts", {}),
+            accepted_ratio=float(rect_depth_per_image_evidence.get("accepted_ratio", 0.0) or 0.0),
+        )
+    else:
+        _emit_event(
+            "rect_depth_per_image_skipped",
+            reason=str(rect_depth_per_image_evidence.get("error", "") or "unknown"),
+        )
 
     model_evidence = {
         "vendor_checkpoint": str(pipeline_summary.get("vendor_checkpoint", "") or ""),
@@ -3969,6 +4136,12 @@ def main() -> int:
             if isinstance(pipeline_summary.get("lt_rect_class_names"), list)
             else []
         ),
+        "rect_depth_autonomous_enabled": bool(pipeline_summary.get("rect_depth_autonomous_enabled", False)),
+        "rect_depth_autonomous_max_images": int(pipeline_summary.get("rect_depth_autonomous_max_images", 0) or 0),
+        "rect_depth_autonomous_min_accepted_ratio": float(
+            pipeline_summary.get("rect_depth_autonomous_min_accepted_ratio", 0.0) or 0.0
+        ),
+        "pipeline_stage_rect_depth": str(pipeline_summary.get("pipeline_stage_rect_depth", "") or ""),
         "rect_vendor_map_path": str(pipeline_summary.get("rect_vendor_map_path", "") or ""),
         "rect_vendor_min_confidence": float(pipeline_summary.get("rect_vendor_min_confidence", 0.7) or 0.7),
         "rect_vendor_map_loaded": (
@@ -4118,6 +4291,7 @@ def main() -> int:
         "lr_marker_per_image": lr_marker_per_image_evidence,
         "lt_per_image": lt_per_image_evidence,
         "lt_split_folders": lt_split_folders,
+        "rect_depth_per_image": rect_depth_per_image_evidence,
         "model_evidence": model_evidence,
     }
 
@@ -4138,6 +4312,7 @@ def main() -> int:
         lr_marker_per_image_items=int(lr_marker_per_image_evidence.get("images_total", 0)),
         lt_per_image_items=int(lt_per_image_evidence.get("images_total", 0)),
         lt_split_items=int(lt_split_folders.get("created_total", 0)),
+        rect_depth_per_image_items=int(rect_depth_per_image_evidence.get("images_total", 0)),
     )
 
     summary = {

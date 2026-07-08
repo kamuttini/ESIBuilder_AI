@@ -7,13 +7,16 @@ Target lines:
 - #03 ID_PROBE (predicted from probe classifier; temporary stage before dedicated probe-recognition pipeline)
 - #06..#10 VIDEO metadata (from acquisition filename pattern)
 - #11 RECT_ECHO (predicted by rect detector)
+- #12 GROUP_ORIENTATION (symbol/depth group selector; currently emitted as symbol with orientation/depth evidence)
 - #13 RECT_NAME_ECHO (temporary: resolved from historical .fss by vendor/video, with interactive fallback)
 - #14 RECT_NAME_PROBE (temporary: resolved from historical .fss by vendor/probe/video, with interactive fallback)
-- #12 GROUP_ORIENTATION (forced to 4=symbol)
+- #16 RECT_ORIENTATION (official orientation evidence from SU/GIU + LR marker)
 
-Additional stage (operational diagnostics):
+Additional official folder-image stages:
 - SU/GIU orientation classification on rect crops (one prediction per frame crop).
+- LR marker orientation recognition (folder-level #16 plus per-frame evidence).
 - L/T orientation classification on rect crops (one prediction per frame crop).
+- RECT_DEPTH autonomous recognition (OCR/classical/ranker module, one prediction per frame).
 """
 
 from __future__ import annotations
@@ -209,6 +212,19 @@ class FolderPrediction:
     line_16_source: str
     line_16_marker_boxes_count: int
     line_16_groups_json: str
+    rect_depth_status: str
+    rect_depth_images_predicted: int
+    rect_depth_accepted_count: int
+    rect_depth_review_count: int
+    rect_depth_reject_count: int
+    rect_depth_missing_count: int
+    rect_depth_acceptance_ratio: float
+    rect_depth_majority_mode: str
+    rect_depth_unique_depths_json: str
+    rect_depth_source: str
+    rect_depth_output_dir: str
+    rect_depth_predictions_csv: str
+    rect_depth_summary_json: str
     lt_images_predicted: int
     lt_majority_label: str
     lt_majority_vote_ratio: float
@@ -1285,6 +1301,213 @@ def _predict_su_giu_on_rect_crops(
 
     out_rows.sort(key=lambda row: int(row.get("image_index", 0)))
     return out_rows
+
+
+def _safe_dir_name(value: str, fallback: str = "folder") -> str:
+    txt = str(value or "").strip()
+    out = re.sub(r"[^A-Za-z0-9_.-]+", "_", txt).strip("._")
+    return out or fallback
+
+
+def _line11_to_rect_depth_arg(line_11_rect_echo: str) -> str:
+    """Convert line #11 top|left|bottom|right| to depth CLI left,top,right,bottom."""
+    match = RECT_ECHO_RE.match(str(line_11_rect_echo or "").strip())
+    if not match:
+        return ""
+    top, left, bottom, right = [int(match.group(i)) for i in range(1, 5)]
+    if bottom <= top or right <= left:
+        return ""
+    return f"{left},{top},{right},{bottom}"
+
+
+def _rect_depth_unique_depths_json(rows: Sequence[Dict[str, object]]) -> str:
+    values: List[float] = []
+    for row in rows:
+        status = str(row.get("status", "") or "").strip().lower()
+        if status not in {"accepted", "review"}:
+            continue
+        try:
+            depth = float(row.get("depth_mm", "") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if depth > 0 and np.isfinite(depth):
+            values.append(round(float(depth), 3))
+    unique = sorted(set(values))
+    return json.dumps(unique, ensure_ascii=False, separators=(",", ":"))
+
+
+def _summarize_rect_depth_predictions(rows: Sequence[Dict[str, object]]) -> Dict[str, object]:
+    status_counts: Counter[str] = Counter(str(row.get("status", "") or "missing").strip().lower() for row in rows)
+    mode_counts: Counter[str] = Counter(str(row.get("mode", "") or "").strip() for row in rows if str(row.get("mode", "") or "").strip())
+    total = int(len(rows))
+    accepted = int(status_counts.get("accepted", 0))
+    majority_mode = mode_counts.most_common(1)[0][0] if mode_counts else ""
+    return {
+        "images_predicted": total,
+        "accepted_count": accepted,
+        "review_count": int(status_counts.get("review", 0)),
+        "reject_count": int(status_counts.get("reject", 0)),
+        "missing_count": int(status_counts.get("missing", 0)),
+        "acceptance_ratio": float(accepted / max(1, total)),
+        "majority_mode": majority_mode,
+        "unique_depths_json": _rect_depth_unique_depths_json(rows),
+        "status_counts": dict(status_counts),
+        "mode_counts": dict(mode_counts),
+    }
+
+
+def _run_rect_depth_autonomous_stage(
+    *,
+    folder: Path,
+    output_dir: Path,
+    folder_index: int,
+    python_bin: str,
+    vendor_pred: str,
+    probe_id: str,
+    line_11_rect_echo: str,
+    video_x: Optional[int],
+    video_y: Optional[int],
+    rotation_deg_clockwise: int,
+    max_images: int,
+    max_candidates_per_sample: int,
+    ocr_timeout: float,
+    scale_side_preference: str,
+    subprocess_timeout_sec: float,
+    min_accepted_ratio: float,
+) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
+    script = REPO_ROOT / "tools/depth/predict_rect_depth_autonomous.py"
+    folder_slug = _safe_dir_name(folder.name, fallback=f"folder_{folder_index:04d}")
+    folder_hash = hashlib.sha1(folder.as_posix().encode("utf-8")).hexdigest()[:8]
+    stage_dir = output_dir / "rect_depth_autonomous" / f"{folder_index:04d}_{folder_slug}_{folder_hash}"
+    summary_path = stage_dir / "summary.json"
+    predictions_csv = stage_dir / "rect_depth_autonomous_predictions.csv"
+    context_json = stage_dir / "pipeline_context.json"
+    log_path = stage_dir / "pipeline_subprocess.log"
+    out: Dict[str, object] = {
+        "status": "review",
+        "source": "not_run",
+        "output_dir": stage_dir.as_posix(),
+        "predictions_csv": predictions_csv.as_posix(),
+        "summary_json": summary_path.as_posix(),
+        "log_path": log_path.as_posix(),
+        "images_predicted": 0,
+        "accepted_count": 0,
+        "review_count": 0,
+        "reject_count": 0,
+        "missing_count": 0,
+        "acceptance_ratio": 0.0,
+        "majority_mode": "",
+        "unique_depths_json": "[]",
+        "error": "",
+    }
+    if not script.is_file():
+        out["source"] = "script_missing"
+        out["error"] = f"script non trovato: {script}"
+        return out, []
+
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    rect_echo_arg = _line11_to_rect_depth_arg(line_11_rect_echo)
+    context = {
+        "folder_path": folder.as_posix(),
+        "vendor_predicted": vendor_pred,
+        "manufacturer": vendor_pred,
+        "predicted_probe_id": probe_id,
+        "predicted_probe": probe_id,
+        "line_11_rect_echo": line_11_rect_echo,
+        "rect_echo_cli_left_top_right_bottom": rect_echo_arg,
+        "video_x": int(video_x or 0),
+        "video_y": int(video_y or 0),
+        "rotation_deg_clockwise": int(rotation_deg_clockwise),
+        "pipeline_stage": "official_rect_depth_autonomous",
+    }
+    context_json.write_text(json.dumps(context, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    cmd = [
+        python_bin,
+        script.as_posix(),
+        "--folder",
+        folder.as_posix(),
+        "--output-dir",
+        stage_dir.as_posix(),
+        "--context-json",
+        context_json.as_posix(),
+        "--max-images",
+        str(int(max_images)),
+        "--max-candidates-per-sample",
+        str(int(max_candidates_per_sample)),
+        "--ocr-timeout",
+        str(float(ocr_timeout)),
+    ]
+    if vendor_pred:
+        cmd.extend(["--vendor", str(vendor_pred)])
+    if probe_id:
+        cmd.extend(["--probe", str(probe_id)])
+    if rect_echo_arg:
+        cmd.extend(["--rect-echo", rect_echo_arg])
+    if scale_side_preference:
+        cmd.extend(["--scale-side-preference", str(scale_side_preference)])
+
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=(float(subprocess_timeout_sec) if float(subprocess_timeout_sec) > 0 else None),
+        )
+        log_path.write_text(proc.stdout or "", encoding="utf-8")
+    except subprocess.TimeoutExpired as exc:
+        out["source"] = "autonomous_depth_timeout"
+        out["error"] = f"timeout dopo {subprocess_timeout_sec:.1f}s"
+        log_path.write_text(str(exc.stdout or exc), encoding="utf-8")
+        return out, []
+    except Exception as exc:
+        out["source"] = "autonomous_depth_exception"
+        out["error"] = str(exc)
+        log_path.write_text(str(exc), encoding="utf-8")
+        return out, []
+
+    if proc.returncode != 0:
+        out["source"] = "autonomous_depth_failed"
+        out["error"] = f"returncode={proc.returncode}"
+        return out, []
+    if not predictions_csv.is_file():
+        out["source"] = "autonomous_depth_no_predictions_csv"
+        out["error"] = f"CSV predizioni non trovato: {predictions_csv}"
+        return out, []
+
+    rows: List[Dict[str, object]] = []
+    try:
+        with predictions_csv.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for image_index, row in enumerate(reader):
+                clean = {str(k): ("" if v is None else str(v)) for k, v in row.items()}
+                clean["folder_path"] = folder.as_posix()
+                clean["folder_name"] = folder.name
+                clean["folder_index"] = str(int(folder_index))
+                clean["image_index"] = str(int(image_index))
+                clean["rect_depth_run_dir"] = stage_dir.as_posix()
+                rows.append(clean)
+    except Exception as exc:
+        out["source"] = "autonomous_depth_read_error"
+        out["error"] = str(exc)
+        return out, []
+
+    summary = _summarize_rect_depth_predictions(rows)
+    out.update(summary)
+    out["source"] = "autonomous_ocr_classical_ranker"
+    if int(out["images_predicted"]) <= 0:
+        out["status"] = "review"
+        out["error"] = "nessuna predizione depth valida"
+    elif float(out["acceptance_ratio"]) >= float(min_accepted_ratio):
+        out["status"] = "ok"
+    else:
+        out["status"] = "review"
+        out["error"] = (
+            f"accepted_ratio={float(out['acceptance_ratio']):.3f} "
+            f"< min={float(min_accepted_ratio):.3f}"
+        )
+    return out, rows
 
 
 def _lr_marker_tooling_available() -> bool:
@@ -5943,6 +6166,48 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disattiva classificazione L/T sui crop del rect.",
     )
+    parser.add_argument(
+        "--disable-rect-depth-autonomous",
+        action="store_true",
+        help="Disattiva la tappa ufficiale RECT_DEPTH autonoma OCR/classica/ranker.",
+    )
+    parser.add_argument(
+        "--rect-depth-max-images",
+        type=int,
+        default=0,
+        help="Numero massimo immagini per RECT_DEPTH autonomo (0=tutta la cartella).",
+    )
+    parser.add_argument(
+        "--rect-depth-max-candidates-per-sample",
+        type=int,
+        default=24,
+        help="Numero massimo candidati OCR/classici per immagine nello step RECT_DEPTH.",
+    )
+    parser.add_argument(
+        "--rect-depth-ocr-timeout",
+        type=float,
+        default=8.0,
+        help="Timeout OCR per immagine nello step RECT_DEPTH.",
+    )
+    parser.add_argument(
+        "--rect-depth-subprocess-timeout-sec",
+        type=float,
+        default=0.0,
+        help="Timeout globale subprocess RECT_DEPTH (0=nessun timeout globale).",
+    )
+    parser.add_argument(
+        "--rect-depth-scale-side-preference",
+        type=str,
+        default="",
+        choices=("", "auto", "right", "left", "destra", "sinistra", "dx", "sx"),
+        help="Preferenza lato scala per RECT_DEPTH; vuoto=profilo vendor.",
+    )
+    parser.add_argument(
+        "--rect-depth-min-accepted-ratio",
+        type=float,
+        default=0.80,
+        help="Quota minima accepted per considerare ok lo step RECT_DEPTH a livello cartella.",
+    )
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--exclude-folder-regex", type=str, default=None)
     parser.add_argument("--max-folders", type=int, default=0, help="0=tutte")
@@ -6190,6 +6455,16 @@ def main() -> int:
         raise ValueError("--line13-image-size deve essere >= 0.")
     if not (0.0 <= args.lt_min_confidence <= 1.0):
         raise ValueError("--lt-min-confidence deve essere tra 0 e 1.")
+    if args.rect_depth_max_images < 0:
+        raise ValueError("--rect-depth-max-images deve essere >= 0.")
+    if args.rect_depth_max_candidates_per_sample <= 0:
+        raise ValueError("--rect-depth-max-candidates-per-sample deve essere > 0.")
+    if args.rect_depth_ocr_timeout <= 0:
+        raise ValueError("--rect-depth-ocr-timeout deve essere > 0.")
+    if args.rect_depth_subprocess_timeout_sec < 0:
+        raise ValueError("--rect-depth-subprocess-timeout-sec deve essere >= 0.")
+    if not (0.0 <= args.rect_depth_min_accepted_ratio <= 1.0):
+        raise ValueError("--rect-depth-min-accepted-ratio deve essere tra 0 e 1.")
     if not (0.0 <= args.line13_min_support <= 1.0):
         raise ValueError("--line13-min-support deve essere tra 0 e 1.")
     if not (0.0 <= args.line14_min_support <= 1.0):
@@ -6334,6 +6609,9 @@ def main() -> int:
     lr_marker_per_image_rows: List[Dict[str, object]] = []
     lr_marker_manual_seed_template_meta: List[Dict[str, object]] = []
     lt_per_image_rows: List[Dict[str, object]] = []
+    rect_depth_per_image_rows: List[Dict[str, object]] = []
+    rect_depth_status_counter: Counter[str] = Counter()
+    rect_depth_mode_counter: Counter[str] = Counter()
     lr_marker_templates_cache: Dict[str, Tuple[List[object], Dict[str, object]]] = {}
     lr_marker_template_roots = [p.expanduser().resolve() for p in args.lr_marker_template_roots]
     lr_marker_expanded_search_steps = (
@@ -8051,6 +8329,61 @@ def main() -> int:
         rect_red_payload_out["line11_model_checkpoint"] = rect_model_checkpoint
         rect_red_by_folder[folder.as_posix()] = rect_red_payload_out
 
+        rect_depth_status = "ok" if args.disable_rect_depth_autonomous else "review"
+        rect_depth_images_predicted = 0
+        rect_depth_accepted_count = 0
+        rect_depth_review_count = 0
+        rect_depth_reject_count = 0
+        rect_depth_missing_count = 0
+        rect_depth_acceptance_ratio = 0.0
+        rect_depth_majority_mode = ""
+        rect_depth_unique_depths_json = "[]"
+        rect_depth_source = "disabled" if args.disable_rect_depth_autonomous else "not_run"
+        rect_depth_output_dir = ""
+        rect_depth_predictions_csv = ""
+        rect_depth_summary_json = ""
+        if not args.disable_rect_depth_autonomous:
+            rect_depth_summary, rect_depth_rows = _run_rect_depth_autonomous_stage(
+                folder=folder,
+                output_dir=output_dir,
+                folder_index=idx,
+                python_bin=sys.executable,
+                vendor_pred=vendor_pred,
+                probe_id=probe_id,
+                line_11_rect_echo=line_11,
+                video_x=out_video_x,
+                video_y=out_video_y,
+                rotation_deg_clockwise=int(rotation_deg_clockwise),
+                max_images=int(args.rect_depth_max_images),
+                max_candidates_per_sample=int(args.rect_depth_max_candidates_per_sample),
+                ocr_timeout=float(args.rect_depth_ocr_timeout),
+                scale_side_preference=str(args.rect_depth_scale_side_preference),
+                subprocess_timeout_sec=float(args.rect_depth_subprocess_timeout_sec),
+                min_accepted_ratio=float(args.rect_depth_min_accepted_ratio),
+            )
+            rect_depth_per_image_rows.extend(rect_depth_rows)
+            rect_depth_status = str(rect_depth_summary.get("status", "review") or "review")
+            rect_depth_images_predicted = int(rect_depth_summary.get("images_predicted", 0) or 0)
+            rect_depth_accepted_count = int(rect_depth_summary.get("accepted_count", 0) or 0)
+            rect_depth_review_count = int(rect_depth_summary.get("review_count", 0) or 0)
+            rect_depth_reject_count = int(rect_depth_summary.get("reject_count", 0) or 0)
+            rect_depth_missing_count = int(rect_depth_summary.get("missing_count", 0) or 0)
+            rect_depth_acceptance_ratio = float(rect_depth_summary.get("acceptance_ratio", 0.0) or 0.0)
+            rect_depth_majority_mode = str(rect_depth_summary.get("majority_mode", "") or "")
+            rect_depth_unique_depths_json = str(rect_depth_summary.get("unique_depths_json", "[]") or "[]")
+            rect_depth_source = str(rect_depth_summary.get("source", "") or "")
+            rect_depth_output_dir = str(rect_depth_summary.get("output_dir", "") or "")
+            rect_depth_predictions_csv = str(rect_depth_summary.get("predictions_csv", "") or "")
+            rect_depth_summary_json = str(rect_depth_summary.get("summary_json", "") or "")
+            rect_depth_status_counter[rect_depth_status] += 1
+            if rect_depth_majority_mode:
+                rect_depth_mode_counter[rect_depth_majority_mode] += 1
+            rect_depth_error = str(rect_depth_summary.get("error", "") or "").strip()
+            if rect_depth_error:
+                warnings.append(f"{folder.name}: rect_depth_autonomous {rect_depth_status}: {rect_depth_error}")
+        else:
+            rect_depth_status_counter[rect_depth_status] += 1
+
         id_echo, id_echo_source, id_echo_support = echo_resolver.resolve(
             vendor=vendor_pred,
             probe_id=probe_id if probe_id else None,
@@ -8171,6 +8504,11 @@ def main() -> int:
             review_reasons.append("missing_lt_predictions")
         if lt_model is not None and lt_images_predicted > 0 and lt_mean_confidence < float(args.lt_min_confidence):
             review_reasons.append("low_lt_conf")
+        if not args.disable_rect_depth_autonomous:
+            if rect_depth_images_predicted <= 0:
+                review_reasons.append("missing_rect_depth_predictions")
+            elif rect_depth_status != "ok":
+                review_reasons.append("rect_depth_autonomous_review")
 
         status = "ok" if not review_reasons else "review"
         status_counter[status] += 1
@@ -8239,6 +8577,19 @@ def main() -> int:
             line_16_source=line_16_source,
             line_16_marker_boxes_count=line_16_marker_boxes_count,
             line_16_groups_json=line_16_groups_json,
+            rect_depth_status=rect_depth_status,
+            rect_depth_images_predicted=rect_depth_images_predicted,
+            rect_depth_accepted_count=rect_depth_accepted_count,
+            rect_depth_review_count=rect_depth_review_count,
+            rect_depth_reject_count=rect_depth_reject_count,
+            rect_depth_missing_count=rect_depth_missing_count,
+            rect_depth_acceptance_ratio=rect_depth_acceptance_ratio,
+            rect_depth_majority_mode=rect_depth_majority_mode,
+            rect_depth_unique_depths_json=rect_depth_unique_depths_json,
+            rect_depth_source=rect_depth_source,
+            rect_depth_output_dir=rect_depth_output_dir,
+            rect_depth_predictions_csv=rect_depth_predictions_csv,
+            rect_depth_summary_json=rect_depth_summary_json,
             lt_images_predicted=lt_images_predicted,
             lt_majority_label=lt_majority_label,
             lt_majority_vote_ratio=lt_majority_vote_ratio,
@@ -8379,6 +8730,19 @@ def main() -> int:
                 "line_16_source",
                 "line_16_marker_boxes_count",
                 "line_16_groups_json",
+                "rect_depth_status",
+                "rect_depth_images_predicted",
+                "rect_depth_accepted_count",
+                "rect_depth_review_count",
+                "rect_depth_reject_count",
+                "rect_depth_missing_count",
+                "rect_depth_acceptance_ratio",
+                "rect_depth_majority_mode",
+                "rect_depth_unique_depths_json",
+                "rect_depth_source",
+                "rect_depth_output_dir",
+                "rect_depth_predictions_csv",
+                "rect_depth_summary_json",
                 "lt_images_predicted",
                 "lt_majority_label",
                 "lt_majority_vote_ratio",
@@ -8500,6 +8864,19 @@ def main() -> int:
                     "line_16_source": p.line_16_source,
                     "line_16_marker_boxes_count": p.line_16_marker_boxes_count,
                     "line_16_groups_json": p.line_16_groups_json,
+                    "rect_depth_status": p.rect_depth_status,
+                    "rect_depth_images_predicted": p.rect_depth_images_predicted,
+                    "rect_depth_accepted_count": p.rect_depth_accepted_count,
+                    "rect_depth_review_count": p.rect_depth_review_count,
+                    "rect_depth_reject_count": p.rect_depth_reject_count,
+                    "rect_depth_missing_count": p.rect_depth_missing_count,
+                    "rect_depth_acceptance_ratio": f"{p.rect_depth_acceptance_ratio:.6f}",
+                    "rect_depth_majority_mode": p.rect_depth_majority_mode,
+                    "rect_depth_unique_depths_json": p.rect_depth_unique_depths_json,
+                    "rect_depth_source": p.rect_depth_source,
+                    "rect_depth_output_dir": p.rect_depth_output_dir,
+                    "rect_depth_predictions_csv": p.rect_depth_predictions_csv,
+                    "rect_depth_summary_json": p.rect_depth_summary_json,
                     "lt_images_predicted": p.lt_images_predicted,
                     "lt_majority_label": p.lt_majority_label,
                     "lt_majority_vote_ratio": f"{p.lt_majority_vote_ratio:.6f}",
@@ -8845,6 +9222,41 @@ def main() -> int:
                 }
             )
 
+    rect_depth_per_image_csv = output_dir / "rect_depth_autonomous_predictions.csv"
+    with rect_depth_per_image_csv.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=[
+                "folder_path",
+                "folder_name",
+                "folder_index",
+                "image_index",
+                "image_path",
+                "status",
+                "score",
+                "ranker_score",
+                "mode",
+                "depth_mm",
+                "left",
+                "top",
+                "right",
+                "bottom",
+                "ocr_text",
+                "reason",
+                "best_direct_score",
+                "best_direct_text",
+                "best_scale_score",
+                "best_scale_value_mm",
+                "best_scale_text",
+                "candidates",
+                "rect_depth_run_dir",
+            ],
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        for row in rect_depth_per_image_rows:
+            writer.writerow(row)
+
     preview_txt = output_dir / "folder_fss_head_preview.txt"
     lines: List[str] = []
     for p in predictions:
@@ -8910,6 +9322,16 @@ def main() -> int:
             f"source={p.line_16_source or '-'} "
             f"marker_boxes={p.line_16_marker_boxes_count} "
             "thresholds=pending"
+        )
+        lines.append(
+            "rect_depth="
+            f"status={p.rect_depth_status or '-'} "
+            f"accepted={p.rect_depth_accepted_count}/{p.rect_depth_images_predicted} "
+            f"review={p.rect_depth_review_count} reject={p.rect_depth_reject_count} "
+            f"ratio={p.rect_depth_acceptance_ratio:.3f} "
+            f"mode={p.rect_depth_majority_mode or '-'} "
+            f"depths={p.rect_depth_unique_depths_json or '[]'} "
+            f"source={p.rect_depth_source or '-'}"
         )
         lines.append(
             "rotation_cw="
@@ -9028,6 +9450,13 @@ def main() -> int:
         "lt_rect_batch_size": int(lt_batch_size),
         "lt_rect_class_names": list(lt_class_names) if lt_model is not None else [],
         "lt_min_confidence": float(args.lt_min_confidence),
+        "rect_depth_autonomous_enabled": not bool(args.disable_rect_depth_autonomous),
+        "rect_depth_autonomous_max_images": int(args.rect_depth_max_images),
+        "rect_depth_autonomous_max_candidates_per_sample": int(args.rect_depth_max_candidates_per_sample),
+        "rect_depth_autonomous_ocr_timeout": float(args.rect_depth_ocr_timeout),
+        "rect_depth_autonomous_subprocess_timeout_sec": float(args.rect_depth_subprocess_timeout_sec),
+        "rect_depth_autonomous_scale_side_preference": str(args.rect_depth_scale_side_preference),
+        "rect_depth_autonomous_min_accepted_ratio": float(args.rect_depth_min_accepted_ratio),
         "line13_min_support": args.line13_min_support,
         "line14_min_support": args.line14_min_support,
         "interactive_topk": args.interactive_topk,
@@ -9069,6 +9498,11 @@ def main() -> int:
         "pipeline_stage_lt_rect": (
             "per_frame_rect_crop_classifier"
             if lt_model is not None
+            else "disabled"
+        ),
+        "pipeline_stage_rect_depth": (
+            "autonomous_ocr_classical_ranker_after_official_rect"
+            if not bool(args.disable_rect_depth_autonomous)
             else "disabled"
         ),
         "rect_sampling_mode": "all_images_per_folder",
@@ -9123,6 +9557,10 @@ def main() -> int:
         "lt_majority_counts": dict(sorted(lt_majority_counter.items())),
         "lt_per_image_predictions_csv": lt_per_image_csv.as_posix(),
         "lt_per_image_predictions_count": len(lt_per_image_rows),
+        "rect_depth_status_counts": dict(rect_depth_status_counter),
+        "rect_depth_mode_counts": dict(rect_depth_mode_counter),
+        "rect_depth_autonomous_predictions_csv": rect_depth_per_image_csv.as_posix(),
+        "rect_depth_autonomous_predictions_count": len(rect_depth_per_image_rows),
         "rect_red_pipeline_json": rect_red_json.as_posix(),
         "rect_red_pipeline_folders": len(rect_red_by_folder),
         "warnings_count": len(warnings),
@@ -9137,6 +9575,7 @@ def main() -> int:
     print(f"SU/GIU per-image CSV: {su_giu_per_image_csv}", flush=True)
     print(f"LR marker per-image CSV: {lr_marker_per_image_csv}", flush=True)
     print(f"L/T per-image CSV: {lt_per_image_csv}", flush=True)
+    print(f"RECT_DEPTH autonomous CSV: {rect_depth_per_image_csv}", flush=True)
     print(f"Preview TXT: {preview_txt}", flush=True)
     print(f"Rect Red JSON: {rect_red_json}", flush=True)
     print(f"Summary JSON: {summary_json}", flush=True)
