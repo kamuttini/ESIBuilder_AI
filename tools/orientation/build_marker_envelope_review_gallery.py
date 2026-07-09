@@ -66,6 +66,12 @@ body.noboxes .box { display: none; }
   border: 1px solid #444; border-radius: 6px; padding: 6px 8px; font-size: 13px; font-family: inherit; resize: vertical; }
 .comment:focus { outline: 1px solid #2f6fed; }
 .card.commented { outline: 2px solid #ffd76e33; }
+.box.fix { border: 2px solid #00e5ff; box-shadow: 0 0 6px #00e5ff88; }
+.box.fix .lbl { position: absolute; bottom: -18px; right: 0; color: #00e5ff; font-size: 11px; text-shadow: 0 0 3px #000; }
+.card.wrong { outline: 2px solid #ef4444; }
+.cardbtns { margin-top: 6px; display: flex; gap: 8px; }
+.cardbtns button { background: #333; color: #ddd; border: 0; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.cardbtns button.active { background: #7f1d1d; color: #fecaca; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
 .badge.ok { background: #14532d; color: #86efac; }
 .badge.partial { background: #713f12; color: #fde68a; }
@@ -94,10 +100,82 @@ const wraps = Array.from(document.querySelectorAll('.imgwrap'));
 wraps.forEach(w => renderBoxes(w, JSON.parse(w.dataset.boxes)));
 
 const STORE = 'marker_envelope_gallery_comments_v1';
+const FIX_STORE = 'marker_envelope_gallery_corrections_v1';
 let comments = {};
+let fixes = {};
 try { comments = JSON.parse(localStorage.getItem(STORE) || '{}'); } catch (e) {}
+try { fixes = JSON.parse(localStorage.getItem(FIX_STORE) || '{}'); } catch (e) {}
 const cards = Array.from(document.querySelectorAll('.card'));
 const vComment = document.getElementById('vComment');
+
+function saveFixes() { localStorage.setItem(FIX_STORE, JSON.stringify(fixes)); }
+function getFix(key) { return fixes[key] || {}; }
+function setFix(key, patch) {
+  const cur = Object.assign({}, fixes[key] || {}, patch);
+  if (!cur.wrong && !cur.box) delete fixes[key]; else fixes[key] = cur;
+  saveFixes();
+  refreshFixUI(key);
+}
+function renderFix(container, key) {
+  container.querySelectorAll('.box.fix').forEach(b => b.remove());
+  const fix = getFix(key);
+  if (!fix.box) return;
+  const div = document.createElement('div');
+  div.className = 'box fix';
+  div.style.top = fix.box.t + '%'; div.style.left = fix.box.l + '%';
+  div.style.height = fix.box.h + '%'; div.style.width = fix.box.w + '%';
+  const s = document.createElement('span'); s.className = 'lbl'; s.textContent = 'box corretto'; div.appendChild(s);
+  container.appendChild(div);
+}
+function refreshFixUI(key) {
+  const card = cards.find(c => c.dataset.key === key);
+  if (card) {
+    const fix = getFix(key);
+    card.classList.toggle('wrong', !!fix.wrong);
+    const btn = card.querySelector('.btn-wrong');
+    if (btn) { btn.classList.toggle('active', !!fix.wrong); btn.textContent = fix.wrong ? '✕ template errato' : 'Segna errato'; }
+    renderFix(card.querySelector('.imgwrap'), key);
+  }
+  if (current >= 0 && wraps[current].closest('.card').dataset.key === key) {
+    renderFix(frame, key);
+    const vw = document.getElementById('vWrong');
+    if (vw) { const fix = getFix(key); vw.classList.toggle('active', !!fix.wrong); vw.textContent = fix.wrong ? '✕ template errato' : 'Segna errato'; }
+  }
+}
+function attachDraw(container, keyGetter) {
+  let startX = null, startY = null, ghost = null;
+  container.addEventListener('mousedown', e => {
+    if (!e.shiftKey) return;
+    e.preventDefault(); e.stopPropagation();
+    const r = container.getBoundingClientRect();
+    startX = (e.clientX - r.left) / r.width; startY = (e.clientY - r.top) / r.height;
+    ghost = document.createElement('div');
+    ghost.className = 'box fix';
+    container.appendChild(ghost);
+    const move = ev => {
+      const x = Math.min(Math.max((ev.clientX - r.left) / r.width, 0), 1);
+      const y = Math.min(Math.max((ev.clientY - r.top) / r.height, 0), 1);
+      const t = Math.min(startY, y), l = Math.min(startX, x);
+      ghost.style.top = (t * 100) + '%'; ghost.style.left = (l * 100) + '%';
+      ghost.style.height = (Math.abs(y - startY) * 100) + '%'; ghost.style.width = (Math.abs(x - startX) * 100) + '%';
+    };
+    const up = ev => {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      const x = Math.min(Math.max((ev.clientX - r.left) / r.width, 0), 1);
+      const y = Math.min(Math.max((ev.clientY - r.top) / r.height, 0), 1);
+      ghost.remove(); ghost = null;
+      const box = {
+        t: +(Math.min(startY, y) * 100).toFixed(3), l: +(Math.min(startX, x) * 100).toFixed(3),
+        h: +(Math.abs(y - startY) * 100).toFixed(3), w: +(Math.abs(x - startX) * 100).toFixed(3),
+      };
+      if (box.h < 0.2 || box.w < 0.2) return;  // ignore accidental clicks
+      setFix(keyGetter(), { box: box, wrong: true });
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
+}
 function setComment(key, value) {
   if (value.trim()) comments[key] = value; else delete comments[key];
   localStorage.setItem(STORE, JSON.stringify(comments));
@@ -113,20 +191,44 @@ cards.forEach(c => {
   ta.value = comments[c.dataset.key] || '';
   c.classList.toggle('commented', !!ta.value.trim());
   ta.addEventListener('input', () => setComment(c.dataset.key, ta.value));
+  const btn = c.querySelector('.btn-wrong');
+  if (btn) btn.addEventListener('click', e => {
+    e.stopPropagation();
+    setFix(c.dataset.key, { wrong: !getFix(c.dataset.key).wrong });
+  });
+  const del = c.querySelector('.btn-delbox');
+  if (del) del.addEventListener('click', e => {
+    e.stopPropagation();
+    setFix(c.dataset.key, { box: null });
+  });
+  attachDraw(c.querySelector('.imgwrap'), () => c.dataset.key);
+  refreshFixUI(c.dataset.key);
 });
+const DIMS = {};
+cards.forEach(c => { DIMS[c.dataset.key] = [parseInt(c.dataset.w || '0'), parseInt(c.dataset.h || '0')]; });
 const exportBtn = document.getElementById('exportComments');
 if (exportBtn) exportBtn.onclick = () => {
-  const lines = [['folder', 'image_id', 'comment']];
-  Object.keys(comments).forEach(k => {
-    const v = comments[k].trim();
-    if (!v) return;
+  const lines = [['folder', 'image_id', 'comment', 'wrong_template', 'corr_top', 'corr_left', 'corr_bottom', 'corr_right']];
+  const keys = new Set(Object.keys(comments).concat(Object.keys(fixes)));
+  keys.forEach(k => {
+    const v = (comments[k] || '').trim();
+    const fix = fixes[k] || {};
+    if (!v && !fix.wrong && !fix.box) return;
     const i = k.indexOf('::');
-    lines.push([k.slice(0, i), k.slice(i + 2), v]);
+    let corr = ['', '', '', ''];
+    const wh = DIMS[k] || [0, 0];
+    if (fix.box && wh[0] > 0) {
+      corr = [
+        Math.round(fix.box.t / 100 * wh[1]), Math.round(fix.box.l / 100 * wh[0]),
+        Math.round((fix.box.t + fix.box.h) / 100 * wh[1]), Math.round((fix.box.l + fix.box.w) / 100 * wh[0]),
+      ];
+    }
+    lines.push([k.slice(0, i), k.slice(i + 2), v, fix.wrong ? 1 : 0].concat(corr));
   });
   const csv = lines.map(r => r.map(x => '"' + String(x).replace(/"/g, '""') + '"').join(',')).join('\\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob(['\\ufeff' + csv], {type: 'text/csv;charset=utf-8'}));
-  a.download = 'commenti_marker_envelope.csv';
+  a.download = 'review_marker_correzioni.csv';
   a.click();
 };
 
@@ -154,9 +256,23 @@ function openViewer(i) {
   if (vMeta) vMeta.innerHTML = card.querySelector('.meta').innerHTML;
   vComment.value = comments[card.dataset.key] || '';
   viewer.classList.add('open');
+  renderFix(frame, card.dataset.key);
+  refreshFixUI(card.dataset.key);
 }
 function closeViewer() { viewer.classList.remove('open'); current = -1; }
-wraps.forEach((w, i) => w.addEventListener('click', () => openViewer(i)));
+wraps.forEach((w, i) => w.addEventListener('click', e => { if (!e.shiftKey) openViewer(i); }));
+if (frame) attachDraw(frame, () => wraps[current].closest('.card').dataset.key);
+const vWrongBtn = document.getElementById('vWrong');
+if (vWrongBtn) vWrongBtn.onclick = () => {
+  if (current < 0) return;
+  const key = wraps[current].closest('.card').dataset.key;
+  setFix(key, { wrong: !getFix(key).wrong });
+};
+const vDelBtn = document.getElementById('vDelBox');
+if (vDelBtn) vDelBtn.onclick = () => {
+  if (current < 0) return;
+  setFix(wraps[current].closest('.card').dataset.key, { box: null });
+};
 if (viewer) {
   document.getElementById('vClose').onclick = closeViewer;
   document.getElementById('vPrev').onclick = () => openViewer(current - 1);
@@ -238,6 +354,8 @@ def _page(title: str, toolbar: str, content: str) -> str:
     <button id="vPrev">← Prec</button>
     <button id="vNext">Succ →</button>
     <span id="vTitle"></span>
+    <button id="vWrong">Segna errato</button>
+    <button id="vDelBox">Cancella box</button>
     <input id="vComment" placeholder="Commento..." style="flex:1; background:#1a1d23; color:#ffd76e; border:1px solid #444; border-radius:6px; padding:6px 8px; font-size:13px;">
   </div>
   <div class="bar" style="padding-top:0"><span id="vMeta"></span></div>
@@ -358,11 +476,13 @@ def main() -> int:
             )
             comment_key = f"{folder}::{row['image_id']}"
             cards.append(
-                f"<div class='card' data-key='{html.escape(comment_key, quote=True)}'>"
+                f"<div class='card' data-key='{html.escape(comment_key, quote=True)}' data-w='{width}' data-h='{height}'>"
                 f"<div class='title'>{html.escape(str(row['image_id']))}</div>"
                 f"<div class='imgwrap' data-boxes='{html.escape(json.dumps(boxes), quote=True)}' data-src='{html.escape(href, quote=True)}'>"
                 f"<img loading='lazy' src='{html.escape(href, quote=True)}'></div>"
                 f"<div class='meta'>{meta}</div>"
+                "<div class='cardbtns'><button class='btn-wrong'>Segna errato</button>"
+                "<button class='btn-delbox'>Cancella box corretto</button></div>"
                 "<textarea class='comment' placeholder='Commento...' rows='2'></textarea>"
                 "</div>"
             )
@@ -379,7 +499,8 @@ def main() -> int:
             "<span style='color:#ff2828'>■ marker trovato</span>"
             "<span style='color:#3c78ff'>■ rect ecografico (#11 / per-immagine)</span>"
             "<span style='color:#ffd000'>▨ template vendor #13</span></span>"
-            "<span class='hint'>Click = tutto schermo · B = box on/off · ←/→ · Esc</span></div>"
+            "<span class='hint'>Click = tutto schermo · <b>Shift+trascina = disegna il box corretto</b> · "
+            "B = box on/off · ←/→ · Esc · azzurro = box corretto disegnato da te</span></div>"
             f"<p>Vendor: <b>{html.escape(str(vendor))}</b> · {len(rows)} immagini ({size_txt}) · "
             f"marker trovati: {n_marker}/{len(rows)} · envelope: {html.escape(env_txt)} · {badge}</p>"
         )
