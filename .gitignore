@@ -22,6 +22,14 @@ data/
 # Generated pipeline artifacts, model outputs, datasets, previews, and reports
 artifacts/
 
+# Pipeline artifacts
+# Keep artifacts trackable so official models, maps, metadata, and references
+# can be committed. Only volatile run outputs stay local.
+artifacts/**/runs/
+artifacts/**/workbench_ui/
+artifacts/**/logs/
+artifacts/**/*.log
+
 # Nested legacy application repository; manage it from its own git repo.
 OldSoftwareEsiBuilder/
 
