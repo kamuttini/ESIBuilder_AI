@@ -33,7 +33,8 @@ Criterio di chiusura fase: orientation e scala con metriche a livello degli altr
 
 ## Fase 2 — Chiusura loop `.fss` end-to-end (~2-3 settimane)
 
-- [ ] Integrare rect_depth nella pipeline `fss_head` (segue `docs/rect_depth_autonomous_integration.md`, input via `--context-json`)
+- [ ] **Writer `.fss`**: la pipeline oggi produce solo CSV/preview — serve il modulo che assembla il file `.fss` vero dai valori predetti (vedi `docs/albero_decisionale_pipeline_fss_head_2026-07-08.md`)
+- [ ] Validare rect_depth nella pipeline `fss_head` su batch reale (hook subprocess già presente nel codice, contrariamente ai report)
 - [ ] Integrare orientation e scala consolidate in Fase 1
 - [ ] Run su batch reale completo → validazione automatica con `compare_fss.py` e `audit_setup_outputs.py`
 - [ ] Ridurre review rate vendor/probe sotto target (<3%) con tuning soglie

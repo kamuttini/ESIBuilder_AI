@@ -135,10 +135,16 @@ Policy trasversale bassa confidenza (`--low-confidence-policy`, default `ask_use
 
 ## Punti aperti emersi dalla revisione
 
+Aggiornamento 2026-07-09 — risolti nei commit `8c21bc3` (pipeline) e `275d823` (workbench):
+
+1. ~~Margine vendor non usato come gate~~ → **fatto**: nuovo `--vendor-min-margin` (default 0.0 = comportamento storico), stessa policy low-confidence + review reason `low_vendor_margin`.
+2. ~~`--rect-sample-per-folder` ignorato~~ → **fatto**: implementato campionamento uniforme (0 = tutti i frame, default invariato).
+3. ~~Soglie incoerenti core/wrapper~~ → **fatto**: wrapper allineato a probe 0.40.
+4. ~~`GroupOrientationResolver` dead code~~ → **fatto**: rimosso (recuperabile da tag `v0-checkpoint-pre-claude`); #12 resta forzata a 4.
+5. **Nuovo**: diff prima/dopo nel rerun selettivo del workbench (`GET /api/runs/<id>/recompute_diff` + pannello UI, caricato automaticamente dopo ogni ricalcolo).
+
+Ancora aperti:
+
 1. **Manca il writer `.fss`**: il gap principale per chiudere il loop end-to-end (Fase 2 roadmap) — dal CSV al file `.fss` validabile con `compare_fss.py`.
-2. **rect_depth è già integrato nel codice** (subprocess hook), contrariamente a quanto indicato nei report di stato: da validare su batch reale, non da integrare.
-3. `GroupOrientationResolver` è dead code; #12 sempre forzata a 4.
-4. Il margine vendor (top1−top2) è calcolato ma non usato come gate: possibile tuning gratuito per ridurre i review.
-5. Probe senza OCR refine nella pipeline (esiste come script separato): possibile integrazione.
-6. `--rect-sample-per-folder` ignorato (rect gira sempre su tutti i frame): flag da rimuovere o implementare.
-7. Soglie default incoerenti tra core e wrapper (probe 0.40 vs 0.50).
+2. **rect_depth è già integrato nel codice** (subprocess hook), contrariamente ai report di stato: da validare su batch reale, non da integrare.
+3. Probe senza OCR refine nella pipeline (esiste come script separato): possibile integrazione.
