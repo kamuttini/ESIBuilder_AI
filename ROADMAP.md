@@ -67,6 +67,7 @@ Criterio di chiusura: batch reale con % compatibilità concordata e review rate 
 
 ## Rischi aperti
 
+- Orientation, casi limite legacy (da pensarci per gli sviluppi futuri): alcuni ecografi hanno template di orientamento ribaltati/speculari che rompevano il match del vecchio software — quei progetti sono stati configurati per un solo orientamento (spesso UD) e la loro riga #16 contiene 4 copie dello stesso box (non NF/LR/UD/LRUD). Il nuovo detector dovrà gestirli esplicitamente. Inoltre il template può cambiare dimensione tra immagini della stessa cartella (serve matching multi-scala).
 - Probe: classi rare/unseen con recall basso — mitigare con policy review + OCR refine
 - Orientation: trainer da rifare, effort incerto
 - Dipendenza da GT scala: la qualità del blocco dipende dal backlog correzioni

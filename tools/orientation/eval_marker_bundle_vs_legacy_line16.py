@@ -98,6 +98,9 @@ def _parse_fss(fss_path: Path) -> Tuple[Rect, Dict[str, Rect], Dict[str, bool]]:
         boxes[group] = (int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]))
 
     duplicated = {g: (g != "NF" and boxes[g] == boxes["NF"]) for g in GROUPS}
+    # All 4 entries identical -> legacy project calibrated for a SINGLE orientation
+    # (old workaround for mirrored templates). Slot order does NOT mean NF/LR/UD/LRUD
+    # there, so line-16 boxes cannot be used as per-orientation GT.
     return rect, boxes, duplicated
 
 
@@ -326,7 +329,10 @@ def main() -> int:
             continue
 
         # Groups whose legacy line-16 box is unique (not a copy of NF -> "not calibrated").
-        unique_groups = [g for g in GROUPS if g == "NF" or not gt.line16_duplicated[g]]
+        single_orientation = all(gt.line16_duplicated[g] for g in GROUPS if g != "NF")
+        unique_groups = (
+            [] if single_orientation else [g for g in GROUPS if g == "NF" or not gt.line16_duplicated[g]]
+        )
         gt_by_id = {path.relative_to(gt.folder).as_posix(): (group, source) for path, group, source in samples}
         n_eval = n_correct = n_review = 0
         n_box_eval = n_box_agree = 0
@@ -381,7 +387,7 @@ def main() -> int:
             )
 
         iou_by_group: Dict[str, Optional[float]] = {g: None for g in GROUPS}
-        for group in GROUPS:
+        for group in GROUPS if not single_orientation else []:
             markers = markers_by_group.get(group, [])
             if len(markers) < args.min_markers_per_envelope:
                 continue
@@ -422,6 +428,7 @@ def main() -> int:
                 "accuracy": round(n_correct / n_eval, 4) if n_eval else "",
                 "n_box_eval": n_box_eval,
                 "box_agree_rate": round(n_box_agree / n_box_eval, 4) if n_box_eval else "",
+                "line16_single_orientation": int(single_orientation),
                 "review_rate": round(n_review / len(analysis.rows), 4),
                 "template_selected": analysis.template.name,
                 **{f"iou_{g.lower()}": ("" if iou_by_group[g] is None else round(iou_by_group[g], 4)) for g in GROUPS},

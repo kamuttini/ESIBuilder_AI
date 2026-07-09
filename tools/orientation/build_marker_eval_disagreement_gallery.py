@@ -104,10 +104,12 @@ def _boxes_payload(
     if rect_echo:
         boxes.append({"kind": "rect", "label": "", **norm(rect_echo)})
     if line16:
+        single_orientation = bool(duplicated) and all(duplicated.get(g) for g in GROUPS if g != "NF")
         for group in GROUPS:
             if duplicated and group != "NF" and duplicated.get(group):
                 continue
-            boxes.append({"kind": "legacy", "label": group, **norm(line16[group])})
+            label = "CAL (unico stato)" if (single_orientation and group == "NF") else group
+            boxes.append({"kind": "legacy", "label": label, **norm(line16[group])})
     if marker:
         boxes.append({"kind": "marker", "label": "", **norm(marker)})
     return boxes
@@ -130,6 +132,15 @@ def main() -> int:
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = [dict(r) for r in csv.DictReader(handle)]
 
+    gt_cache_pre: Dict[str, object] = {}
+
+    def _is_single_orientation(folder: str) -> bool:
+        gt = _load_folder_gt(args.dataset_root, folder, gt_cache_pre)
+        if not gt:
+            return False
+        _, _, duplicated = gt
+        return all(duplicated.get(g) for g in GROUPS if g != "NF")
+
     rng = random.Random(args.seed)
     by_category: Dict[str, List[Dict[str, str]]] = {c: [] for c in CATEGORY_ORDER}
     for row in rows:
@@ -141,7 +152,12 @@ def main() -> int:
         if row.get("box_agree", "") == "0":
             by_category["group_mismatch"].append(row)
             agree_ok = False
-        if marker and row.get("status") == "ok" and not row.get("gt_by_box"):
+        if (
+            marker
+            and row.get("status") == "ok"
+            and not row.get("gt_by_box")
+            and not _is_single_orientation(str(row["folder"]))  # line16 not usable as GT there
+        ):
             by_category["outside_legacy_boxes"].append(row)
             agree_ok = False
         if row.get("status") not in ("ok", ""):
