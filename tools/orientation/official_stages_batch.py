@@ -123,6 +123,11 @@ def main() -> int:
                         help="Uniform sample cap for the red-rect stage (it re-reads every image; "
                              "the official pipeline uses all records — documented simplification).")
     parser.add_argument("--max-folders", type=int, default=0)
+    parser.add_argument("--fss-path-rewrite", action="append", default=[],
+                        help="OLD=NEW prefix rewrite for historical fss_path in the reference manifest "
+                             "(e.g. when Dataset/ moved to an external volume). Repeatable.")
+    parser.add_argument("--redo-line13", action="store_true",
+                        help="Only recompute line #13 for folders already in official_folder.csv, then exit.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--time-budget", type=float, default=0.0)
     args = parser.parse_args()
@@ -167,12 +172,49 @@ def main() -> int:
 
     resolver_holder: List[object] = []
 
+    def _resolver_manifest() -> Path:
+        if not args.fss_path_rewrite:
+            return args.reference_manifest
+        rewritten = out / "reference_manifest_rewritten.csv"
+        if not rewritten.is_file():
+            pairs = [tuple(r.split("=", 1)) for r in args.fss_path_rewrite if "=" in r]
+            with args.reference_manifest.open(newline="", encoding="utf-8") as src:
+                reader = csv.DictReader(src)
+                with rewritten.open("w", newline="", encoding="utf-8") as dst:
+                    writer = csv.DictWriter(dst, fieldnames=reader.fieldnames)
+                    writer.writeheader()
+                    for row in reader:
+                        fss = row.get("fss_path", "") or ""
+                        for old, new in pairs:
+                            if fss.startswith(old):
+                                row["fss_path"] = new + fss[len(old):]
+                                break
+                        writer.writerow(row)
+            print(f"[load] reference manifest rewritten -> {rewritten}", flush=True)
+        return rewritten
+
     def _get_resolver():
         if not resolver_holder:
             t0 = time.time()
-            resolver_holder.append(off.RectNameEchoResolver(args.reference_manifest))
+            resolver_holder.append(off.RectNameEchoResolver(_resolver_manifest()))
             print(f"[load] line13 resolver ready ({time.time() - t0:.1f}s)", flush=True)
         return resolver_holder[0]
+
+    if args.redo_line13:
+        folder_rows_all = _load_csv(out / "official_folder.csv")
+        for row in folder_rows_all:
+            vx = int(row["video_x"]) if str(row.get("video_x", "")).strip() else None
+            vy = int(row["video_y"]) if str(row.get("video_y", "")).strip() else None
+            try:
+                text, source, support = _get_resolver().resolve(vendor=str(row.get("vendor_pred", "")), video_x=vx, video_y=vy)
+            except Exception as exc:  # noqa: BLE001
+                text, source, support = "", f"resolver_error:{type(exc).__name__}", 0.0
+            row["line13_text"], row["line13_source"], row["line13_support"] = text, source, f"{float(support):.4f}"
+            print(f"[redo-line13] {row['folder']}: {source} support={support:.3f}", flush=True)
+        tmp = out / "official_folder.csv"
+        tmp.write_text("")
+        _append_csv(tmp, folder_rows_all, FOLDER_FIELDS)
+        return 0
 
     marker_rows = _load_csv(args.marker_run_dir / "per_image_predictions.csv")
     images_by_folder: Dict[str, List[str]] = {}

@@ -150,6 +150,8 @@ function openViewer(i) {
   renderBoxes(frame, JSON.parse(w.dataset.boxes));
   const card = w.closest('.card');
   vTitle.textContent = (current + 1) + '/' + wraps.length + ' — ' + card.querySelector('.title').innerText;
+  const vMeta = document.getElementById('vMeta');
+  if (vMeta) vMeta.innerHTML = card.querySelector('.meta').innerHTML;
   vComment.value = comments[card.dataset.key] || '';
   viewer.classList.add('open');
 }
@@ -238,6 +240,7 @@ def _page(title: str, toolbar: str, content: str) -> str:
     <span id="vTitle"></span>
     <input id="vComment" placeholder="Commento..." style="flex:1; background:#1a1d23; color:#ffd76e; border:1px solid #444; border-radius:6px; padding:6px 8px; font-size:13px;">
   </div>
+  <div class="bar" style="padding-top:0"><span id="vMeta"></span></div>
 </div>
 <script>{SCRIPT}</script>
 </body></html>"""
