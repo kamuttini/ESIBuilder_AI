@@ -99,6 +99,13 @@ function renderBoxes(container, boxes) {
 const wraps = Array.from(document.querySelectorAll('.imgwrap'));
 wraps.forEach(w => renderBoxes(w, JSON.parse(w.dataset.boxes)));
 
+// Viewer references declared FIRST: annotation helpers below run at init time.
+const viewer = document.getElementById('viewer');
+const viewerImg = document.getElementById('viewerImg');
+const frame = viewer ? viewer.querySelector('.frame') : null;
+const vTitle = document.getElementById('vTitle');
+let current = -1;
+
 const STORE = 'marker_envelope_gallery_comments_v1';
 const FIX_STORE = 'marker_envelope_gallery_corrections_v1';
 let comments = {};
@@ -240,11 +247,6 @@ function setBoxes(visible) {
 }
 if (toggleBtn) toggleBtn.onclick = () => setBoxes(body.classList.contains('noboxes'));
 
-const viewer = document.getElementById('viewer');
-const viewerImg = document.getElementById('viewerImg');
-const frame = viewer ? viewer.querySelector('.frame') : null;
-const vTitle = document.getElementById('vTitle');
-let current = -1;
 function openViewer(i) {
   current = (i + wraps.length) % wraps.length;
   const w = wraps[current];
