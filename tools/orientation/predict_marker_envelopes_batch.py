@@ -51,6 +51,7 @@ EXCLUDE_FILE_RE = re.compile(r"Thumbs\.db|Software Release|System Info|proibite"
 IMAGE_FIELDS = [
     "folder", "vendor", "image_id", "pred_group", "status", "review_reason",
     "match_score", "search_scope", "marker_box_abs", "template_name", "image_size",
+    "vertical_correction", "vertical_source",
 ]
 
 
@@ -134,6 +135,12 @@ def main() -> int:
     parser.add_argument("--match-max-side", type=int, default=560)
     parser.add_argument("--min-markers-per-envelope", type=int, default=1)
     parser.add_argument("--flush-every", type=int, default=10)
+    parser.add_argument("--official-stages-dir", type=Path, default=None,
+                        help="CHAINED mode: consume official_stages_batch.py outputs. Per image: rect crop + "
+                             "SU/GIU prior; per folder: #13 exclusion. Search follows the designed chain: "
+                             "predicted half -> other half (flags sugiu_corrected_by_marker) -> expansion.")
+    parser.add_argument("--exclusion-margin-frac", type=float, default=0.75,
+                        help="Expansion of the #13 exclusion rect (vendor logo often sits just outside it).")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--time-budget", type=float, default=0.0, help="Stop gracefully after N seconds (0 = no limit).")
     args = parser.parse_args()
@@ -148,6 +155,25 @@ def main() -> int:
     )
     include_re = re.compile(args.include_regex, re.IGNORECASE) if args.include_regex else None
     folder_pattern = re.compile(args.folder_regex, re.IGNORECASE) if args.folder_regex else None
+
+    # CHAINED mode: load official stages outputs (rect/su-giu per image, #13 per folder).
+    def _tlbr(text: str) -> Optional[Tuple[int, int, int, int]]:
+        parts = [p for p in str(text or "").split("|") if p.strip()]
+        if len(parts) < 4:
+            return None
+        try:
+            return tuple(int(float(p)) for p in parts[:4])  # type: ignore[return-value]
+        except ValueError:
+            return None
+
+    official_img: Dict[Tuple[str, str], Dict[str, str]] = {}
+    official_fold: Dict[str, Dict[str, str]] = {}
+    if args.official_stages_dir:
+        for row in _load_csv(args.official_stages_dir / "official_per_image.csv"):
+            official_img[(str(row["folder"]), str(row["image_id"]))] = row
+        for row in _load_csv(args.official_stages_dir / "official_folder.csv"):
+            official_fold[str(row["folder"])] = row
+        print(f"[chained] official stages: {len(official_fold)} folders, {len(official_img)} images", flush=True)
 
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
@@ -171,6 +197,8 @@ def main() -> int:
         and (folder_pattern is None or folder_pattern.search(p.name))
         and p.name not in completed_folders
     ]
+    if args.official_stages_dir:
+        folders = [p for p in folders if p.name in official_fold]  # chain requires stages 1-3 done
     if args.max_folders > 0:
         folders = folders[: args.max_folders]
     print(f"[start] {len(completed_folders)} folders completed, {len(folders)} to process")
@@ -183,35 +211,66 @@ def main() -> int:
         vendor = omd.infer_vendor_from_text(folder.name)
         folder_state = state.get(folder.name, {})
 
-        paths = _collect_images(folder, include_re)
-        if not paths:
-            _append_csv(out / "folder_summary.csv",
-                        [{"folder": folder.name, "vendor": vendor, "status": "no_images"}], FOLDER_FIELDS)
-            completed_folders.add(folder.name)
-            print(f"[{index}/{len(folders)}] {folder.name}: no images")
-            continue
-
-        # Dominant resolution (cached in state to avoid re-reading all sizes on resume).
-        if "dominant_resolution" in folder_state and "n_other_resolution" in folder_state:
-            dom_w, dom_h = map(int, str(folder_state["dominant_resolution"]).split("x"))
+        chained = bool(args.official_stages_dir)
+        if chained:
+            # Same exact image set of the official stages (already dominant-resolution only).
+            kept = [folder / image_id for (fname, image_id) in official_img if fname == folder.name]
+            kept.sort()
+            n_other = 0
+            if "dominant_resolution" in folder_state:
+                dom_w, dom_h = map(int, str(folder_state["dominant_resolution"]).split("x"))
+            else:
+                first_size = _image_size(kept[0]) if kept else None
+                dom_w, dom_h = first_size if first_size else (0, 0)
+                folder_state["dominant_resolution"] = f"{dom_w}x{dom_h}"
+                state[folder.name] = folder_state
+                state_path.write_text(json.dumps(state, indent=1, ensure_ascii=False))
             dominant = (dom_w, dom_h)
-            kept = [p for p in paths if _image_size(p) == dominant]
-            n_other = len(paths) - len(kept)
-        else:
-            sizes: Dict[Path, Optional[Tuple[int, int]]] = {p: _image_size(p) for p in paths}
-            counter = Counter(s for s in sizes.values() if s)
-            if not counter:
+            if not kept:
                 _append_csv(out / "folder_summary.csv",
-                            [{"folder": folder.name, "vendor": vendor, "status": "no_readable_images"}], FOLDER_FIELDS)
+                            [{"folder": folder.name, "vendor": vendor, "status": "no_images"}], FOLDER_FIELDS)
                 completed_folders.add(folder.name)
                 continue
-            dominant = counter.most_common(1)[0][0]
-            kept = [p for p, s in sizes.items() if s == dominant]
-            n_other = len(paths) - len(kept)
-            folder_state["dominant_resolution"] = f"{dominant[0]}x{dominant[1]}"
-            folder_state["n_other_resolution"] = n_other
-            state[folder.name] = folder_state
-            state_path.write_text(json.dumps(state, indent=1, ensure_ascii=False))
+        else:
+            paths = _collect_images(folder, include_re)
+            if not paths:
+                _append_csv(out / "folder_summary.csv",
+                            [{"folder": folder.name, "vendor": vendor, "status": "no_images"}], FOLDER_FIELDS)
+                completed_folders.add(folder.name)
+                print(f"[{index}/{len(folders)}] {folder.name}: no images")
+                continue
+
+            # Dominant resolution (cached in state to avoid re-reading all sizes on resume).
+            if "dominant_resolution" in folder_state and "n_other_resolution" in folder_state:
+                dom_w, dom_h = map(int, str(folder_state["dominant_resolution"]).split("x"))
+                dominant = (dom_w, dom_h)
+                kept = [p for p in paths if _image_size(p) == dominant]
+                n_other = len(paths) - len(kept)
+            else:
+                sizes: Dict[Path, Optional[Tuple[int, int]]] = {p: _image_size(p) for p in paths}
+                counter = Counter(s for s in sizes.values() if s)
+                if not counter:
+                    _append_csv(out / "folder_summary.csv",
+                                [{"folder": folder.name, "vendor": vendor, "status": "no_readable_images"}], FOLDER_FIELDS)
+                    completed_folders.add(folder.name)
+                    continue
+                dominant = counter.most_common(1)[0][0]
+                kept = [p for p, s in sizes.items() if s == dominant]
+                n_other = len(paths) - len(kept)
+                folder_state["dominant_resolution"] = f"{dominant[0]}x{dominant[1]}"
+                folder_state["n_other_resolution"] = n_other
+                state[folder.name] = folder_state
+                state_path.write_text(json.dumps(state, indent=1, ensure_ascii=False))
+
+        # CHAINED step 1: exclusion zone from the vendor-template box (#13) + margin.
+        exclusion_rects: Tuple[Tuple[int, int, int, int], ...] = ()
+        if chained:
+            box13 = _tlbr(official_fold.get(folder.name, {}).get("line13_text", ""))
+            if box13:
+                top13, left13, bottom13, right13 = box13
+                mh = int((bottom13 - top13 + 1) * args.exclusion_margin_frac)
+                mw = int((right13 - left13 + 1) * args.exclusion_margin_frac)
+                exclusion_rects = ((top13 - mh, left13 - mw, bottom13 + mh, right13 + mw),)
 
         if args.max_images_per_folder > 0 and len(kept) > args.max_images_per_folder:
             stride = len(kept) / args.max_images_per_folder
@@ -246,8 +305,32 @@ def main() -> int:
                 out_of_time = True
                 break
             image_id = path.relative_to(folder).as_posix()
+            crop_rect = None
+            sugiu_pred = ""
+            sugiu_conf = 0.0
+            if chained:
+                # CHAINED steps 2-3: per-image rect + SU/GIU prior from the official nets.
+                info = official_img.get((folder.name, image_id), {})
+                crop_rect = _tlbr(info.get("rect_box_abs", ""))
+                label = str(info.get("sugiu_label", "")).strip().lower()
+                if label in ("su", "giu"):
+                    sugiu_pred = label
+                    try:
+                        sugiu_conf = float(info.get("sugiu_conf", 0.0) or 0.0)
+                    except ValueError:
+                        sugiu_conf = 0.0
             row = omd.detect_marker(
-                omd.ImageInput(image_path=path, image_id=image_id), template, params=params
+                omd.ImageInput(
+                    image_path=path,
+                    image_id=image_id,
+                    crop_rect=crop_rect,
+                    crop_source="official_stages" if crop_rect else "",
+                    sugiu_pred=sugiu_pred,
+                    sugiu_conf=sugiu_conf,
+                    exclusion_rects=exclusion_rects,
+                ),
+                template,
+                params=params,
             )
             buffer.append(
                 {
@@ -262,6 +345,8 @@ def main() -> int:
                     "marker_box_abs": "" if not row.marker_box_abs else "|".join(map(str, row.marker_box_abs)),
                     "template_name": row.template_name,
                     "image_size": f"{dominant[0]}x{dominant[1]}",
+                    "vertical_correction": row.vertical_correction,
+                    "vertical_source": row.vertical_source,
                 }
             )
             done_pairs.add((folder.name, image_id))
@@ -286,6 +371,7 @@ def main() -> int:
             if r["status"] == "ok" and r["marker_box_abs"] and r["pred_group"]:
                 box = tuple(int(v) for v in r["marker_box_abs"].split("|"))
                 markers_by_group.setdefault(r["pred_group"], []).append(box)
+        n_sugiu_corrected = sum(1 for r in folder_img_rows if r.get("vertical_correction") == "corrected")
         env_rows = []
         for group in GROUPS:
             markers = markers_by_group.get(group, [])
@@ -319,12 +405,14 @@ def main() -> int:
                     "groups_found": groups_found,
                     "template_selected": template.name,
                     "dominant_resolution": f"{dominant[0]}x{dominant[1]}",
+                    "n_sugiu_corrected": n_sugiu_corrected,
                 }
             ],
             FOLDER_FIELDS,
         )
         completed_folders.add(folder.name)
-        print(f"[{index}/{len(folders)}] {folder.name} [{vendor}] DONE {len(folder_img_rows)} img, groups={groups_found}, review={n_review}")
+        print(f"[{index}/{len(folders)}] {folder.name} [{vendor}] DONE {len(folder_img_rows)} img, "
+              f"groups={groups_found}, review={n_review}, sugiu_corrected={n_sugiu_corrected}")
 
     print(f"[end] completed folders: {len(completed_folders)}")
     return 0
@@ -333,6 +421,7 @@ def main() -> int:
 FOLDER_FIELDS = [
     "folder", "vendor", "status", "n_images", "n_other_resolution", "review_rate",
     "marker_found_rate", "groups_found", "template_selected", "dominant_resolution",
+    "n_sugiu_corrected",
 ]
 ENVELOPE_FIELDS = ["folder", "vendor", "group", "n_markers", "envelope_box", "resolution"]
 
