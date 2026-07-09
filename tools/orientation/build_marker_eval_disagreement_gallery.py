@@ -88,6 +88,7 @@ def _boxes_payload(
     rect_echo: Optional[Rect],
     line16: Optional[Dict[str, Rect]],
     duplicated: Optional[Dict[str, bool]],
+    name_rects: Optional[List[Rect]] = None,
 ) -> List[Dict[str, object]]:
     """Normalized (percent) boxes for the HTML overlay renderer."""
 
@@ -110,6 +111,8 @@ def _boxes_payload(
                 continue
             label = "CAL (unico stato)" if (single_orientation and group == "NF") else group
             boxes.append({"kind": "legacy", "label": label, **norm(line16[group])})
+    for idx, rect in enumerate(name_rects or []):
+        boxes.append({"kind": "excl", "label": f"#{13 + idx} escluso", **norm(rect)})
     if marker:
         boxes.append({"kind": "marker", "label": "", **norm(marker)})
     return boxes
@@ -138,7 +141,7 @@ def main() -> int:
         gt = _load_folder_gt(args.dataset_root, folder, gt_cache_pre)
         if not gt:
             return False
-        _, _, duplicated = gt
+        duplicated = gt[2]
         return all(duplicated.get(g) for g in GROUPS if g != "NF")
 
     rng = random.Random(args.seed)
@@ -182,7 +185,7 @@ def main() -> int:
             if not image_path.is_file():
                 continue
             gt = _load_folder_gt(args.dataset_root, folder, gt_cache)
-            rect_echo, line16, duplicated = gt if gt else (None, None, None)
+            rect_echo, line16, duplicated, name_rects = gt if gt else (None, None, None, None)
             img_rel = Path("images") / category / f"{total_cards:04d}.jpg"
             try:
                 with Image.open(image_path) as img:
@@ -197,7 +200,9 @@ def main() -> int:
                 print(f"[warn] image failed for {image_path}: {exc}")
                 continue
             total_cards += 1
-            boxes = _boxes_payload(width, height, _parse_box(row.get("marker_box_abs", "")), rect_echo, line16, duplicated)
+            boxes = _boxes_payload(
+                width, height, _parse_box(row.get("marker_box_abs", "")), rect_echo, line16, duplicated, name_rects
+            )
             meta = (
                 f"pred: <b>{html.escape(row.get('pred_group') or '-')}</b> | "
                 f"gt_box: {html.escape(row.get('gt_by_box') or '-')} | "
@@ -245,6 +250,8 @@ h1 {{ font-size: 20px; }} h2 {{ font-size: 16px; margin-top: 32px; border-bottom
 .box.legacy {{ border: 2px solid #00c800; }}
 .box.legacy .lbl {{ position: absolute; top: -18px; left: 0; color: #00e000; font-size: 12px; font-weight: bold; text-shadow: 0 0 3px #000; }}
 .box.marker {{ border: 2px solid #ff2828; min-width: 10px; min-height: 10px; }}
+.box.excl {{ border: 2px dashed #ffd000; }}
+.box.excl .lbl {{ position: absolute; top: -18px; left: 0; color: #ffd000; font-size: 11px; text-shadow: 0 0 3px #000; }}
 body.noboxes .box {{ display: none; }}
 .comment {{ width: 100%; box-sizing: border-box; margin-top: 8px; background: #1a1d23; color: #ffd76e;
   border: 1px solid #444; border-radius: 6px; padding: 6px 8px; font-size: 13px; font-family: inherit; resize: vertical; }}
@@ -264,6 +271,7 @@ body.noboxes .box {{ display: none; }}
 <button id="exportComments">Esporta commenti CSV</button>
 <span class="legend"><span style="color:#3c78ff">■ rect ecografico (riga 11 .fss)</span>
 <span style="color:#00c800">■ box riga 16 .fss legacy</span>
+<span style="color:#ffd000">▨ zona esclusa (nome ecografo/sonda #13/#14)</span>
 <span style="color:#ff2828">■ marker trovato dal nuovo detector</span></span>
 <span class="hint">Click su un'immagine = tutto schermo · B = mostra/nascondi box · ←/→ = scorri · Esc = chiudi · I commenti si salvano da soli nel browser</span>
 </div>

@@ -64,10 +64,32 @@ class FolderGT:
     rect_echo: Rect
     line16_boxes: Dict[str, Rect]
     line16_duplicated: Dict[str, bool]
+    name_rects: List[Rect] = field(default_factory=list)  # #13 echo name, #14 probe name
     warnings: List[str] = field(default_factory=list)
 
 
-def _parse_fss(fss_path: Path) -> Tuple[Rect, Dict[str, Rect], Dict[str, bool]]:
+def _parse_name_rects(lines: List[str], rect_line_no: int) -> List[Rect]:
+    """Boxes of line #13 (RECT_NAME_ECHO) and #14 (RECT_NAME_PROBE).
+
+    Vendor/probe name templates can look like orientation markers (e.g. the
+    Mindray "m" logo), so the marker search must exclude these regions.
+    """
+    rects: List[Rect] = []
+    for offset in (2, 3):  # rect_line + 2 -> #13, rect_line + 3 -> #14
+        line_no = rect_line_no + offset
+        if line_no > len(lines):
+            continue
+        first_segment = lines[line_no - 1].strip().split(";")[0]
+        parts = first_segment.split("|")
+        if len(parts) >= 4:
+            try:
+                rects.append((int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])))
+            except ValueError:
+                continue
+    return rects
+
+
+def _parse_fss(fss_path: Path) -> Tuple[Rect, Dict[str, Rect], Dict[str, bool], List[Rect]]:
     lines = fss_path.read_text(encoding="utf-8", errors="replace").splitlines()
     rect_line_no: Optional[int] = None
     rect: Optional[Rect] = None
@@ -101,7 +123,7 @@ def _parse_fss(fss_path: Path) -> Tuple[Rect, Dict[str, Rect], Dict[str, bool]]:
     # All 4 entries identical -> legacy project calibrated for a SINGLE orientation
     # (old workaround for mirrored templates). Slot order does NOT mean NF/LR/UD/LRUD
     # there, so line-16 boxes cannot be used as per-orientation GT.
-    return rect, boxes, duplicated
+    return rect, boxes, duplicated, _parse_name_rects(lines, rect_line_no)
 
 
 def _scan_folders(dataset_root: Path, folder_regex: str, max_folders: int) -> List[FolderGT]:
@@ -120,7 +142,7 @@ def _scan_folders(dataset_root: Path, folder_regex: str, max_folders: int) -> Li
         if len(fss_candidates) > 1:
             gt_warnings.append(f"multiple .fss, using {fss_path.name}")
         try:
-            rect, boxes, duplicated = _parse_fss(fss_path)
+            rect, boxes, duplicated, name_rects = _parse_fss(fss_path)
         except ValueError as exc:
             print(f"[skip] {folder.name}: {exc}")
             continue
@@ -132,6 +154,7 @@ def _scan_folders(dataset_root: Path, folder_regex: str, max_folders: int) -> Li
                 rect_echo=rect,
                 line16_boxes=boxes,
                 line16_duplicated=duplicated,
+                name_rects=name_rects,
                 warnings=gt_warnings,
             )
         )
@@ -240,6 +263,11 @@ def main() -> int:
     parser.add_argument("--exclude-regex", type=str, default=DEFAULT_EXCLUDE_RE)
     parser.add_argument("--vertical-prior", choices=("none", "gt"), default="none",
                         help="'gt' simulates a perfect SU/GIU network via the GT group vertical.")
+    parser.add_argument("--no-name-exclusion", action="store_true",
+                        help="Do NOT exclude the legacy #13/#14 name rects from the marker search.")
+    parser.add_argument("--exclusion-margin-frac", type=float, default=0.75,
+                        help="Expand each #13/#14 exclusion rect by this fraction of its own size "
+                             "(vendor logos often sit just outside the legacy name box, e.g. Mindray 'm').")
     parser.add_argument("--min-match-score", type=float, default=0.55)
     parser.add_argument("--fallback-threshold", type=float, default=0.58)
     parser.add_argument("--expanded-threshold", type=float, default=0.62)
@@ -303,6 +331,19 @@ def main() -> int:
             print(f"[{index}/{len(folders)}] {gt.folder.name}: no images")
             continue
 
+        if args.no_name_exclusion:
+            exclusion = ()
+        else:
+            frac = max(0.0, args.exclusion_margin_frac)
+            exclusion = tuple(
+                (
+                    int(top - (bottom - top + 1) * frac),
+                    int(left - (right - left + 1) * frac),
+                    int(bottom + (bottom - top + 1) * frac),
+                    int(right + (right - left + 1) * frac),
+                )
+                for top, left, bottom, right in gt.name_rects
+            )
         inputs = []
         for path, gt_group, _source in samples:
             sugiu = omd._vertical_from_group(gt_group) if (args.vertical_prior == "gt" and gt_group) else ""
@@ -314,6 +355,7 @@ def main() -> int:
                     crop_source="legacy_fss_line11",
                     sugiu_pred=sugiu,
                     sugiu_conf=1.0 if sugiu else 0.0,
+                    exclusion_rects=exclusion,
                 )
             )
 
