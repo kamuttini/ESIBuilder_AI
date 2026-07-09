@@ -2,10 +2,15 @@
 """Build an HTML review gallery for marker-vs-legacy-line16 disagreements.
 
 Reads `per_image_predictions.csv` produced by
-`eval_marker_bundle_vs_legacy_line16.py`, draws overlays (legacy line-16 boxes
-in green, detected marker in red, echo rect in blue) and groups the cards by
-disagreement category:
+`eval_marker_bundle_vs_legacy_line16.py` and builds an interactive gallery:
 
+- clean scaled images (no baked-in drawing); boxes are rendered as HTML
+  overlays so they can be toggled on/off (button or key `B`)
+- fullscreen viewer (click a card; arrows = prev/next, Esc = close)
+- overlay colors: green = legacy line-16 boxes, red = detected marker,
+  blue = echo rect (line 11)
+
+Cards are grouped by disagreement category:
 - `outside_legacy_boxes`: marker accepted but its center is in no legacy box
 - `group_mismatch`: predicted group != legacy box containing the marker
 - `gt_mismatch`: predicted group != folder-level GT (SOLO NF/UD/... folders)
@@ -24,12 +29,13 @@ import argparse
 import csv
 import html
 import importlib.util
+import json
 import random
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -75,41 +81,36 @@ def _load_folder_gt(dataset_root: Path, folder_name: str, cache: Dict[str, objec
     return result
 
 
-def _draw_overlay(
-    image_path: Path,
+def _boxes_payload(
+    width: int,
+    height: int,
     marker: Optional[Rect],
     rect_echo: Optional[Rect],
     line16: Optional[Dict[str, Rect]],
     duplicated: Optional[Dict[str, bool]],
-    output_path: Path,
-    max_width: int,
-    jpeg_quality: int,
-) -> None:
-    with Image.open(image_path) as img:
-        rgb = img.convert("RGB")
-        draw = ImageDraw.Draw(rgb)
+) -> List[Dict[str, object]]:
+    """Normalized (percent) boxes for the HTML overlay renderer."""
 
-        def box_xy(rect: Rect):
-            top, left, bottom, right = rect
-            return [(left, top), (right, bottom)]
+    def norm(rect: Rect) -> Dict[str, float]:
+        top, left, bottom, right = rect
+        return {
+            "t": round(100.0 * top / height, 3),
+            "l": round(100.0 * left / width, 3),
+            "h": round(100.0 * max(1, bottom - top + 1) / height, 3),
+            "w": round(100.0 * max(1, right - left + 1) / width, 3),
+        }
 
-        if rect_echo:
-            draw.rectangle(box_xy(rect_echo), outline=(60, 120, 255), width=2)
-        if line16:
-            for group in GROUPS:
-                if duplicated and group != "NF" and duplicated.get(group):
-                    continue
-                rect = line16[group]
-                draw.rectangle(box_xy(rect), outline=(0, 200, 0), width=3)
-                draw.text((rect[1] + 4, rect[0] + 4), group, fill=(0, 200, 0))
-        if marker:
-            draw.rectangle(box_xy(marker), outline=(255, 40, 40), width=3)
-
-        if rgb.width > max_width:
-            scale = max_width / rgb.width
-            rgb = rgb.resize((max_width, int(rgb.height * scale)))
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        rgb.save(output_path, quality=jpeg_quality)
+    boxes: List[Dict[str, object]] = []
+    if rect_echo:
+        boxes.append({"kind": "rect", "label": "", **norm(rect_echo)})
+    if line16:
+        for group in GROUPS:
+            if duplicated and group != "NF" and duplicated.get(group):
+                continue
+            boxes.append({"kind": "legacy", "label": group, **norm(line16[group])})
+    if marker:
+        boxes.append({"kind": "marker", "label": "", **norm(marker)})
+    return boxes
 
 
 def main() -> int:
@@ -119,8 +120,8 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, default=None, help="Default: <eval-dir>/disagreement_gallery")
     parser.add_argument("--max-cards-per-category", type=int, default=60)
     parser.add_argument("--control-samples", type=int, default=12)
-    parser.add_argument("--max-width", type=int, default=1000)
-    parser.add_argument("--jpeg-quality", type=int, default=80)
+    parser.add_argument("--max-width", type=int, default=1280)
+    parser.add_argument("--jpeg-quality", type=int, default=82)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -159,29 +160,28 @@ def main() -> int:
     for category in CATEGORY_ORDER:
         selected = by_category[category][: args.max_cards_per_category]
         cards: List[str] = []
-        for idx, row in enumerate(selected):
+        for row in selected:
             folder = str(row["folder"])
             image_path = args.dataset_root / folder / str(row["image_id"])
             if not image_path.is_file():
                 continue
             gt = _load_folder_gt(args.dataset_root, folder, gt_cache)
             rect_echo, line16, duplicated = gt if gt else (None, None, None)
-            overlay_rel = Path("overlays") / category / f"{total_cards:04d}.jpg"
+            img_rel = Path("images") / category / f"{total_cards:04d}.jpg"
             try:
-                _draw_overlay(
-                    image_path,
-                    _parse_box(row.get("marker_box_abs", "")),
-                    rect_echo,
-                    line16,
-                    duplicated,
-                    out / overlay_rel,
-                    args.max_width,
-                    args.jpeg_quality,
-                )
+                with Image.open(image_path) as img:
+                    rgb = img.convert("RGB")
+                    width, height = rgb.size
+                    if rgb.width > args.max_width:
+                        scale = args.max_width / rgb.width
+                        rgb = rgb.resize((args.max_width, int(rgb.height * scale)))
+                    (out / img_rel).parent.mkdir(parents=True, exist_ok=True)
+                    rgb.save(out / img_rel, quality=args.jpeg_quality)
             except Exception as exc:  # noqa: BLE001
-                print(f"[warn] overlay failed for {image_path}: {exc}")
+                print(f"[warn] image failed for {image_path}: {exc}")
                 continue
             total_cards += 1
+            boxes = _boxes_payload(width, height, _parse_box(row.get("marker_box_abs", "")), rect_echo, line16, duplicated)
             meta = (
                 f"pred: <b>{html.escape(row.get('pred_group') or '-')}</b> | "
                 f"gt_box: {html.escape(row.get('gt_by_box') or '-')} | "
@@ -194,7 +194,8 @@ def main() -> int:
             cards.append(
                 "<div class='card'>"
                 f"<div class='title'>{html.escape(folder)}<br><small>{html.escape(str(row['image_id']))}</small></div>"
-                f"<a href='{overlay_rel.as_posix()}' target='_blank'><img loading='lazy' src='{overlay_rel.as_posix()}'></a>"
+                f"<div class='imgwrap' data-boxes='{html.escape(json.dumps(boxes), quote=True)}' data-src='{img_rel.as_posix()}'>"
+                f"<img loading='lazy' src='{img_rel.as_posix()}'></div>"
                 f"<div class='meta'>{meta}</div>"
                 "</div>"
             )
@@ -212,21 +213,102 @@ body {{ font-family: -apple-system, sans-serif; margin: 20px; background: #16181
 h1 {{ font-size: 20px; }} h2 {{ font-size: 16px; margin-top: 32px; border-bottom: 1px solid #444; padding-bottom: 6px; }}
 .count {{ color: #999; font-weight: normal; }}
 .legend span {{ margin-right: 18px; }}
+.toolbar {{ position: sticky; top: 0; z-index: 50; background: #16181d; padding: 8px 0; }}
+.toolbar button {{ background: #2f6fed; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; font-size: 14px; cursor: pointer; }}
+.toolbar .hint {{ color: #999; font-size: 12px; margin-left: 12px; }}
 .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(460px, 1fr)); gap: 14px; }}
 .card {{ background: #22252c; border-radius: 8px; padding: 10px; }}
-.card img {{ width: 100%; border-radius: 4px; }}
+.imgwrap {{ position: relative; cursor: zoom-in; }}
+.imgwrap img {{ width: 100%; display: block; border-radius: 4px; }}
 .title {{ font-size: 12px; margin-bottom: 6px; color: #9ecbff; }}
 .meta {{ font-size: 12px; margin-top: 6px; color: #ccc; }}
+.box {{ position: absolute; box-sizing: border-box; pointer-events: none; }}
+.box.rect {{ border: 2px solid #3c78ff; }}
+.box.legacy {{ border: 2px solid #00c800; }}
+.box.legacy .lbl {{ position: absolute; top: -18px; left: 0; color: #00e000; font-size: 12px; font-weight: bold; text-shadow: 0 0 3px #000; }}
+.box.marker {{ border: 2px solid #ff2828; min-width: 10px; min-height: 10px; }}
+body.noboxes .box {{ display: none; }}
+#viewer {{ display: none; position: fixed; inset: 0; z-index: 100; background: rgba(8,9,12,.97); }}
+#viewer.open {{ display: flex; flex-direction: column; }}
+#viewer .stage {{ flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
+#viewer .frame {{ position: relative; }}
+#viewer .frame img {{ max-width: 96vw; max-height: 88vh; display: block; }}
+#viewer .bar {{ padding: 10px 16px; font-size: 13px; color: #ddd; display: flex; gap: 16px; align-items: center; }}
+#viewer .bar button {{ background: #333; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; }}
 </style></head><body>
 <h1>Disaccordi marker vs riga 16 legacy</h1>
-<p class="legend"><span style="color:#3c78ff">■ rect ecografico (riga 11)</span>
-<span style="color:#00c800">■ box riga 16 legacy (NF/LR/UD/LRUD)</span>
-<span style="color:#ff2828">■ marker trovato dal detector</span></p>
+<div class="toolbar">
+<button id="toggleBoxes">Nascondi box</button>
+<span class="legend"><span style="color:#3c78ff">■ rect ecografico</span>
+<span style="color:#00c800">■ box riga 16 legacy</span>
+<span style="color:#ff2828">■ marker trovato</span></span>
+<span class="hint">Click su un'immagine = tutto schermo · B = mostra/nascondi box · ←/→ = scorri · Esc = chiudi</span>
+</div>
 {''.join(sections)}
+<div id="viewer">
+  <div class="stage"><div class="frame"><img id="viewerImg"></div></div>
+  <div class="bar">
+    <button id="vClose">Chiudi (Esc)</button>
+    <button id="vPrev">← Prec</button>
+    <button id="vNext">Succ →</button>
+    <span id="vTitle"></span>
+  </div>
+</div>
+<script>
+function renderBoxes(container, boxes) {{
+  container.querySelectorAll('.box').forEach(b => b.remove());
+  boxes.forEach(b => {{
+    const div = document.createElement('div');
+    div.className = 'box ' + b.kind;
+    div.style.top = b.t + '%'; div.style.left = b.l + '%';
+    div.style.height = b.h + '%'; div.style.width = b.w + '%';
+    if (b.label) {{ const s = document.createElement('span'); s.className = 'lbl'; s.textContent = b.label; div.appendChild(s); }}
+    container.appendChild(div);
+  }});
+}}
+const wraps = Array.from(document.querySelectorAll('.imgwrap'));
+wraps.forEach(w => renderBoxes(w, JSON.parse(w.dataset.boxes)));
+
+const body = document.body;
+const toggleBtn = document.getElementById('toggleBoxes');
+function setBoxes(visible) {{
+  body.classList.toggle('noboxes', !visible);
+  toggleBtn.textContent = visible ? 'Nascondi box' : 'Mostra box';
+}}
+toggleBtn.onclick = () => setBoxes(body.classList.contains('noboxes'));
+
+const viewer = document.getElementById('viewer');
+const viewerImg = document.getElementById('viewerImg');
+const frame = viewer.querySelector('.frame');
+const vTitle = document.getElementById('vTitle');
+let current = -1;
+function openViewer(i) {{
+  current = (i + wraps.length) % wraps.length;
+  const w = wraps[current];
+  viewerImg.src = w.dataset.src;
+  renderBoxes(frame, JSON.parse(w.dataset.boxes));
+  const card = w.closest('.card');
+  vTitle.textContent = (current + 1) + '/' + wraps.length + ' — ' + card.querySelector('.title').innerText.replace('\\n', ' / ');
+  viewer.classList.add('open');
+}}
+function closeViewer() {{ viewer.classList.remove('open'); current = -1; }}
+wraps.forEach((w, i) => w.addEventListener('click', () => openViewer(i)));
+document.getElementById('vClose').onclick = closeViewer;
+document.getElementById('vPrev').onclick = () => openViewer(current - 1);
+document.getElementById('vNext').onclick = () => openViewer(current + 1);
+viewer.querySelector('.stage').addEventListener('click', e => {{ if (e.target === e.currentTarget) closeViewer(); }});
+document.addEventListener('keydown', e => {{
+  if (e.key === 'b' || e.key === 'B') setBoxes(body.classList.contains('noboxes'));
+  if (current < 0) return;
+  if (e.key === 'Escape') closeViewer();
+  if (e.key === 'ArrowLeft') openViewer(current - 1);
+  if (e.key === 'ArrowRight') openViewer(current + 1);
+}});
+</script>
 </body></html>"""
     out.mkdir(parents=True, exist_ok=True)
     (out / "index.html").write_text(page, encoding="utf-8")
-    print(f"Gallery: {out / 'index.html'} ({total_cards} overlay)")
+    print(f"Gallery: {out / 'index.html'} ({total_cards} immagini)")
     return 0
 
 
