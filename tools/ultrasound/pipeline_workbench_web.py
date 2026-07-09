@@ -5232,6 +5232,10 @@ HTML_PAGE = """<!doctype html>
                 <button id="rerunOnlyRectBtn" type="button" class="btn secondary mini">Solo rettangolo</button>
               </div>
               <div id="rerunStatus" class="small">Spunta una o piu parti: se scegli "Run completa nuova" nasce una nuova run; gli altri punti si ricalcolano sulla run selezionata.</div>
+              <div class="rerun-tools" style="margin-top:6px;">
+                <button id="rerunDiffBtn" type="button" class="btn secondary mini">Diff prima/dopo ultimo ricalcolo</button>
+              </div>
+              <div id="rerunDiffPanel" class="small" style="display:none; margin-top:6px; max-height:340px; overflow:auto; border:1px solid #d0d0d0; border-radius:8px; padding:8px;"></div>
             </section>
             <div id="startStatus" class="small" style="margin-top:8px;">{{ initial_notice|e }}</div>
           </form>
@@ -12598,6 +12602,60 @@ HTML_PAGE = """<!doctype html>
         await refreshSelectedRun(true);
       }
       setRerunStatusText(`Ricalcolo completato: ${(out.completed_targets || targets).join(", ")}`);
+      await loadRecomputeDiff(true);
+    }
+
+    async function loadRecomputeDiff(auto) {
+      const panel = document.getElementById("rerunDiffPanel");
+      if (!panel) return;
+      if (!selectedRunId) {
+        if (!auto) alert("Seleziona prima una run dallo storico.");
+        return;
+      }
+      panel.style.display = "";
+      panel.innerHTML = "<i>Carico diff prima/dopo...</i>";
+      try {
+        const res = await fetch(`/api/runs/${encodeURIComponent(selectedRunId)}/recompute_diff`);
+        const out = await res.json();
+        if (!res.ok || out.error) {
+          panel.innerHTML = `<i>${esc(String(out.error || "Diff non disponibile."))}</i>`;
+          return;
+        }
+        renderRecomputeDiff(out);
+      } catch (err) {
+        panel.innerHTML = `<i>Errore diff: ${esc(String(err && err.message ? err.message : err))}</i>`;
+      }
+    }
+
+    function renderRecomputeDiff(out) {
+      const panel = document.getElementById("rerunDiffPanel");
+      if (!panel) return;
+      const changes = Array.isArray(out.changes) ? out.changes : [];
+      const head = `<div><b>Diff step_checks prima/dopo</b> — backup: <code>${esc(String(out.backup_used || "-"))}</code> | campi cambiati: ${changes.length}${out.truncated ? " (elenco troncato)" : ""}</div>`;
+      if (!changes.length) {
+        panel.innerHTML = head + "<div style='margin-top:4px;'><i>Nessuna differenza rispetto al backup.</i></div>";
+        return;
+      }
+      const kindColor = {changed: "#b45309", added: "#15803d", removed: "#b91c1c"};
+      const rows = changes.map((c) => {
+        const kind = String(c.kind || "");
+        return "<tr>" +
+          `<td style="padding:2px 6px; white-space:nowrap; color:${kindColor[kind] || "inherit"};">${esc(kind)}</td>` +
+          `<td style="padding:2px 6px; word-break:break-all;"><code>${esc(String(c.key || ""))}</code></td>` +
+          `<td style="padding:2px 6px; word-break:break-all; color:#6b7280;">${esc(String(c.before || ""))}</td>` +
+          `<td style="padding:2px 6px; word-break:break-all;">${esc(String(c.after || ""))}</td>` +
+          "</tr>";
+      }).join("");
+      panel.innerHTML = head + `
+        <table style="width:100%; border-collapse:collapse; margin-top:4px; font-size:12px;">
+          <thead><tr>
+            <th style="text-align:left; padding:2px 6px;">tipo</th>
+            <th style="text-align:left; padding:2px 6px;">campo</th>
+            <th style="text-align:left; padding:2px 6px;">prima</th>
+            <th style="text-align:left; padding:2px 6px;">dopo</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
     }
 
     function renderRunsList() {
@@ -13360,6 +13418,8 @@ HTML_PAGE = """<!doctype html>
     if (rerunClearBtnEl) rerunClearBtnEl.addEventListener("click", () => setRerunTargets([]));
     if (rerunOnlyOrientationBtnEl) rerunOnlyOrientationBtnEl.addEventListener("click", () => setRerunTargets(RERUN_TARGET_PRESETS.orientation));
     if (rerunOnlyRectBtnEl) rerunOnlyRectBtnEl.addEventListener("click", () => setRerunTargets(RERUN_TARGET_PRESETS.rect));
+    const rerunDiffBtnEl = document.getElementById("rerunDiffBtn");
+    if (rerunDiffBtnEl) rerunDiffBtnEl.addEventListener("click", () => loadRecomputeDiff(false));
     document.querySelectorAll("[data-rerun-action]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const action = String(btn.getAttribute("data-rerun-action") || "");
@@ -16358,6 +16418,75 @@ def _mark_stale_running_runs_failed(store: WorkbenchStore) -> None:
         store.update_run_record(run_id, {"status": "failed"})
 
 
+_DIFF_IGNORED_KEYS = {"manual_recompute_updated_at"}
+_DIFF_MAX_CHANGES = 800
+
+
+def _diff_value_repr(value: Any, max_len: int = 240) -> str:
+    try:
+        if isinstance(value, str):
+            text = value
+        else:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        text = str(value)
+    if len(text) > max_len:
+        return text[: max_len - 3] + "..."
+    return text
+
+
+def _diff_step_checks(
+    before: Dict[str, Any],
+    after: Dict[str, Any],
+    max_changes: int = _DIFF_MAX_CHANGES,
+) -> tuple[List[Dict[str, str]], bool]:
+    """Structured before/after diff of two step_checks dicts.
+
+    Returns (changes, truncated). Each change: key (dotted path), kind
+    (changed/added/removed), before, after (stringified, truncated).
+    """
+    changes: List[Dict[str, str]] = []
+    truncated = False
+
+    def _walk(path: str, b: Any, a: Any) -> None:
+        nonlocal truncated
+        if len(changes) >= max_changes:
+            truncated = True
+            return
+        if isinstance(b, dict) and isinstance(a, dict):
+            for key in sorted(set(b) | set(a), key=str):
+                if str(key) in _DIFF_IGNORED_KEYS:
+                    continue
+                if len(changes) >= max_changes:
+                    truncated = True
+                    return
+                sub = f"{path}.{key}" if path else str(key)
+                if key not in b:
+                    changes.append(
+                        {"key": sub, "kind": "added", "before": "", "after": _diff_value_repr(a[key])}
+                    )
+                elif key not in a:
+                    changes.append(
+                        {"key": sub, "kind": "removed", "before": _diff_value_repr(b[key]), "after": ""}
+                    )
+                else:
+                    _walk(sub, b[key], a[key])
+            return
+        if b == a:
+            return
+        changes.append(
+            {
+                "key": path or "<root>",
+                "kind": "changed",
+                "before": _diff_value_repr(b),
+                "after": _diff_value_repr(a),
+            }
+        )
+
+    _walk("", before, after)
+    return changes, truncated
+
+
 def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Path] = None) -> Flask:
     store = WorkbenchStore(data_root=data_root)
     store.prune_missing_run_records()
@@ -17421,6 +17550,56 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
                 "elapsed_sec": float(max(0.0, time.time() - started)),
                 "backup_path": backup_path.as_posix(),
                 "summary": summary,
+            }
+        )
+
+    @app.get("/api/runs/<run_id>/recompute_diff")
+    def api_run_recompute_diff(run_id: str):
+        run_dir = store.run_dir(run_id)
+        if not run_dir.exists():
+            return jsonify({"error": f"run non trovata: {run_id}"}), 404
+        summary_path = run_dir / "step_checks.json"
+        if not summary_path.exists():
+            return jsonify({"error": "step_checks.json non trovato"}), 404
+        backup_dir = run_dir / "analysis" / "manual_recompute"
+        backups = (
+            sorted(backup_dir.glob("step_checks_before_*.json"))
+            if backup_dir.exists()
+            else []
+        )
+        if not backups:
+            return (
+                jsonify(
+                    {
+                        "error": "Nessun backup di ricalcolo trovato: esegui prima un rerun selettivo.",
+                        "backups": [],
+                    }
+                ),
+                404,
+            )
+        requested = str(request.args.get("backup", "") or "").strip()
+        backup_path = backups[-1]
+        if requested:
+            candidate = backup_dir / Path(requested).name
+            if candidate in backups:
+                backup_path = candidate
+        try:
+            before_obj = json.loads(backup_path.read_text(encoding="utf-8"))
+            after_obj = json.loads(summary_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return jsonify({"error": f"lettura file per diff fallita: {exc}"}), 500
+        if not isinstance(before_obj, dict) or not isinstance(after_obj, dict):
+            return jsonify({"error": "contenuto step_checks non valido per il diff"}), 500
+        changes, truncated = _diff_step_checks(before_obj, after_obj)
+        return jsonify(
+            {
+                "ok": True,
+                "run_id": run_id,
+                "backup_used": backup_path.name,
+                "backups": [p.name for p in backups],
+                "changes": changes,
+                "changed_count": len(changes),
+                "truncated": truncated,
             }
         )
 
