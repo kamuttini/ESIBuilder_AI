@@ -5552,141 +5552,9 @@ class RectNameProbeResolver:
         return value, source, support
 
 
-def _parse_group_orientation_from_fss(fss_path: Path) -> Optional[int]:
-    try:
-        text = fss_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-
-    lines = text.splitlines()
-    if len(lines) < 12:
-        return None
-    line_12 = lines[11].strip()
-    if not line_12:
-        return None
-
-    try:
-        value = int(line_12)
-    except ValueError:
-        return None
-
-    if value not in GROUP_ORIENTATION_LABEL:
-        return None
-    return value
-
-
-class GroupOrientationResolver:
-    """Resolve line #12 GROUP_ORIENTATION (4=symbol, 5=depth) from historical data."""
-
-    def __init__(self, manifest_path: Path) -> None:
-        self.by_echo_probe_video: Dict[Tuple[str, str, int, int], Counter[str]] = defaultdict(Counter)
-        self.by_echo_probe: Dict[Tuple[str, str], Counter[str]] = defaultdict(Counter)
-        self.by_vendor_probe_video: Dict[Tuple[str, str, int, int], Counter[str]] = defaultdict(Counter)
-        self.by_vendor_probe: Dict[Tuple[str, str], Counter[str]] = defaultdict(Counter)
-        self.by_vendor_video: Dict[Tuple[str, int, int], Counter[str]] = defaultdict(Counter)
-        self.by_vendor: Dict[str, Counter[str]] = defaultdict(Counter)
-        self._load_manifest(manifest_path)
-
-    def _load_manifest(self, manifest_path: Path) -> None:
-        if not manifest_path.exists():
-            raise RuntimeError(f"Manifest storico non trovato: {manifest_path}")
-
-        folder_rows: Dict[str, Dict[str, str]] = {}
-        with manifest_path.open("r", encoding="utf-8", newline="") as fh:
-            reader = csv.DictReader(fh)
-            for row in reader:
-                folder = (row.get("dataset_folder") or row.get("model_name") or "").strip()
-                if not folder:
-                    continue
-                if folder not in folder_rows:
-                    folder_rows[folder] = row
-
-        for row in folder_rows.values():
-            vendor = (row.get("manufacturer") or "").strip()
-            id_echo = (row.get("fss_id_echo") or "").strip()
-            probe = (row.get("fss_id_probe") or "").strip()
-            vx = (row.get("fss_video_x") or "").strip()
-            vy = (row.get("fss_video_y") or "").strip()
-            fss_path_s = (row.get("fss_path") or "").strip()
-            if not vendor or not fss_path_s:
-                continue
-
-            group_orientation = _parse_group_orientation_from_fss(Path(fss_path_s))
-            if group_orientation is None:
-                continue
-
-            group_orientation_s = str(group_orientation)
-            self.by_vendor[vendor][group_orientation_s] += 1
-
-            if probe:
-                self.by_vendor_probe[(vendor, probe)][group_orientation_s] += 1
-
-            if vx.isdigit() and vy.isdigit():
-                vx_i = int(vx)
-                vy_i = int(vy)
-                self.by_vendor_video[(vendor, vx_i, vy_i)][group_orientation_s] += 1
-                if probe:
-                    self.by_vendor_probe_video[(vendor, probe, vx_i, vy_i)][group_orientation_s] += 1
-
-            if id_echo and probe:
-                self.by_echo_probe[(id_echo, probe)][group_orientation_s] += 1
-                if vx.isdigit() and vy.isdigit():
-                    vx_i = int(vx)
-                    vy_i = int(vy)
-                    self.by_echo_probe_video[(id_echo, probe, vx_i, vy_i)][group_orientation_s] += 1
-
-    @staticmethod
-    def _pick(counter: Counter[str]) -> Tuple[str, float]:
-        winner, count = counter.most_common(1)[0]
-        total = sum(counter.values())
-        support = float(count / max(1, total))
-        return winner, support
-
-    def resolve(
-        self,
-        vendor: str,
-        id_echo: Optional[str],
-        probe_id: Optional[str],
-        video_x: Optional[int],
-        video_y: Optional[int],
-    ) -> Tuple[str, str, float]:
-        if id_echo and probe_id and video_x is not None and video_y is not None:
-            ctr = self.by_echo_probe_video.get((id_echo, probe_id, video_x, video_y))
-            if ctr:
-                value, support = self._pick(ctr)
-                return value, "echo_probe_video", support
-
-        if id_echo and probe_id:
-            ctr = self.by_echo_probe.get((id_echo, probe_id))
-            if ctr:
-                value, support = self._pick(ctr)
-                return value, "echo_probe", support
-
-        if vendor and probe_id and video_x is not None and video_y is not None:
-            ctr = self.by_vendor_probe_video.get((vendor, probe_id, video_x, video_y))
-            if ctr:
-                value, support = self._pick(ctr)
-                return value, "vendor_probe_video", support
-
-        if vendor and probe_id:
-            ctr = self.by_vendor_probe.get((vendor, probe_id))
-            if ctr:
-                value, support = self._pick(ctr)
-                return value, "vendor_probe", support
-
-        if vendor and video_x is not None and video_y is not None:
-            ctr = self.by_vendor_video.get((vendor, video_x, video_y))
-            if ctr:
-                value, support = self._pick(ctr)
-                return value, "vendor_video", support
-
-        if vendor:
-            ctr = self.by_vendor.get(vendor)
-            if ctr:
-                value, support = self._pick(ctr)
-                return value, "vendor_only", support
-
-        return "", "unresolved", 0.0
+# NOTE: GroupOrientationResolver (resolver storico linea #12, 4=symbol/5=depth) e il suo
+# helper _parse_group_orientation_from_fss sono stati rimossi come dead code il 2026-07-09:
+# la pipeline forza #12=4 (symbol). Recuperabili dal tag git v0-checkpoint-pre-claude.
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -5911,8 +5779,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Legacy/debug. In pipeline ufficiale il rect è sempre calcolato su tutti i frame "
-            "della cartella (argomento ignorato)."
+            "Numero frame per il rect (#11) con campionamento uniforme. "
+            "0 = tutti i frame della cartella (default produzione)."
         ),
     )
     parser.add_argument(
@@ -6224,6 +6092,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Soglia confidenza vendor sotto cui attivare la policy low-confidence.",
     )
     parser.add_argument(
+        "--vendor-min-margin",
+        type=float,
+        default=0.0,
+        help=(
+            "Soglia minima sul margine vendor (top1 - top2). Sotto soglia attiva la stessa "
+            "policy low-confidence del vendor. Default 0.0 = disattivato (comportamento storico)."
+        ),
+    )
+    parser.add_argument(
         "--disable-vendor-ocr-fallback",
         action="store_true",
         help=(
@@ -6471,7 +6348,8 @@ def main() -> int:
         raise ValueError("--line14-min-support deve essere tra 0 e 1.")
     if int(args.rect_sample_per_folder) > 0:
         print(
-            "[rect] --rect-sample-per-folder > 0 ignorato: la pipeline usa sempre tutti i frame per cartella.",
+            f"[rect] --rect-sample-per-folder={int(args.rect_sample_per_folder)}: "
+            "campionamento uniforme dei frame per il rect (0=tutti, default produzione).",
             flush=True,
         )
 
@@ -6941,7 +6819,7 @@ def main() -> int:
         rotation_degree_counter[int(rotation_deg_clockwise)] += 1
 
         cls_images = _select_uniform_subset(all_images, args.sample_per_folder)
-        rect_images = list(all_images)
+        rect_images = _select_uniform_subset(all_images, args.rect_sample_per_folder)
 
         capture_input, capture_x, capture_y, capture_support = _infer_capture_metadata_majority(all_images)
 
@@ -6979,11 +6857,18 @@ def main() -> int:
         vendor_decision_reason = (
             f"CNN top-1 sopra soglia ({vendor_conf:.4f} >= {args.vendor_min_confidence:.4f})."
         )
-        if vendor_conf < args.vendor_min_confidence:
+        vendor_low_margin = vendor_margin < float(args.vendor_min_margin)
+        if vendor_conf < args.vendor_min_confidence or vendor_low_margin:
             vendor_topk = _topk_from_probs(vendor_probs, vendor_classes, k=args.interactive_topk)
-            vendor_decision_reason = (
-                f"CNN top-1 sotto soglia ({vendor_conf:.4f} < {args.vendor_min_confidence:.4f})."
-            )
+            if vendor_conf < args.vendor_min_confidence:
+                vendor_decision_reason = (
+                    f"CNN top-1 sotto soglia ({vendor_conf:.4f} < {args.vendor_min_confidence:.4f})."
+                )
+            else:
+                vendor_decision_reason = (
+                    f"CNN margine top1-top2 sotto soglia "
+                    f"({vendor_margin:.4f} < {float(args.vendor_min_margin):.4f})."
+                )
             if not args.disable_vendor_ocr_fallback:
                 ocr_diag = _resolve_vendor_with_ocr(
                     image_paths=all_images,
@@ -7062,7 +6947,8 @@ def main() -> int:
             if not vendor_manual_resolved:
                 if args.low_confidence_policy == "error":
                     raise RuntimeError(
-                        f"{folder.name}: vendor_conf={vendor_conf:.4f} < {args.vendor_min_confidence:.4f}. "
+                        f"{folder.name}: vendor_conf={vendor_conf:.4f} (soglia {args.vendor_min_confidence:.4f}), "
+                        f"vendor_margin={vendor_margin:.4f} (soglia {float(args.vendor_min_margin):.4f}). "
                         f"Top-k: {vendor_topk}"
                     )
                 if args.low_confidence_policy == "ask_user":
@@ -8464,6 +8350,8 @@ def main() -> int:
             review_reasons.append("missing_video_size")
         if vendor_conf < args.vendor_min_confidence and not vendor_manual_resolved:
             review_reasons.append("low_vendor_conf")
+        if vendor_margin < float(args.vendor_min_margin) and not vendor_manual_resolved:
+            review_reasons.append("low_vendor_margin")
         if probe_conf < args.probe_min_confidence and not probe_manual_resolved:
             review_reasons.append("low_probe_conf")
         if (
@@ -8479,8 +8367,8 @@ def main() -> int:
             "osd_low_support",
         }:
             review_reasons.append("rotation_not_reliable")
-        if line_12_group_orientation and line_12_support < 0.60:
-            review_reasons.append("low_group_orientation_support")
+        # #12 e' forzata a 4 (symbol) con support 1.0: il check di support e' inutile
+        # finche' non esiste un resolver reale per la linea #12.
         if su_giu_model is not None and su_giu_images_predicted <= 0:
             review_reasons.append("missing_su_giu_predictions")
         if (
@@ -9389,6 +9277,7 @@ def main() -> int:
         "device": str(device),
         "low_confidence_policy": args.low_confidence_policy,
         "vendor_min_confidence": args.vendor_min_confidence,
+        "vendor_min_margin": float(args.vendor_min_margin),
         "vendor_ocr_fallback_enabled": not args.disable_vendor_ocr_fallback,
         "vendor_ocr_samples": int(args.vendor_ocr_samples),
         "vendor_ocr_timeout_sec": float(args.vendor_ocr_timeout_sec),
@@ -9505,8 +9394,12 @@ def main() -> int:
             if not bool(args.disable_rect_depth_autonomous)
             else "disabled"
         ),
-        "rect_sampling_mode": "all_images_per_folder",
-        "rect_sample_per_folder_arg_ignored": int(args.rect_sample_per_folder),
+        "rect_sampling_mode": (
+            "all_images_per_folder"
+            if int(args.rect_sample_per_folder) <= 0
+            else "uniform_subset_per_folder"
+        ),
+        "rect_sample_per_folder": int(args.rect_sample_per_folder),
         "pipeline_stage_probe": "classifier_temp_with_manual_fallback",
         "pipeline_stage_line04_probe_type": (
             "probe_type_router_plus_lt_split_after_probe_classifier"

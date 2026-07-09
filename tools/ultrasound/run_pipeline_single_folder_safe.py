@@ -3392,7 +3392,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Policy bassa confidenza per la pipeline.",
     )
     p.add_argument("--vendor-min-confidence", type=float, default=0.50)
-    p.add_argument("--probe-min-confidence", type=float, default=0.50)
+    # Default allineato al core predict_fss_head_from_acquisitions.py (0.40); prima era 0.50.
+    p.add_argument("--probe-min-confidence", type=float, default=0.40)
+    p.add_argument(
+        "--vendor-min-margin",
+        type=float,
+        default=0.0,
+        help="Soglia minima margine vendor top1-top2 (0.0 = disattivata, comportamento storico).",
+    )
     p.add_argument(
         "--lr-marker-template-policy",
         type=str,
@@ -3644,6 +3651,8 @@ def main() -> int:
         str(args.low_confidence_policy),
         "--vendor-min-confidence",
         str(float(args.vendor_min_confidence)),
+        "--vendor-min-margin",
+        str(float(args.vendor_min_margin)),
         "--probe-min-confidence",
         str(float(args.probe_min_confidence)),
         "--lr-marker-template-policy",
