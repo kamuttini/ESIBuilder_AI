@@ -114,6 +114,12 @@ def main() -> int:
                         default=REPO_ROOT / "artifacts/20_datasets/us_orientation_binary_20260320/rect_pipeline/model_su_giu_rect/best_model.pt")
     parser.add_argument("--reference-manifest", type=Path,
                         default=PIPE_DIR / "references/rect_dataset_no_negative_v2/manifest_rect_echo.csv")
+    parser.add_argument("--line13-vendor-map", type=Path, default=PIPE_DIR / "maps/vendor_line13_template_map.json",
+                        help="Official vendor->checkpoint map for the line #13 (vendor-name template) nets.")
+    parser.add_argument("--line13-sample", type=int, default=48,
+                        help="Images sampled per folder for the line #13 net (median box).")
+    parser.add_argument("--ckpt-path-rewrite", action="append", default=[],
+                        help="OLD=NEW prefix rewrite for checkpoint paths inside vendor maps.")
     parser.add_argument("--vendor-sample", type=int, default=80)
     parser.add_argument("--rect-vendor-min-confidence", type=float, default=0.70)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -170,6 +176,51 @@ def main() -> int:
 
     print("[load] models ready", flush=True)
 
+    ckpt_rewrites = [tuple(r.split("=", 1)) for r in args.ckpt_path_rewrite if "=" in r]
+
+    def _rewrite_ckpt_path(path_text: str) -> Path:
+        for old, new in ckpt_rewrites:
+            if path_text.startswith(old):
+                path_text = new + path_text[len(old):]
+                break
+        path = Path(path_text)
+        return path if path.is_absolute() else REPO_ROOT / path
+
+    line13_vendor_map: Dict[str, str] = {}
+    if args.line13_vendor_map and args.line13_vendor_map.is_file():
+        line13_vendor_map = {str(k): str(v) for k, v in json.loads(args.line13_vendor_map.read_text()).items()}
+    line13_cache: Dict[str, Tuple[object, int]] = {}
+
+    def _get_line13_model(vendor: str) -> Optional[Tuple[object, int]]:
+        """Vendor-specific line #13 net (official map); None if vendor not mapped."""
+        if vendor not in line13_vendor_map:
+            return None
+        if vendor not in line13_cache:
+            ckpt_path = _rewrite_ckpt_path(line13_vendor_map[vendor])
+            if not ckpt_path.is_file():
+                print(f"[warn] line13 checkpoint missing for {vendor}: {ckpt_path}", flush=True)
+                line13_cache[vendor] = None  # type: ignore[assignment]
+            else:
+                ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+                model = off.RectRegressor(pretrained=False).to(device)
+                model.load_state_dict(ckpt["model_state_dict"])
+                model.eval()
+                line13_cache[vendor] = (model, int(ckpt.get("args", {}).get("image_size", 320)))
+        return line13_cache[vendor]
+
+    def _line13_from_net(vendor: str, folder_path: Path, image_ids: List[str]) -> Tuple[str, str, float]:
+        entry = _get_line13_model(vendor)
+        if not entry:
+            return "", "", 0.0
+        model, img_size = entry
+        stride = max(1, len(image_ids) // max(1, args.line13_sample))
+        paths = [folder_path / i for i in image_ids[::stride][: args.line13_sample]]
+        boxes_abs, _sizes = off._predict_rect_boxes_abs(model, paths, img_size, args.batch_size, device)
+        median = off._median_box(boxes_abs)
+        if not median:
+            return "", "", 0.0
+        return _xyxy_to_tlbr_text(median), f"vendor_net:{vendor}", float(len(boxes_abs))
+
     resolver_holder: List[object] = []
 
     def _resolver_manifest() -> Path:
@@ -200,26 +251,33 @@ def main() -> int:
             print(f"[load] line13 resolver ready ({time.time() - t0:.1f}s)", flush=True)
         return resolver_holder[0]
 
-    if args.redo_line13:
-        folder_rows_all = _load_csv(out / "official_folder.csv")
-        for row in folder_rows_all:
-            vx = int(row["video_x"]) if str(row.get("video_x", "")).strip() else None
-            vy = int(row["video_y"]) if str(row.get("video_y", "")).strip() else None
-            try:
-                text, source, support = _get_resolver().resolve(vendor=str(row.get("vendor_pred", "")), video_x=vx, video_y=vy)
-            except Exception as exc:  # noqa: BLE001
-                text, source, support = "", f"resolver_error:{type(exc).__name__}", 0.0
-            row["line13_text"], row["line13_source"], row["line13_support"] = text, source, f"{float(support):.4f}"
-            print(f"[redo-line13] {row['folder']}: {source} support={support:.3f}", flush=True)
-        tmp = out / "official_folder.csv"
-        tmp.write_text("")
-        _append_csv(tmp, folder_rows_all, FOLDER_FIELDS)
-        return 0
-
     marker_rows = _load_csv(args.marker_run_dir / "per_image_predictions.csv")
     images_by_folder: Dict[str, List[str]] = {}
     for row in marker_rows:
         images_by_folder.setdefault(str(row["folder"]), []).append(str(row["image_id"]))
+
+    if args.redo_line13:
+        folder_rows_all = _load_csv(out / "official_folder.csv")
+        for row in folder_rows_all:
+            folder_name = str(row["folder"])
+            vendor = str(row.get("vendor_pred", ""))
+            text, source, support = _line13_from_net(
+                vendor, args.dataset_root / folder_name, images_by_folder.get(folder_name, [])
+            )
+            if not text:
+                vx = int(row["video_x"]) if str(row.get("video_x", "")).strip() else None
+                vy = int(row["video_y"]) if str(row.get("video_y", "")).strip() else None
+                try:
+                    text, source, support = _get_resolver().resolve(vendor=vendor, video_x=vx, video_y=vy)
+                    source = f"resolver_fallback:{source}"
+                except Exception as exc:  # noqa: BLE001
+                    text, source, support = "", f"resolver_error:{type(exc).__name__}", 0.0
+            row["line13_text"], row["line13_source"], row["line13_support"] = text, source, f"{float(support):.4f}"
+            print(f"[redo-line13] {folder_name}: {source}", flush=True)
+        tmp = out / "official_folder.csv"
+        tmp.write_text("")
+        _append_csv(tmp, folder_rows_all, FOLDER_FIELDS)
+        return 0
 
     done_pairs = {(r["folder"], r["image_id"]) for r in _load_csv(out / "official_per_image.csv")} if args.resume else set()
     completed = {r["folder"] for r in _load_csv(out / "official_folder.csv")} if args.resume else set()
@@ -392,12 +450,17 @@ def main() -> int:
             (_, video_x, video_y), _n = meta_counter.most_common(1)[0]
         elif dom_w and dom_h:
             video_x, video_y = dom_w, dom_h
-        try:
-            line13_text, line13_source, line13_support = _get_resolver().resolve(
-                vendor=vendor_pred, video_x=video_x, video_y=video_y
-            )
-        except Exception as exc:  # noqa: BLE001
-            line13_text, line13_source, line13_support = "", f"resolver_error:{type(exc).__name__}", 0.0
+        # Line #13: computed FROM SCRATCH with the vendor-specific net (official map);
+        # historical resolver only as fallback for unmapped vendors.
+        line13_text, line13_source, line13_support = _line13_from_net(vendor_pred, folder_path, image_ids)
+        if not line13_text:
+            try:
+                line13_text, line13_source, line13_support = _get_resolver().resolve(
+                    vendor=vendor_pred, video_x=video_x, video_y=video_y
+                )
+                line13_source = f"resolver_fallback:{line13_source}"
+            except Exception as exc:  # noqa: BLE001
+                line13_text, line13_source, line13_support = "", f"resolver_error:{type(exc).__name__}", 0.0
 
         su_majority = Counter(r["sugiu_label"] for r in folder_rows if r["sugiu_label"]).most_common(1)
         _append_csv(
