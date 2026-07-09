@@ -267,21 +267,14 @@ def main() -> int:
     for row in envelope_rows:
         env_by_folder.setdefault(str(row["folder"]), []).append(row)
 
-    # Optional merge with the official pipeline outputs.
+    # Optional merge with the official-stages outputs (official_stages_batch.py).
     sugiu_by_key: Dict[Tuple[str, str], Dict[str, str]] = {}
     official_folder: Dict[str, Dict[str, str]] = {}
     if args.official_run_dir:
-        for row in _load_csv(args.official_run_dir / "su_giu_per_image_predictions.csv"):
-            folder_name = str(row.get("folder_name", ""))
-            image_path = str(row.get("image_path", ""))
-            marker_txt = f"/{folder_name}/"
-            pos = image_path.find(marker_txt)
-            if pos < 0:
-                continue
-            rel = image_path[pos + len(marker_txt):]
-            sugiu_by_key[(folder_name, rel)] = row
-        for row in _load_csv(args.official_run_dir / "folder_fss_head_predictions.csv"):
-            official_folder[str(row.get("folder_name", ""))] = row
+        for row in _load_csv(args.official_run_dir / "official_per_image.csv"):
+            sugiu_by_key[(str(row.get("folder", "")), str(row.get("image_id", "")))] = row
+        for row in _load_csv(args.official_run_dir / "official_folder.csv"):
+            official_folder[str(row.get("folder", ""))] = row
 
     href_root = args.dataset_root_href.rstrip("/")
     index_lines: List[str] = []
@@ -324,10 +317,10 @@ def main() -> int:
 
         # Folder-level official boxes (line #11 rect, line #13 vendor-name template).
         folder_official = official_folder.get(folder, {})
-        line11_box = _parse_box_prefix(str(folder_official.get("line_11", "")))
-        line13_box = _parse_box_prefix(str(folder_official.get("line_13_rect_name_echo", "")))
+        line11_box = _parse_box_prefix(str(folder_official.get("line11_final", "")))
+        line13_box = _parse_box_prefix(str(folder_official.get("line13_text", "")))
         if line11_box:
-            env_boxes_payload.append({"kind": "rect", "label": "#11 " + str(folder_official.get("line_11_method", "")), **norm(line11_box)})
+            env_boxes_payload.append({"kind": "rect", "label": "#11 " + str(folder_official.get("line11_method", "")), **norm(line11_box)})
         if line13_box:
             env_boxes_payload.append({"kind": "excl", "label": "#13 vendor", **norm(line13_box)})
 
@@ -341,13 +334,11 @@ def main() -> int:
             sugiu = sugiu_by_key.get((folder, str(row["image_id"])))
             sugiu_html = ""
             if sugiu:
-                crop = _parse_box(
-                    "|".join(str(sugiu.get(k, "")) for k in ("crop_top", "crop_left", "crop_bottom", "crop_right"))
-                )
-                if crop and crop != line11_box:
-                    boxes.append({"kind": "rect", "label": "rect img", **norm(crop)})
-                label = str(sugiu.get("pred_label", "")).lower()
-                conf = str(sugiu.get("confidence", ""))[:4]
+                rect_img = _parse_box(str(sugiu.get("rect_box_abs", "")))
+                if rect_img and rect_img != line11_box:
+                    boxes.append({"kind": "rect", "label": "rect img", **norm(rect_img)})
+                label = str(sugiu.get("sugiu_label", "")).lower()
+                conf = str(sugiu.get("sugiu_conf", ""))[:4]
                 if label in ("su", "giu"):
                     sugiu_html = f" | <span class='sugiu {label}'>{label.upper()} {conf}</span>"
             if marker:
