@@ -54,6 +54,13 @@ tr:hover td { background: #22252c; }
 .box.legacy { border: 2px solid #00c800; }
 .box.legacy .lbl { position: absolute; top: -18px; left: 0; color: #00e000; font-size: 12px; font-weight: bold; text-shadow: 0 0 3px #000; }
 .box.marker { border: 2px solid #ff2828; min-width: 10px; min-height: 10px; }
+.box.rect { border: 2px solid #3c78ff; }
+.box.rect .lbl { position: absolute; bottom: -18px; left: 0; color: #7ea6ff; font-size: 11px; text-shadow: 0 0 3px #000; }
+.box.excl { border: 2px dashed #ffd000; }
+.box.excl .lbl { position: absolute; top: -18px; left: 0; color: #ffd000; font-size: 11px; text-shadow: 0 0 3px #000; }
+.sugiu { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; font-weight: bold; }
+.sugiu.su { background: #1e3a8a; color: #bfdbfe; }
+.sugiu.giu { background: #7c2d12; color: #fed7aa; }
 body.noboxes .box { display: none; }
 .comment { width: 100%; box-sizing: border-box; margin-top: 8px; background: #1a1d23; color: #ffd76e;
   border: 1px solid #444; border-radius: 6px; padding: 6px 8px; font-size: 13px; font-family: inherit; resize: vertical; }
@@ -176,6 +183,24 @@ def _parse_box(text: str) -> Optional[Rect]:
     return (parts[0], parts[1], parts[2], parts[3]) if len(parts) == 4 else None
 
 
+def _parse_box_prefix(text: str) -> Optional[Rect]:
+    """First 4 integers of a pipe-separated .fss-style value (e.g. line #11/#13)."""
+    if not text:
+        return None
+    values: List[int] = []
+    for part in str(text).split("|"):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            values.append(int(float(part)))
+        except ValueError:
+            break
+        if len(values) == 4:
+            return (values[0], values[1], values[2], values[3])
+    return None
+
+
 def _load_csv(path: Path) -> List[Dict[str, str]]:
     if not path.is_file() or not path.stat().st_size:
         return []
@@ -224,6 +249,9 @@ def main() -> int:
     parser.add_argument("--dataset-root-href", type=str, required=True,
                         help="Dataset root path AS SEEN BY THE BROWSER (e.g. /Volumes/SSD_esi1_n3/ACQUISITION ELABORATION).")
     parser.add_argument("--output-dir", type=Path, default=None, help="Default: <run-dir>/review_gallery")
+    parser.add_argument("--official-run-dir", type=Path, default=None,
+                        help="Output dir of predict_fss_head_from_acquisitions.py: merges per-image rect + "
+                             "SU/GIU (su_giu_per_image_predictions.csv) and folder line #11/#13 boxes.")
     args = parser.parse_args()
 
     out = args.output_dir or (args.run_dir / "review_gallery")
@@ -238,6 +266,22 @@ def main() -> int:
     env_by_folder: Dict[str, List[Dict[str, str]]] = {}
     for row in envelope_rows:
         env_by_folder.setdefault(str(row["folder"]), []).append(row)
+
+    # Optional merge with the official pipeline outputs.
+    sugiu_by_key: Dict[Tuple[str, str], Dict[str, str]] = {}
+    official_folder: Dict[str, Dict[str, str]] = {}
+    if args.official_run_dir:
+        for row in _load_csv(args.official_run_dir / "su_giu_per_image_predictions.csv"):
+            folder_name = str(row.get("folder_name", ""))
+            image_path = str(row.get("image_path", ""))
+            marker_txt = f"/{folder_name}/"
+            pos = image_path.find(marker_txt)
+            if pos < 0:
+                continue
+            rel = image_path[pos + len(marker_txt):]
+            sugiu_by_key[(folder_name, rel)] = row
+        for row in _load_csv(args.official_run_dir / "folder_fss_head_predictions.csv"):
+            official_folder[str(row.get("folder_name", ""))] = row
 
     href_root = args.dataset_root_href.rstrip("/")
     index_lines: List[str] = []
@@ -278,6 +322,15 @@ def main() -> int:
 
         env_boxes_payload = [{"kind": "legacy", "label": g, **norm(b)} for g, b in envelopes]
 
+        # Folder-level official boxes (line #11 rect, line #13 vendor-name template).
+        folder_official = official_folder.get(folder, {})
+        line11_box = _parse_box_prefix(str(folder_official.get("line_11", "")))
+        line13_box = _parse_box_prefix(str(folder_official.get("line_13_rect_name_echo", "")))
+        if line11_box:
+            env_boxes_payload.append({"kind": "rect", "label": "#11 " + str(folder_official.get("line_11_method", "")), **norm(line11_box)})
+        if line13_box:
+            env_boxes_payload.append({"kind": "excl", "label": "#13 vendor", **norm(line13_box)})
+
         cards: List[str] = []
         n_marker = 0
         for row in rows:
@@ -285,6 +338,18 @@ def main() -> int:
             if marker:
                 n_marker += 1
             boxes = list(env_boxes_payload)
+            sugiu = sugiu_by_key.get((folder, str(row["image_id"])))
+            sugiu_html = ""
+            if sugiu:
+                crop = _parse_box(
+                    "|".join(str(sugiu.get(k, "")) for k in ("crop_top", "crop_left", "crop_bottom", "crop_right"))
+                )
+                if crop and crop != line11_box:
+                    boxes.append({"kind": "rect", "label": "rect img", **norm(crop)})
+                label = str(sugiu.get("pred_label", "")).lower()
+                conf = str(sugiu.get("confidence", ""))[:4]
+                if label in ("su", "giu"):
+                    sugiu_html = f" | <span class='sugiu {label}'>{label.upper()} {conf}</span>"
             if marker:
                 boxes.append({"kind": "marker", "label": "", **norm(marker)})
             href = _file_href(href_root, folder, str(row["image_id"]))
@@ -294,6 +359,7 @@ def main() -> int:
                 f"scope: {html.escape(row.get('search_scope') or '-')} | "
                 f"status: {html.escape(row.get('status') or '-')}"
                 + (f" | reason: {html.escape(row['review_reason'])}" if row.get("review_reason") else "")
+                + sugiu_html
                 + ("" if marker else " | <b style='color:#f87171'>NESSUN MARKER</b>")
             )
             comment_key = f"{folder}::{row['image_id']}"
@@ -316,7 +382,9 @@ def main() -> int:
             "<button id='toggleBoxes'>Nascondi box</button>"
             "<button id='exportComments'>Esporta commenti CSV</button>"
             "<span class='legend'><span style='color:#00c800'>■ envelope cartella</span>"
-            "<span style='color:#ff2828'>■ marker trovato</span></span>"
+            "<span style='color:#ff2828'>■ marker trovato</span>"
+            "<span style='color:#3c78ff'>■ rect ecografico (#11 / per-immagine)</span>"
+            "<span style='color:#ffd000'>▨ template vendor #13</span></span>"
             "<span class='hint'>Click = tutto schermo · B = box on/off · ←/→ · Esc</span></div>"
             f"<p>Vendor: <b>{html.escape(str(vendor))}</b> · {len(rows)} immagini ({size_txt}) · "
             f"marker trovati: {n_marker}/{len(rows)} · envelope: {html.escape(env_txt)} · {badge}</p>"
