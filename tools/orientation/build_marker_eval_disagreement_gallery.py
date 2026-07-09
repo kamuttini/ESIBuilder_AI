@@ -207,12 +207,14 @@ def main() -> int:
                 f"status: {html.escape(row.get('status') or '-')}"
                 + (f" | reason: {html.escape(row['review_reason'])}" if row.get("review_reason") else "")
             )
+            comment_key = f"{folder}::{row['image_id']}"
             cards.append(
-                "<div class='card'>"
+                f"<div class='card' data-key='{html.escape(comment_key, quote=True)}' data-category='{category}'>"
                 f"<div class='title'>{html.escape(folder)}<br><small>{html.escape(str(row['image_id']))}</small></div>"
                 f"<div class='imgwrap' data-boxes='{html.escape(json.dumps(boxes), quote=True)}' data-src='{img_rel.as_posix()}'>"
                 f"<img loading='lazy' src='{img_rel.as_posix()}'></div>"
                 f"<div class='meta'>{meta}</div>"
+                "<textarea class='comment' placeholder='Commento...' rows='2'></textarea>"
                 "</div>"
             )
         sections.append(
@@ -244,6 +246,10 @@ h1 {{ font-size: 20px; }} h2 {{ font-size: 16px; margin-top: 32px; border-bottom
 .box.legacy .lbl {{ position: absolute; top: -18px; left: 0; color: #00e000; font-size: 12px; font-weight: bold; text-shadow: 0 0 3px #000; }}
 .box.marker {{ border: 2px solid #ff2828; min-width: 10px; min-height: 10px; }}
 body.noboxes .box {{ display: none; }}
+.comment {{ width: 100%; box-sizing: border-box; margin-top: 8px; background: #1a1d23; color: #ffd76e;
+  border: 1px solid #444; border-radius: 6px; padding: 6px 8px; font-size: 13px; font-family: inherit; resize: vertical; }}
+.comment:focus {{ outline: 1px solid #2f6fed; }}
+.card.commented {{ outline: 2px solid #ffd76e33; }}
 #viewer {{ display: none; position: fixed; inset: 0; z-index: 100; background: rgba(8,9,12,.97); }}
 #viewer.open {{ display: flex; flex-direction: column; }}
 #viewer .stage {{ flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }}
@@ -255,10 +261,11 @@ body.noboxes .box {{ display: none; }}
 <h1>Disaccordi marker vs riga 16 legacy</h1>
 <div class="toolbar">
 <button id="toggleBoxes">Nascondi box</button>
-<span class="legend"><span style="color:#3c78ff">■ rect ecografico</span>
-<span style="color:#00c800">■ box riga 16 legacy</span>
-<span style="color:#ff2828">■ marker trovato</span></span>
-<span class="hint">Click su un'immagine = tutto schermo · B = mostra/nascondi box · ←/→ = scorri · Esc = chiudi</span>
+<button id="exportComments">Esporta commenti CSV</button>
+<span class="legend"><span style="color:#3c78ff">■ rect ecografico (riga 11 .fss)</span>
+<span style="color:#00c800">■ box riga 16 .fss legacy</span>
+<span style="color:#ff2828">■ marker trovato dal nuovo detector</span></span>
+<span class="hint">Click su un'immagine = tutto schermo · B = mostra/nascondi box · ←/→ = scorri · Esc = chiudi · I commenti si salvano da soli nel browser</span>
 </div>
 {''.join(sections)}
 <div id="viewer">
@@ -268,6 +275,7 @@ body.noboxes .box {{ display: none; }}
     <button id="vPrev">← Prec</button>
     <button id="vNext">Succ →</button>
     <span id="vTitle"></span>
+    <input id="vComment" placeholder="Commento..." style="flex:1; background:#1a1d23; color:#ffd76e; border:1px solid #444; border-radius:6px; padding:6px 8px; font-size:13px;">
   </div>
 </div>
 <script>
@@ -284,6 +292,42 @@ function renderBoxes(container, boxes) {{
 }}
 const wraps = Array.from(document.querySelectorAll('.imgwrap'));
 wraps.forEach(w => renderBoxes(w, JSON.parse(w.dataset.boxes)));
+
+const STORE = 'marker_gallery_comments_v1';
+let comments = {{}};
+try {{ comments = JSON.parse(localStorage.getItem(STORE) || '{{}}'); }} catch (e) {{}}
+const cards = Array.from(document.querySelectorAll('.card'));
+const vComment = document.getElementById('vComment');
+function setComment(key, value) {{
+  if (value.trim()) comments[key] = value; else delete comments[key];
+  localStorage.setItem(STORE, JSON.stringify(comments));
+  const card = cards.find(c => c.dataset.key === key);
+  if (card) {{
+    const ta = card.querySelector('.comment');
+    if (ta.value !== value) ta.value = value;
+    card.classList.toggle('commented', !!value.trim());
+  }}
+}}
+cards.forEach(c => {{
+  const ta = c.querySelector('.comment');
+  ta.value = comments[c.dataset.key] || '';
+  c.classList.toggle('commented', !!ta.value.trim());
+  ta.addEventListener('input', () => setComment(c.dataset.key, ta.value));
+}});
+document.getElementById('exportComments').onclick = () => {{
+  const lines = [['folder', 'image_id', 'category', 'comment']];
+  cards.forEach(c => {{
+    const v = (comments[c.dataset.key] || '').trim();
+    if (!v) return;
+    const parts = c.dataset.key.split('::');
+    lines.push([parts[0], parts[1], c.dataset.category, v]);
+  }});
+  const csv = lines.map(r => r.map(x => '"' + String(x).replace(/"/g, '""') + '"').join(',')).join('\\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\\ufeff' + csv], {{type: 'text/csv;charset=utf-8'}}));
+  a.download = 'commenti_disaccordi_marker.csv';
+  a.click();
+}};
 
 const body = document.body;
 const toggleBtn = document.getElementById('toggleBoxes');
@@ -305,8 +349,12 @@ function openViewer(i) {{
   renderBoxes(frame, JSON.parse(w.dataset.boxes));
   const card = w.closest('.card');
   vTitle.textContent = (current + 1) + '/' + wraps.length + ' — ' + card.querySelector('.title').innerText.replace('\\n', ' / ');
+  vComment.value = comments[card.dataset.key] || '';
   viewer.classList.add('open');
 }}
+vComment.addEventListener('input', () => {{
+  if (current >= 0) setComment(wraps[current].closest('.card').dataset.key, vComment.value);
+}});
 function closeViewer() {{ viewer.classList.remove('open'); current = -1; }}
 wraps.forEach((w, i) => w.addEventListener('click', () => openViewer(i)));
 document.getElementById('vClose').onclick = closeViewer;
@@ -314,9 +362,11 @@ document.getElementById('vPrev').onclick = () => openViewer(current - 1);
 document.getElementById('vNext').onclick = () => openViewer(current + 1);
 viewer.querySelector('.stage').addEventListener('click', e => {{ if (e.target === e.currentTarget) closeViewer(); }});
 document.addEventListener('keydown', e => {{
+  const typing = e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT';
+  if (e.key === 'Escape' && current >= 0) {{ e.target.blur(); closeViewer(); return; }}
+  if (typing) return;
   if (e.key === 'b' || e.key === 'B') setBoxes(body.classList.contains('noboxes'));
   if (current < 0) return;
-  if (e.key === 'Escape') closeViewer();
   if (e.key === 'ArrowLeft') openViewer(current - 1);
   if (e.key === 'ArrowRight') openViewer(current + 1);
 }});
