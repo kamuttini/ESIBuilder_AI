@@ -37,6 +37,7 @@ import argparse
 import csv
 import importlib.util
 import json
+import re
 import sys
 import time
 from collections import Counter
@@ -103,8 +104,11 @@ def _tlbr_text_to_xyxy(text: str) -> Optional[Tuple[float, float, float, float]]
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--marker-run-dir", type=Path, required=True,
-                        help="Marker runner output dir: defines folders + image lists to process.")
+    parser.add_argument("--marker-run-dir", type=Path, default=None,
+                        help="Optional marker runner output dir: reuse its image lists where available. "
+                             "Folders not present there are enumerated autonomously (dominant resolution).")
+    parser.add_argument("--device", type=str, default="cpu", help="cpu | mps | cuda")
+    parser.add_argument("--folder-regex", type=str, default="")
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--vendor-checkpoint", type=Path, default=PIPE_DIR / "models/vendor_training_no_negative_v2_power/best_model.pt")
@@ -149,7 +153,7 @@ def main() -> int:
 
     from rect_red_pipeline import compute_rect_red_pipeline  # tools/ultrasound on sys.path
 
-    device = torch.device("cpu")
+    device = torch.device(args.device)
     vendor_ckpt = torch.load(args.vendor_checkpoint, map_location="cpu", weights_only=False)
     vendor_classes = list(vendor_ckpt.get("class_names") or [])
     vendor_image_size = int(vendor_ckpt.get("args", {}).get("image_size", 320))
@@ -251,10 +255,49 @@ def main() -> int:
             print(f"[load] line13 resolver ready ({time.time() - t0:.1f}s)", flush=True)
         return resolver_holder[0]
 
-    marker_rows = _load_csv(args.marker_run_dir / "per_image_predictions.csv")
     images_by_folder: Dict[str, List[str]] = {}
-    for row in marker_rows:
-        images_by_folder.setdefault(str(row["folder"]), []).append(str(row["image_id"]))
+    if args.marker_run_dir:
+        for row in _load_csv(args.marker_run_dir / "per_image_predictions.csv"):
+            images_by_folder.setdefault(str(row["folder"]), []).append(str(row["image_id"]))
+
+    import re as _re
+    from collections import Counter as _Counter
+    from PIL import Image as _Image
+
+    IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+    EXCLUDE_FILE_RE = _re.compile(r"Thumbs\.db|Software Release|System Info|proibite", _re.IGNORECASE)
+
+    def _self_collect(folder_path: Path, fstate: Dict[str, object]) -> List[str]:
+        """Autonomous image enumeration: dominant resolution only (as the marker runner)."""
+        paths: List[Path] = []
+        for path in sorted(folder_path.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES or path.name.startswith("._"):
+                continue
+            if EXCLUDE_FILE_RE.search(path.relative_to(folder_path).as_posix()):
+                continue
+            paths.append(path)
+        if not paths:
+            return []
+
+        def _size(p: Path):
+            try:
+                with _Image.open(p) as img:
+                    return img.size
+            except Exception:  # noqa: BLE001
+                return None
+
+        if "dominant_resolution" in fstate:
+            dom = tuple(int(v) for v in str(fstate["dominant_resolution"]).split("x"))
+            kept = [p for p in paths if _size(p) == dom]
+        else:
+            sizes = {p: _size(p) for p in paths}
+            counter = _Counter(s for s in sizes.values() if s)
+            if not counter:
+                return []
+            dom = counter.most_common(1)[0][0]
+            kept = [p for p, s in sizes.items() if s == dom]
+            fstate["dominant_resolution"] = f"{dom[0]}x{dom[1]}"
+        return [p.relative_to(folder_path).as_posix() for p in kept]
 
     if args.redo_line13:
         folder_rows_all = _load_csv(out / "official_folder.csv")
@@ -282,7 +325,14 @@ def main() -> int:
     done_pairs = {(r["folder"], r["image_id"]) for r in _load_csv(out / "official_per_image.csv")} if args.resume else set()
     completed = {r["folder"] for r in _load_csv(out / "official_folder.csv")} if args.resume else set()
 
-    folders = [f for f in sorted(images_by_folder) if f not in completed]
+    folder_pattern = re.compile(args.folder_regex, re.IGNORECASE) if args.folder_regex else None
+    folders = [
+        p.name
+        for p in sorted(args.dataset_root.iterdir())
+        if p.is_dir() and not p.name.startswith(("$", ".")) and p.name != "System Volume Information"
+        and (folder_pattern is None or folder_pattern.search(p.name))
+        and p.name not in completed
+    ]
     if args.max_folders > 0:
         folders = folders[: args.max_folders]
     print(f"[start] {len(completed)} folders done, {len(folders)} to process", flush=True)
@@ -293,8 +343,16 @@ def main() -> int:
         if out_of_time:
             break
         folder_path = args.dataset_root / folder
-        image_ids = images_by_folder[folder]
         fstate = state.setdefault(folder, {})
+        image_ids = images_by_folder.get(folder) or _self_collect(folder_path, fstate)
+        if "dominant_resolution" in fstate:
+            state_path.write_text(json.dumps(state, indent=1, ensure_ascii=False))
+        if not image_ids:
+            _append_csv(out / "official_folder.csv",
+                        [{"folder": folder, "vendor_pred": "", "line11_method": "error:no_images"}], FOLDER_FIELDS)
+            completed.add(folder)
+            print(f"[{index}/{len(folders)}] {folder}: no images", flush=True)
+            continue
 
         # 1) vendor (once per folder)
         if "vendor_pred" not in fstate:
@@ -389,12 +447,13 @@ def main() -> int:
         median = off._median_box(boxes_xyxy)
         line11_median = _xyxy_to_tlbr_text(median) if median else ""
 
-        dominant = ""
-        try:
-            marker_state = json.loads((args.marker_run_dir / "state.json").read_text())
-            dominant = str(marker_state.get(folder, {}).get("dominant_resolution", ""))
-        except Exception:
-            pass
+        dominant = str(fstate.get("dominant_resolution", ""))
+        if not dominant and args.marker_run_dir:
+            try:
+                marker_state = json.loads((args.marker_run_dir / "state.json").read_text())
+                dominant = str(marker_state.get(folder, {}).get("dominant_resolution", ""))
+            except Exception:
+                pass
         try:
             dom_w, dom_h = (int(v) for v in dominant.split("x"))
         except ValueError:
