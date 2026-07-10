@@ -381,7 +381,8 @@ def main() -> int:
                 if vendor_pred not in rect_vendor_cache:
                     ckpt_path = Path(vendor_rect_map[vendor_pred])
                     if not ckpt_path.is_absolute():
-                        ckpt_path = REPO_ROOT / ckpt_path
+                        # Relative entries are relative to the map file location (official convention).
+                        ckpt_path = (args.rect_vendor_map.parent / ckpt_path).resolve()
                     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
                     model = off.RectRegressor(pretrained=False).to(device)
                     model.load_state_dict(ckpt["model_state_dict"])
