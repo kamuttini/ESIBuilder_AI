@@ -846,6 +846,55 @@ def _corroborate_step(step_mm: float, prof: ScaleProfile) -> Tuple[float, int, b
     return best
 
 
+def calibrate_from_geometry(
+    ladder: TickLadder,
+    reads_cm: Sequence[Tuple[float, float]],
+    prof: ScaleProfile,
+    tol: float = 0.12,
+) -> Optional[Tuple[float, float, int, float, int]]:
+    """Calibrate from tick geometry when the labels are too few to fit a line.
+
+    The label-fit path needs two correctly-read numbers; on the zoomed-in / dim views that
+    is often not available (measured: only 10-44% of frames get two correct reads). But the
+    tick *pitch* is measured to ~1 px, and the printed step is one of a tiny set of values.
+    An oracle test showed that ``step / pitch`` reproduces the GT mm_per_px to <2% on 82-88%
+    of Esaote/BK/Hitachi frames *if the step is known*. So we use a single read only to pick
+    the step, then take the precision from the pitch:
+
+      mm_per_px_raw = value_mm / |y_read - y_zero|      # rough, carries the zero noise
+      step          = snap(mm_per_px_raw * pitch)       # to a real printed step
+      mm_per_px     = step / pitch                      # precise, from the pitch
+
+    Returns ``(mm_per_px, y_zero, direction, step_mm, n_agree)`` or None. n_agree is how many
+    reads the calibration explains — 1 means a single-label guess (caller should keep it in
+    review), >=2 means corroborated.
+    """
+    if ladder.pitch <= 0 or len(ladder.ticks_y) < 2 or not reads_cm:
+        return None
+    ends = [min(ladder.ticks_y), max(ladder.ticks_y)]
+    best: Optional[Tuple[Tuple[int, float], float, float, int, float]] = None
+    for y0 in ends:
+        direction = 1 if y0 == ends[0] else -1
+        for y_r, v_cm in reads_cm:
+            d = abs(y_r - y0)
+            if v_cm <= 0 or d < ladder.pitch:
+                continue
+            step_raw = (v_cm * 10.0 / d) * ladder.pitch
+            nearest = min(prof.plausible_tick_mm, key=lambda t: abs(t - step_raw) / t)
+            if abs(step_raw - nearest) / nearest > tol:
+                continue
+            mmpp = nearest / ladder.pitch
+            resids = [abs(mmpp * abs(yy - y0) - vv * 10.0) for yy, vv in reads_cm]
+            agree = sum(1 for r in resids if r <= 3.0)  # within 3 mm
+            key = (agree, -float(np.median(resids)))
+            if best is None or key > best[0]:
+                best = (key, mmpp, y0, direction, nearest)
+    if best is None:
+        return None
+    _key, mmpp, y0, direction, step = best
+    return mmpp, y0, direction, step, best[0][0]
+
+
 def _bands_for(
     width: int,
     rect: Optional[Tuple[int, int, int, int]],
@@ -936,7 +985,46 @@ def detect_scale(
     for ladder in ladders[:max_ladders]:
         labels, side = read_labels(gray, ladder, prof)
         calib = calibrate_from_labels(labels, ladder) if len(labels) >= 2 else None
-        if calib is None:
+        # Geometry calibration (mm_per_px = step/pitch from a single label) is opt-in:
+        # validated to lift coverage (sources.none 41->31% on the chain) and Esaote accepted
+        # quality (65->72%), but on BK the setup consensus promotes some single-label rows
+        # with the wrong 5-vs-10 mm step and accepted quality dips 98->89%. Off by default so
+        # the shipped behaviour stays the committed baseline; needs a consensus guard (only
+        # anchor geometry rows that agree with the folder trend) before it can be default-on.
+        geo = (calibrate_from_geometry(ladder, labels, prof)
+               if (calib is None and labels and os.environ.get("SCALE_GEOM_CALIB")) else None)
+        if calib is None and geo is not None:
+            # A single readable number is enough to pick the step; the pitch gives the
+            # precision. Kept in review (the operator confirms) unless several reads agree,
+            # since one number cannot rule out the 5-vs-10 mm ambiguity on its own.
+            mm_per_px, y0, direction, step_mm, agree = geo
+            y_zero = y0
+            span_mm = max(
+                (direction * (t - y_zero) * mm_per_px for t in ladder.ticks_y), default=0.0
+            )
+            cand = ScalePrediction(
+                ok=True,
+                status="accepted" if agree >= 2 else "review",
+                reason="geometry_step_over_pitch" + ("" if agree >= 2 else "_single_label"),
+                x=ladder.x,
+                y_zero=y_zero,
+                mm_per_px=mm_per_px,
+                tick_pitch_px=ladder.pitch,
+                tick_step_mm=step_mm,
+                y_last_tick=ladder.ticks_y[-1],
+                y_first_tick=ladder.ticks_y[0],
+                ticks_y=list(ladder.ticks_y),
+                direction=direction,
+                span_mm=span_mm,
+                labels=[(y, v * 10.0) for y, v in labels],
+                labels_all=[(y, v * 10.0) for y, v in labels],
+                label_side=side or None,
+                confidence=0.3 * ladder.score + 0.1 * agree,
+                ladder_score=ladder.score,
+                n_ticks=ladder.n_ticks,
+                debug={"calib_source": "geometry"},
+            )
+        elif calib is None:
             cand = ScalePrediction(
                 ok=False,
                 status="review",
