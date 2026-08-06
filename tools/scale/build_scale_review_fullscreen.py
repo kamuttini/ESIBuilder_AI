@@ -25,6 +25,7 @@ import glob
 import importlib.util
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -39,11 +40,18 @@ sys.modules["rep"] = rep
 _spec.loader.exec_module(rep)
 
 
-def collect_folder(folder: str, vendor_hint: str, max_images: int, cap_w: int) -> Optional[dict]:
+def collect_folder(
+    folder: str,
+    vendor_hint: str,
+    max_images: int,
+    cap_w: int,
+    pattern: str = "image_depth_value_setup_*.png",
+    use_consensus: bool = True,
+) -> Optional[dict]:
     base = os.path.join(folder, "image_samples")
     if not os.path.isdir(base):
         base = folder  # a plain directory of images works too
-    paths = sorted(glob.glob(os.path.join(base, "image_depth_value_setup_*.png")))[:max_images]
+    paths = sorted(glob.glob(os.path.join(base, pattern)))[:max_images]
     if not paths:
         return None
     vendor = vendor_hint or rep.guess_vendor(folder)
@@ -53,6 +61,11 @@ def collect_folder(folder: str, vendor_hint: str, max_images: int, cap_w: int) -
         c = rep.process_image(p, vendor)
         if c:
             c["path"] = p
+            # Material outside the configured corpus has no setup_N in the name; fall back to
+            # the trailing number, then to position, purely so the frames have a stable order.
+            if c["depth_index"] < 0:
+                m = re.search(r"(\d+)\.png$", os.path.basename(p), re.I)
+                c["depth_index"] = int(m.group(1)) if m else len(cases)
             cases.append(c)
     if not cases:
         return None
@@ -79,7 +92,10 @@ def collect_folder(folder: str, vendor_hint: str, max_images: int, cap_w: int) -
         for c in cases if c["depth_index"] >= 0
     ]
     cons: Dict[int, object] = {}
-    if cands:
+    # The consensus assumes mm_per_px moves monotonically with the depth index. On raw
+    # material (movie frames, arbitrary order) that assumption is false, so it is skipped
+    # rather than producing a confident-looking but meaningless trend.
+    if cands and use_consensus:
         for k in consolidate_setup(cands, depth_indices=sorted({c.depth_index for c in cands})):
             cons[k.depth_index] = k
 
@@ -377,6 +393,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="A single folder; repeatable. Alternative to --folders-file.")
     ap.add_argument("--root", default="/Volumes/SSD_esi1_n1")
     ap.add_argument("--max-images", type=int, default=14)
+    ap.add_argument("--pattern", default="image_depth_value_setup_*.png",
+                    help="Which images to take. Use '*.png' on raw material.")
+    ap.add_argument("--no-consensus", action="store_true",
+                    help="Skip the setup consensus: right for frames that are not depth steps.")
     ap.add_argument("--cap-width", type=int, default=1500,
                     help="Embedded frame width; higher = sharper zoom, heavier page.")
     ap.add_argument("--high-recall", action="store_true")
@@ -402,7 +422,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         path = folder if os.path.isabs(folder) else os.path.join(args.root, folder)
         print(f"[{i}/{len(entries)}] {vendor or '?'} · {os.path.basename(path)[:44]}", flush=True)
         hint = "" if vendor.endswith("-hard") else vendor
-        d = collect_folder(path, hint, args.max_images, args.cap_width)
+        d = collect_folder(path, hint, args.max_images, args.cap_width,
+                           args.pattern, not args.no_consensus)
         if not d:
             print("      nessuna immagine utilizzabile", flush=True)
             continue
