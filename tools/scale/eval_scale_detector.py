@@ -109,12 +109,17 @@ def predict_row(
         except Exception as exc:  # noqa: BLE001 - never let the model break the run
             print(f"[heatmap] prediction failed on {img_path}: {exc}")
 
-    pred = detect_scale(
-        img,
-        rect=rect,
-        vendor=vendor,
-        prior_x=None if prior is None or prior.ambiguous_column else prior.x,
-    )
+    # The network is a *fallback*, not a constraint. Letting its column drive every frame
+    # also moves the frames the classical stage already got right, and measured on the chain
+    # that cost accepted purity (90.9% -> 87.8%) even with its calibration demoted. Run the
+    # unconstrained detector first, and call on the network only where that came back without
+    # a calibration — which is exactly where the holes are.
+    pred = detect_scale(img, rect=rect, vendor=vendor)
+    if prior is not None and not prior.ambiguous_column and not (pred.ok and pred.mm_per_px):
+        retry = detect_scale(img, rect=rect, vendor=vendor, prior_x=prior.x)
+        if retry.ok and retry.mm_per_px:
+            retry.debug["used_heatmap_prior"] = True
+            pred = retry
 
     if prior is not None and not pred.ok:
         # Classical stage found nothing usable: emit the network's answer for review.
