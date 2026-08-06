@@ -263,7 +263,12 @@ def evaluate_setup(
             # panel's plausible band (another panel's ruler). Both fill coverage but must
             # not anchor the trend or be auto-accepted.
             weak_anchor=bool(
-                p.debug.get("calib_source") == "geometry" or p.debug.get("out_of_band")
+                p.debug.get("calib_source") == "geometry"
+                or p.debug.get("out_of_band")
+                # the network's own calibration head is right ~5% of the time (see
+                # RISULTATI_confronto): use its column/direction, never its mm_per_px as an
+                # anchor. This is what poisoned the consensus when the net was first tried.
+                or p.debug.get("source") == "heatmap"
             ),
         )
         for idx, p in sorted(preds.items())
