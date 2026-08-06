@@ -985,14 +985,12 @@ def detect_scale(
     for ladder in ladders[:max_ladders]:
         labels, side = read_labels(gray, ladder, prof)
         calib = calibrate_from_labels(labels, ladder) if len(labels) >= 2 else None
-        # Geometry calibration (mm_per_px = step/pitch from a single label) is opt-in:
-        # validated to lift coverage (sources.none 41->31% on the chain) and Esaote accepted
-        # quality (65->72%), but on BK the setup consensus promotes some single-label rows
-        # with the wrong 5-vs-10 mm step and accepted quality dips 98->89%. Off by default so
-        # the shipped behaviour stays the committed baseline; needs a consensus guard (only
-        # anchor geometry rows that agree with the folder trend) before it can be default-on.
+        # Geometry calibration (mm_per_px = step/pitch from a single label) fills the frames
+        # the label-fit cannot. It is safe to run by default now that the consensus treats
+        # its single-label output as a weak anchor (marked review, excluded from the trend
+        # fit), so it adds coverage without dragging the robust trend. SCALE_NO_GEOM disables.
         geo = (calibrate_from_geometry(ladder, labels, prof)
-               if (calib is None and labels and os.environ.get("SCALE_GEOM_CALIB")) else None)
+               if (calib is None and labels and not os.environ.get("SCALE_NO_GEOM")) else None)
         if calib is None and geo is not None:
             # A single readable number is enough to pick the step; the pitch gives the
             # precision. Kept in review (the operator confirms) unless several reads agree,
@@ -1004,7 +1002,12 @@ def detect_scale(
             )
             cand = ScalePrediction(
                 ok=True,
-                status="accepted" if agree >= 2 else "review",
+                # Never auto-accept: this rests on one readable number plus a guessed step,
+                # the weakest evidence class in the chain. Measured on BK, auto-accepting the
+                # "2 reads agree" case added 9 accepted of which 6 were wrong (98%->89%).
+                # As review it still supplies coverage and an interpolation anchor, and the
+                # operator confirms — which is exactly the policy for uncertain proposals.
+                status="review",
                 reason="geometry_step_over_pitch" + ("" if agree >= 2 else "_single_label"),
                 x=ladder.x,
                 y_zero=y_zero,

@@ -93,6 +93,10 @@ class ScaleCandidate:
     confidence: float = 0.0
     status: str = "reject"
     n_labels: int = 0
+    # A weak anchor still gets a value and can be corrected/filled, but must not define the
+    # robust trend: e.g. a single-label geometry calibration, which fixes coverage but can
+    # pick the wrong 5-vs-10 mm step and would drag the Theil-Sen fit if it anchored it.
+    weak_anchor: bool = False
 
     @property
     def usable(self) -> bool:
@@ -273,8 +277,17 @@ def consolidate_setup(
     # Theil-Sen (median of pairwise slopes) on log(mm_per_px) vs depth index: it has a
     # real breakdown point, which matters because the outliers we must survive were ~1/3
     # of the accepted rows on BK.
+    #
+    # Fit the trend on the *strong* anchors only. Weak ones (single-label geometry) still
+    # get corrected/filled from the trend below, but must not define it: on BK they picked
+    # the wrong 5-vs-10 mm step and, when allowed to anchor, dragged the fit and promoted
+    # their own wrong value (accepted quality 98%->89%). Excluding them is a no-op when
+    # there are none (the plain baseline), so this cannot regress the label-only path.
+    anchors = [c for c in usable if not c.weak_anchor]
+    if len(anchors) < 3:
+        anchors = usable  # too few strong anchors to fit: fall back to everything
     trend = _theil_sen_log(
-        [(c.depth_index, float(c.mm_per_px)) for c in usable]  # type: ignore[arg-type]
+        [(c.depth_index, float(c.mm_per_px)) for c in anchors]  # type: ignore[arg-type]
     )
     outlier_idx: set[int] = set()
     inliers: List[ScaleCandidate] = []
@@ -362,7 +375,16 @@ def consolidate_setup(
                     notes.append("mm_per_px_snapped_to_setup_trend")
                 if drift > 0.01:
                     notes.append(f"mm_per_px_shift_{drift:.1%}")
-            status = "accepted" if dir_unanimous or raw.direction == direction else "review"
+            # Agreeing with the setup direction is not by itself a licence to auto-accept: a
+            # weak-evidence row (single-label geometry) can sit inside the trend tolerance and
+            # would be promoted on direction alone. Measured on BK that added 9 accepted rows
+            # of which 6 had the wrong step (accepted quality 98%->89%). Weak rows stay in
+            # review — still corrected, still filling coverage, but confirmed by the operator.
+            status = (
+                "accepted"
+                if (dir_unanimous or raw.direction == direction) and not raw.weak_anchor
+                else "review"
+            )
             confidence = raw.confidence
         elif i in outlier_idx:
             # Detected but incoherent with its own folder: this is the case the

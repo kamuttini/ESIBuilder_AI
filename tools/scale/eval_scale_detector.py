@@ -83,9 +83,16 @@ def predict_row(
     instead of a hole.
     """
     img_path = remap_path(row.get("image_path", ""), remap)
-    if not img_path or not Path(img_path).is_file():
+    # The corpus lives on an external volume that intermittently drops out; an OSError from
+    # stat/imread must degrade to "no image for this row" rather than kill a multi-minute run
+    # at 80% (measured: one eval died at setup 25/31 on Errno 5).
+    try:
+        if not img_path or not Path(img_path).is_file():
+            return None
+        img = cv2.imread(img_path, cv2.IMREAD_COLOR)
+    except OSError as exc:
+        print(f"[warn] lettura fallita, riga saltata: {img_path} ({exc})", flush=True)
         return None
-    img = cv2.imread(img_path, cv2.IMREAD_COLOR)
     if img is None:
         return None
 
@@ -252,6 +259,8 @@ def evaluate_setup(
             confidence=p.confidence,
             status=p.status,
             n_labels=len(p.labels),
+            # geometry = one label plus a guessed step: coverage yes, auto-accept no
+            weak_anchor=(p.debug.get("calib_source") == "geometry"),
         )
         for idx, p in sorted(preds.items())
     ]
