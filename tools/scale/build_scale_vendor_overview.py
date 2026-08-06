@@ -144,8 +144,12 @@ def render(results: List[dict], per_vendor: int) -> str:
         cards = []
         for c in r["shown"]:
             cls = {"accepted": "good", "review": "warn", "reject": "bad"}.get(c["status"], "")
+            key = f"{r['vendor']}|{r['folder']}|{c['depth_index']}|{c['name']}"
             cards.append(f"""
-            <div class="card">
+            <div class="card" data-key="{key}" data-vendor="{r['vendor']}"
+                 data-folder="{r['folder']}" data-depth="{c['depth_index']}"
+                 data-name="{c['name']}" data-status="{c['status']}"
+                 data-mmpx="{c['mm_per_px'] or ''}">
               <div class="hd">depth <b>{c['depth_index']}</b>
                 <span class="pill {cls}">{c['status']}</span>
                 <span class="pill">mm/px {c['mm_per_px'] or 'n/d'}</span>
@@ -154,7 +158,18 @@ def render(results: List[dict], per_vendor: int) -> str:
                 <img class="full" src="{c['img']}" alt="">{c['svg']}</div>
                 <div class="zbar"><button data-z="out">−</button><span class="zlvl">100%</span>
                   <button data-z="in">+</button><button data-z="reset">reset</button>
-                  <button class="tgl" data-on="1">nascondi</button></div>
+                  <button class="tgl" data-on="1">nascondi</button>
+                  <button class="fs" title="schermo intero">⛶ schermo intero</button></div>
+                <div class="cbar">
+                  <div class="flags">
+                    <button data-f="col">colonna errata</button>
+                    <button data-f="zero">zero errato</button>
+                    <button data-f="ultima">ultima tacca errata</button>
+                    <button data-f="valori">valori errati</button>
+                    <button data-f="noruler">righello assente</button>
+                  </div>
+                  <input class="note" type="text" placeholder="commento per questo frame...">
+                </div>
               </div>
             </div>""")
         pills = " ".join(pill(s, n) for s, n in sorted(r["status"].items()))
@@ -214,6 +229,21 @@ def render(results: List[dict], per_vendor: int) -> str:
  .zbar .zlvl{{min-width:40px;text-align:center;color:var(--mut)}}
  .zbar button.tgl{{border-color:var(--good);color:var(--good)}}
  .zbar button.tgl[data-on="0"]{{border-color:var(--line);color:var(--mut)}}
+ /* comment bar lives inside the viewer so it stays reachable in fullscreen */
+ .cbar{{position:absolute;right:8px;bottom:8px;left:auto;display:flex;gap:6px;
+        align-items:center;flex-wrap:wrap;justify-content:flex-end;max-width:70%}}
+ .cbar .flags{{display:flex;gap:4px;flex-wrap:wrap}}
+ .cbar .flags button{{background:rgba(10,12,17,.85);font-size:11px;padding:3px 7px}}
+ .cbar .flags button.on{{background:var(--bad);border-color:var(--bad);color:#fff}}
+ .cbar input.note{{background:rgba(10,12,17,.9);color:var(--ink);border:1px solid var(--line);
+                   border-radius:6px;padding:4px 8px;font-size:12px;width:260px}}
+ .card.hasnote{{outline:2px solid var(--warn)}}
+ /* fullscreen: the viewer takes the whole screen and the image is not clipped */
+ .viewer:fullscreen{{max-height:none;height:100vh;width:100vw;background:#000;
+                     display:flex;align-items:center;justify-content:center}}
+ .viewer:fullscreen .stage{{width:100%}}
+ .viewer:fullscreen img.full{{max-height:100vh;width:auto;margin:0 auto}}
+ .viewer:fullscreen .cbar input.note{{width:420px}}
  .legend span{{margin-right:13px;font-size:12px}}
  .k{{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;
      margin-right:4px}}
@@ -230,6 +260,12 @@ def render(results: List[dict], per_vendor: int) -> str:
     <span><i class="k" style="background:#ff5000"></i>numero letto</span>
     <span><i class="k" style="background:#00b4ff"></i>colonna</span>
     <button id="tgl-all" data-on="1">nascondi elaborazioni su tutte</button>
+  </div>
+  <div style="margin-top:9px" class="muted">
+    <b>⛶ schermo intero</b> su ogni frame · flag rapidi e commento nella barra in basso a destra
+    (restano salvati nel browser) ·
+    <button id="exp-cm">Esporta commenti CSV</button>
+    <span class="muted">frame commentati: <b id="cm-count">0</b></span>
   </div>
 </header>
 <div class="wrap">
@@ -260,7 +296,7 @@ document.querySelectorAll('.viewer').forEach(v => {{
   }};
   v.addEventListener('wheel',e=>{{e.preventDefault();const r=v.getBoundingClientRect();
     zoomAt(e.deltaY<0?1.15:1/1.15,e.clientX-r.left,e.clientY-r.top);}},{{passive:false}});
-  v.addEventListener('pointerdown',e=>{{if(e.target.closest('.zbar'))return;
+  v.addEventListener('pointerdown',e=>{{if(e.target.closest('.zbar')||e.target.closest('.cbar'))return;
     drag=true;sx=e.clientX-tx;sy=e.clientY-ty;v.classList.add('dragging');v.setPointerCapture(e.pointerId);}});
   v.addEventListener('pointermove',e=>{{if(drag){{tx=e.clientX-sx;ty=e.clientY-sy;apply();}}}});
   v.addEventListener('pointerup',()=>{{drag=false;v.classList.remove('dragging');}});
@@ -275,8 +311,66 @@ document.querySelectorAll('.viewer').forEach(v => {{
     const on=tgl.dataset.on==='1'; tgl.dataset.on=on?'0':'1';
     tgl.textContent=on?'mostra':'nascondi'; card.classList.toggle('hideovl',on);
   }});
+  // fullscreen on the viewer itself: the zoom/pan handlers keep working as they are
+  const fsb=v.querySelector('.fs');
+  if(fsb) fsb.addEventListener('click',()=>{{
+    if(document.fullscreenElement===v) document.exitFullscreen();
+    else if(v.requestFullscreen) v.requestFullscreen();
+  }});
+  document.addEventListener('fullscreenchange',()=>{{ z=1;tx=0;ty=0;apply(); }});
   apply();
 }});
+
+// ---- commenti: persistenti in locale, esportabili ----
+const CKEY='scale_overview_'+(location.pathname.split('/').pop()||'x');
+let CM={{}};
+try{{ CM=JSON.parse(localStorage.getItem(CKEY)||'{{}}'); }}catch(e){{ CM={{}}; }}
+function cmSave(){{ localStorage.setItem(CKEY,JSON.stringify(CM)); refreshCount(); }}
+function cmGet(k){{ if(!CM[k]) CM[k]={{flags:{{}},note:''}}; return CM[k]; }}
+document.querySelectorAll('.card').forEach(card=>{{
+  const k=card.dataset.key, st=cmGet(k);
+  const note=card.querySelector('.note'); note.value=st.note||'';
+  const paint=()=>{{
+    const any=(st.note&&st.note.trim())||Object.values(st.flags||{{}}).some(Boolean);
+    card.classList.toggle('hasnote',!!any);
+  }};
+  note.addEventListener('input',()=>{{ st.note=note.value; cmSave(); paint(); }});
+  card.querySelectorAll('.cbar .flags button').forEach(b=>{{
+    const f=b.dataset.f;
+    if(st.flags&&st.flags[f]) b.classList.add('on');
+    b.addEventListener('click',()=>{{
+      st.flags=st.flags||{{}}; st.flags[f]=!st.flags[f];
+      b.classList.toggle('on'); cmSave(); paint();
+    }});
+  }});
+  paint();
+}});
+function refreshCount(){{
+  let n=0;
+  document.querySelectorAll('.card').forEach(c=>{{
+    const s=CM[c.dataset.key]; if(!s) return;
+    if((s.note&&s.note.trim())||Object.values(s.flags||{{}}).some(Boolean)) n++;
+  }});
+  const el=document.getElementById('cm-count'); if(el) el.textContent=n;
+}}
+function csvEsc(v){{ return '"'+String(v??'').replace(/"/g,'""')+'"'; }}
+document.getElementById('exp-cm').addEventListener('click',()=>{{
+  const out=[["vendor","cartella","depth","immagine","stato","mm_per_px","flag","commento"]];
+  document.querySelectorAll('.card').forEach(c=>{{
+    const s=CM[c.dataset.key]; if(!s) return;
+    const flags=Object.keys(s.flags||{{}}).filter(f=>s.flags[f]).join('|');
+    const note=(s.note||'').trim();
+    if(!flags&&!note) return;
+    out.push([c.dataset.vendor,c.dataset.folder,c.dataset.depth,c.dataset.name,
+              c.dataset.status,c.dataset.mmpx,flags,note]);
+  }});
+  if(out.length===1){{ alert('Nessun commento da esportare.'); return; }}
+  const csv=out.map(r=>r.map(csvEsc).join(',')).join('\\n');
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([csv],{{type:'text/csv;charset=utf-8;'}}));
+  a.download='commenti_scala.csv'; document.body.appendChild(a); a.click(); a.remove();
+}});
+refreshCount();
 const all=document.getElementById('tgl-all');
 all.addEventListener('click',()=>{{
   const on=all.dataset.on==='1'; all.dataset.on=on?'0':'1';
