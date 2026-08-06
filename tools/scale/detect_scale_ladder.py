@@ -355,8 +355,13 @@ def group_ladders(
     gray_shape: Tuple[int, int],
     prof: ScaleProfile,
     bands: Sequence[Tuple[int, int, str]],
+    rect: Optional[Tuple[int, int, int, int]] = None,
 ) -> List[TickLadder]:
-    """Cluster dashes into vertical ladders, one per candidate x column."""
+    """Cluster dashes into vertical ladders, one per candidate x column.
+
+    ``rect`` (x, y, w, h), when known, mildly favours the ruler of the panel that holds the
+    anatomy — see the multi-panel note at the end of the function.
+    """
     ladders: List[TickLadder] = []
     h, w = gray_shape
     for x_lo, x_hi, side in bands:
@@ -406,6 +411,31 @@ def group_ladders(
                     n_ticks=n_used,
                 )
             )
+    if rect is not None and ladders:
+        # Multi-panel screenshots carry more than one ruler, and a full-screen capture can put
+        # another panel's ruler well inside the search band: measured on Esaote, 12 accepted
+        # rows sat 40-888 px from the right place and only 25% of them calibrated correctly,
+        # against 100% for the rows within +-40 px. The scale belongs to the panel that holds
+        # the anatomy, so ladders further from this rect's edge lose a little score — enough
+        # to break a tie with a distant panel, not enough to override a clearly better ladder.
+        edge = float(rect[0] + rect[2])
+        span = max(1.0, float(abs(prof.right_band_px[1])))
+        out: List[TickLadder] = []
+        for l in ladders:
+            dist = abs(l.x - edge)
+            # Inside the vendor's measured offset range, distance is only a tie-break. Beyond
+            # it the ladder cannot belong to this panel at all — those come from the
+            # whole-frame fallback, which is what picked another panel's ruler 888 px away —
+            # so the penalty has to be decisive rather than cosmetic.
+            penalty = 0.2 * (dist / span) if dist <= span else 0.7 + 0.2 * min(1.0, dist / span)
+            out.append(
+                TickLadder(
+                    x=l.x, ticks_y=l.ticks_y, pitch=l.pitch, y_first=l.y_first,
+                    residual=l.residual, side=l.side, n_ticks=l.n_ticks,
+                    score=l.score - penalty,
+                )
+            )
+        ladders = out
     ladders.sort(key=lambda l: -l.score)
     return ladders
 
@@ -956,7 +986,7 @@ def detect_scale(
         band = gray[:, x_lo:x_hi]
         dashes = find_tick_dashes(band, prof, x_offset=x_lo)
         n_dashes += len(dashes)
-        ladders.extend(group_ladders(dashes, (h, w), prof, [(x_lo, x_hi, side)]))
+        ladders.extend(group_ladders(dashes, (h, w), prof, [(x_lo, x_hi, side)], rect))
 
     if not ladders and prior_x is not None:
         # The prior band was empty: fall back to the geometric bands before giving up.
@@ -966,12 +996,12 @@ def detect_scale(
                 continue
             dashes = find_tick_dashes(gray[:, x_lo:x_hi], prof, x_offset=x_lo)
             n_dashes += len(dashes)
-            ladders.extend(group_ladders(dashes, (h, w), prof, [(x_lo, x_hi, side)]))
+            ladders.extend(group_ladders(dashes, (h, w), prof, [(x_lo, x_hi, side)], rect))
     if not ladders:
         # Last resort: whole frame with a global threshold.
         dashes = find_tick_dashes(gray, prof)
         n_dashes = max(n_dashes, len(dashes))
-        ladders = group_ladders(dashes, (h, w), prof, [(0, w - 1, prof.prefer_side)])
+        ladders = group_ladders(dashes, (h, w), prof, [(0, w - 1, prof.prefer_side)], rect)
     if not ladders:
         return ScalePrediction(
             ok=False,
@@ -980,6 +1010,22 @@ def detect_scale(
             debug={"n_dashes": n_dashes},
         )
     ladders.sort(key=lambda l: -l.score)
+
+    def _out_of_band(l: TickLadder) -> bool:
+        """Is this ladder too far from the rect to be this panel's ruler?
+
+        On multi-panel screenshots the band search can come up empty and the whole-frame
+        fallback then locks onto a *neighbouring panel's* ruler — measured on Esaote, rows
+        sitting 40-888 px away from the right place, of which only 25% calibrated correctly
+        against 100% for the in-band rows. Penalising such a ladder does not help when it is
+        the only candidate, so it is instead flagged: a value that fills coverage and can be
+        corrected, but never a trend anchor and never auto-accepted. An interpolation from the
+        folder trend beats another panel's scale.
+        """
+        if rect is None or l.x is None:
+            return False
+        span = max(1.0, float(abs(prof.right_band_px[1])))
+        return abs(l.x - float(rect[0] + rect[2])) > span
 
     best: Optional[ScalePrediction] = None
     for ladder in ladders[:max_ladders]:
@@ -1111,6 +1157,12 @@ def detect_scale(
     assert best is not None
     best.debug["n_dashes"] = n_dashes
     best.debug["n_ladders"] = len(ladders)
+    chosen = next((l for l in ladders if best.x is not None and abs(l.x - best.x) < 1e-6), None)
+    if chosen is not None and _out_of_band(chosen):
+        best.debug["out_of_band"] = True
+        if best.status == "accepted":
+            best.status = "review"
+        best.reason = (best.reason + ";" if best.reason else "") + "ladder_outside_panel_band"
     return best
 
 

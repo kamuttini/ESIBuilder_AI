@@ -259,8 +259,12 @@ def evaluate_setup(
             confidence=p.confidence,
             status=p.status,
             n_labels=len(p.labels),
-            # geometry = one label plus a guessed step: coverage yes, auto-accept no
-            weak_anchor=(p.debug.get("calib_source") == "geometry"),
+            # Weak evidence: a geometric step guess, or a ladder that sits outside this
+            # panel's plausible band (another panel's ruler). Both fill coverage but must
+            # not anchor the trend or be auto-accepted.
+            weak_anchor=bool(
+                p.debug.get("calib_source") == "geometry" or p.debug.get("out_of_band")
+            ),
         )
         for idx, p in sorted(preds.items())
     ]
