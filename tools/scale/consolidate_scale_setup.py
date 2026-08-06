@@ -97,6 +97,7 @@ class ScaleCandidate:
     # robust trend: e.g. a single-label geometry calibration, which fixes coverage but can
     # pick the wrong 5-vs-10 mm step and would drag the Theil-Sen fit if it anchored it.
     weak_anchor: bool = False
+    notes_multiple: str = ""  # set when the setup trend resolved the tick-multiple ambiguity
 
     @property
     def usable(self) -> bool:
@@ -289,6 +290,30 @@ def consolidate_setup(
     trend = _theil_sen_log(
         [(c.depth_index, float(c.mm_per_px)) for c in anchors]  # type: ignore[arg-type]
     )
+    # --- 2a. resolve the tick-multiple ambiguity on the weak rows -----------
+    # The tick detector either finds every 0.5 cm tick or only every other one; measured on
+    # 134 frames the detected pitch is the true spacing or exactly 2x it (Esaote 16 vs 25,
+    # BK 27 vs 10, Hitachi 8 vs 21). A calibration derived from that pitch is therefore right
+    # or off by a clean factor of two — an ambiguity a single OCR read cannot settle but the
+    # folder trend can. Only weak rows are touched, and only when the trend clearly prefers
+    # the other multiple, so a strong label-based calibration is never rewritten.
+    if trend is not None:
+        for c in usable:
+            if not c.weak_anchor or not c.mm_per_px:
+                continue
+            exp = trend(c.depth_index)
+            if not exp or exp <= 0:
+                continue
+            cur = abs(float(c.mm_per_px) / exp - 1.0)
+            best_k, best_err = 1.0, cur
+            for k in (0.5, 2.0):
+                err = abs(float(c.mm_per_px) * k / exp - 1.0)
+                if err < best_err:
+                    best_k, best_err = k, err
+            if best_k != 1.0 and cur > 0.25 and best_err < 0.12:
+                c.mm_per_px = float(c.mm_per_px) * best_k
+                c.notes_multiple = f"tick_multiple_x{best_k:g}_from_setup_trend"
+
     outlier_idx: set[int] = set()
     inliers: List[ScaleCandidate] = []
     for c in usable:
