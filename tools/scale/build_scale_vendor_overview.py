@@ -159,7 +159,7 @@ def render(results: List[dict], per_vendor: int) -> str:
                 <div class="zbar"><button data-z="out">−</button><span class="zlvl">100%</span>
                   <button data-z="in">+</button><button data-z="reset">reset</button>
                   <button class="tgl" data-on="1">nascondi</button>
-                  <button class="fs" title="schermo intero">⛶ schermo intero</button></div>
+                  <button class="fs" title="ingrandisci a tutto lo schermo">⛶ ingrandisci</button></div>
                 <div class="cbar">
                   <div class="flags">
                     <button data-f="col">colonna errata</button>
@@ -238,12 +238,16 @@ def render(results: List[dict], per_vendor: int) -> str:
  .cbar input.note{{background:rgba(10,12,17,.9);color:var(--ink);border:1px solid var(--line);
                    border-radius:6px;padding:4px 8px;font-size:12px;width:260px}}
  .card.hasnote{{outline:2px solid var(--warn)}}
- /* fullscreen: the viewer takes the whole screen and the image is not clipped */
- .viewer:fullscreen{{max-height:none;height:100vh;width:100vw;background:#000;
-                     display:flex;align-items:center;justify-content:center}}
- .viewer:fullscreen .stage{{width:100%}}
- .viewer:fullscreen img.full{{max-height:100vh;width:auto;margin:0 auto}}
- .viewer:fullscreen .cbar input.note{{width:420px}}
+ /* Maximise with our own CSS instead of the Fullscreen API: this page is often read inside
+    an iframe (the conversation panel), where requestFullscreen is blocked and the button
+    would silently do nothing. A fixed overlay fills whatever viewport we are in. */
+ .viewer.maxed{{position:fixed;inset:0;width:100vw;height:100vh;max-height:none;z-index:9999;
+                background:#000;display:flex;align-items:center;justify-content:center}}
+ .viewer.maxed .stage{{width:auto;height:100%}}
+ .viewer.maxed img.full{{height:100%;width:auto;max-height:100vh}}
+ .viewer.maxed .cbar input.note{{width:420px}}
+ body.hasmax{{overflow:hidden}}
+ .viewer.maxed .zbar,.viewer.maxed .cbar{{z-index:2}}
  .legend span{{margin-right:13px;font-size:12px}}
  .k{{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;
      margin-right:4px}}
@@ -262,7 +266,7 @@ def render(results: List[dict], per_vendor: int) -> str:
     <button id="tgl-all" data-on="1">nascondi elaborazioni su tutte</button>
   </div>
   <div style="margin-top:9px" class="muted">
-    <b>⛶ schermo intero</b> su ogni frame · flag rapidi e commento nella barra in basso a destra
+    <b>⛶ ingrandisci</b> su ogni frame (Esc per chiudere) · flag rapidi e commento nella barra in basso a destra
     (restano salvati nel browser) ·
     <button id="exp-cm">Esporta commenti CSV</button>
     <span class="muted">frame commentati: <b id="cm-count">0</b></span>
@@ -311,13 +315,18 @@ document.querySelectorAll('.viewer').forEach(v => {{
     const on=tgl.dataset.on==='1'; tgl.dataset.on=on?'0':'1';
     tgl.textContent=on?'mostra':'nascondi'; card.classList.toggle('hideovl',on);
   }});
-  // fullscreen on the viewer itself: the zoom/pan handlers keep working as they are
+  // Maximise: our own overlay, so it also works inside an iframe. Zoom/pan need no changes
+  // because the maths reads the viewer's live bounding box.
   const fsb=v.querySelector('.fs');
-  if(fsb) fsb.addEventListener('click',()=>{{
-    if(document.fullscreenElement===v) document.exitFullscreen();
-    else if(v.requestFullscreen) v.requestFullscreen();
-  }});
-  document.addEventListener('fullscreenchange',()=>{{ z=1;tx=0;ty=0;apply(); }});
+  const setMax=(on)=>{{
+    v.classList.toggle('maxed',on);
+    document.body.classList.toggle('hasmax',on);
+    if(fsb) fsb.textContent = on ? '✕ chiudi' : '⛶ ingrandisci';
+    z=1;tx=0;ty=0; apply();
+  }};
+  if(fsb) fsb.addEventListener('click',()=>setMax(!v.classList.contains('maxed')));
+  v.addEventListener('keydown',e=>{{ if(e.key==='Escape') setMax(false); }});
+  v._setMax=setMax;
   apply();
 }});
 
@@ -325,7 +334,13 @@ document.querySelectorAll('.viewer').forEach(v => {{
 const CKEY='scale_overview_'+(location.pathname.split('/').pop()||'x');
 let CM={{}};
 try{{ CM=JSON.parse(localStorage.getItem(CKEY)||'{{}}'); }}catch(e){{ CM={{}}; }}
-function cmSave(){{ localStorage.setItem(CKEY,JSON.stringify(CM)); refreshCount(); }}
+function cmSave(){{ localStorage.setItem(CKEY,JSON.stringify(CM)); refreshCount();
+// Esc chiude l'ingrandimento da qualunque punto della pagina
+document.addEventListener('keydown',e=>{{
+  if(e.key!=='Escape') return;
+  const m=document.querySelector('.viewer.maxed');
+  if(m && m._setMax) m._setMax(false);
+}}); }}
 function cmGet(k){{ if(!CM[k]) CM[k]={{flags:{{}},note:''}}; return CM[k]; }}
 document.querySelectorAll('.card').forEach(card=>{{
   const k=card.dataset.key, st=cmGet(k);
@@ -371,6 +386,12 @@ document.getElementById('exp-cm').addEventListener('click',()=>{{
   a.download='commenti_scala.csv'; document.body.appendChild(a); a.click(); a.remove();
 }});
 refreshCount();
+// Esc chiude l'ingrandimento da qualunque punto della pagina
+document.addEventListener('keydown',e=>{{
+  if(e.key!=='Escape') return;
+  const m=document.querySelector('.viewer.maxed');
+  if(m && m._setMax) m._setMax(false);
+}});
 const all=document.getElementById('tgl-all');
 all.addEventListener('click',()=>{{
   const on=all.dataset.on==='1'; all.dataset.on=on?'0':'1';
