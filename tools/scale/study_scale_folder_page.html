@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="it"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Studio scala — cartella</title>
+<style>
+ :root{--bg:#0b0d11;--panel:#14171e;--ink:#e9eaee;--mut:#98a0ad;--line:#262c37;
+       --good:#37d67a;--bad:#ff5470;--warn:#ffb020;--add:#ff5ec8;--tick:#ffd24a;--last:#a000c8}
+ *{box-sizing:border-box}
+ html,body{height:100%;margin:0}
+ body{background:var(--bg);color:var(--ink);font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+      display:flex;flex-direction:column;overflow:hidden}
+ .bar{display:flex;gap:9px;align-items:center;padding:6px 12px;background:var(--panel);
+      border-bottom:1px solid var(--line);flex-wrap:wrap;flex:0 0 auto}
+ .bar.bottom{border-top:1px solid var(--line);border-bottom:none}
+ select,button,input{background:#232732;color:var(--ink);border:1px solid var(--line);
+                     border-radius:6px;padding:4px 9px;font-size:12px}
+ button{cursor:pointer} button.on{background:var(--bad);border-color:var(--bad);color:#fff}
+ button.tgl.on{background:var(--good);border-color:var(--good);color:#0b0d11}
+ button.mode.on{background:var(--add);border-color:var(--add);color:#111}
+ .muted{color:var(--mut)}
+ .pill{display:inline-block;padding:1px 8px;border-radius:99px;border:1px solid var(--line);
+       font-size:11px;color:var(--mut)}
+ .pill.good{border-color:var(--good);color:var(--good)}
+ .pill.warn{border-color:var(--warn);color:var(--warn)}
+ .pill.bad{border-color:var(--bad);color:var(--bad)}
+ #main{flex:1 1 auto;display:flex;min-height:0}
+ #stage{flex:1 1 auto;position:relative;overflow:hidden;background:#000;cursor:grab}
+ #stage.dragging{cursor:grabbing} #stage.adding{cursor:crosshair}
+ #wrap{position:absolute;left:0;top:0;transform-origin:0 0}
+ #img{display:block;max-width:none} #ovl{position:absolute;inset:0;width:100%;height:100%}
+ body.hideovl #ovl{display:none}
+ #side{flex:0 0 320px;background:var(--panel);border-left:1px solid var(--line);
+       overflow-y:auto;padding:10px 12px;font-size:12px}
+ #side h3{margin:12px 0 5px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;
+          color:var(--mut)}
+ #side h3:first-child{margin-top:0}
+ .st{border-left:3px solid var(--line);padding:5px 9px;margin:5px 0;background:#12141a}
+ .st.ok{border-color:var(--good)} .st.warn{border-color:var(--warn)} .st.bad{border-color:var(--bad)}
+ .st b{display:block;font-size:11px;color:var(--mut);text-transform:uppercase}
+ table{border-collapse:collapse;width:100%;font-size:11px;margin:4px 0}
+ td,th{border-bottom:1px solid var(--line);padding:2px 4px;text-align:left}
+ .hint{font-size:11px;color:var(--mut)}
+ .k{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:middle;margin-right:3px}
+</style></head><body>
+<div class="bar">
+  <b id="fold"></b><span class="muted" id="vend"></span>
+  <b id="counter">–</b>
+  <button id="pv" title="←">◀</button><button id="nx" title="→">▶</button>
+  <span id="meta" class="muted"></span>
+  <span style="flex:1"></span>
+  <button id="tgl" class="tgl on" title="h">elaborazione: ON</button>
+  <button id="rz" title="0">reset zoom</button>
+  <button id="exp">Esporta CSV</button>
+  <span class="muted">rivisti <b id="cnt">0</b></span>
+</div>
+<div id="main">
+  <div id="stage"><div id="wrap"><img id="img" alt=""><svg id="ovl"></svg></div></div>
+  <div id="side"></div>
+</div>
+<div class="bar bottom">
+  <span class="hint"><i class="k" style="background:#ffd24a"></i>tacche
+    <i class="k" style="background:#a000c8"></i>ultima
+    <i class="k" style="background:#37d67a"></i>zero
+    <i class="k" style="background:#ff5000"></i>numeri
+    <i class="k" style="background:#ff5ec8"></i>aggiunti</span>
+  <button id="m-tick" class="mode" title="t">+ / − tacca</button>
+  <button id="m-num" class="mode" title="n">+ numero</button>
+  <span id="flags"></span>
+  <input id="note" type="text" placeholder="commento su questo frame..." style="flex:1;min-width:180px">
+  <span class="hint">← → frame · h overlay · t tacche · n numeri · trascina le maniglie</span>
+</div>
+<script>
+const D = __DATA__;
+const F = D.frames;
+const FLAGS=[["zona","zona"],["zero","zero"],["tacche","tacche"],["numeri","numeri"],["depth","depth"]];
+const SK='scale_study_'+(D.folder||'x');
+let ST={}; try{ST=JSON.parse(localStorage.getItem(SK)||'{}');}catch(e){ST={};}
+let i=0, z=1, tx=0, ty=0, mode=null;
+const $=id=>document.getElementById(id);
+const cur=()=>F[i];
+const key=()=>D.folder+'|'+cur().name;
+function st(){const k=key(); if(!ST[k])ST[k]={flags:{},note:'',x:null,y_zero:null,y_far:null,
+  ticks_add:[],ticks_del:[],nums:[]}; return ST[k];}
+function save(){localStorage.setItem(SK,JSON.stringify(ST)); count();}
+function count(){let n=0; for(const k in ST){const s=ST[k];
+  if((s.note&&s.note.trim())||Object.values(s.flags||{}).some(Boolean)||s.x!=null||s.y_zero!=null
+     ||s.y_far!=null||(s.ticks_add||[]).length||(s.ticks_del||[]).length||(s.nums||[]).length)n++;}
+  $('cnt').textContent=n;}
+
+function ticksOf(f,s){
+  const del=new Set((s.ticks_del||[]).map(v=>Math.round(v)));
+  return f.ticks.filter(t=>!del.has(Math.round(t))).concat(s.ticks_add||[]).sort((a,b)=>a-b);
+}
+function draw(){
+  const f=cur(), s=st(), sc=f.scale, o=$('ovl');
+  const X=(s.x??f.x), YZ=(s.y_zero??f.y_zero), YF=(s.y_far??f.y_far);
+  const W=Math.round(f.w*sc), H=Math.round(f.h*sc);
+  o.setAttribute('viewBox',`0 0 ${W} ${H}`); o.setAttribute('preserveAspectRatio','none');
+  if(X==null){o.innerHTML='<text x="12" y="22" fill="#ff5470" font-size="13">nessun righello rilevato</text>';return;}
+  const px=X*sc, tk=ticksOf(f,s), many=tk.length>18;
+  let h=`<line class="colline" data-h="col" x1="${px}" y1="0" x2="${px}" y2="${H}" stroke="#00b4ff"
+          stroke-width="1" stroke-dasharray="4 6" opacity="0.6"/>`;
+  tk.forEach((t,n)=>{
+    const y=t*sc, isLast=(YF!=null && Math.abs(t-YF)<0.6);
+    h+=`<line data-tick="${t}" x1="${px-10}" y1="${y}" x2="${px+10}" y2="${y}"
+         stroke="${isLast?'#a000c8':'#ffd24a'}" stroke-width="${isLast?2.6:1.3}" opacity="0.97"/>`;
+    if(f.mm_per_px && YZ!=null && (!many||n%2===0)){
+      const v=(f.B_zero_end==='top'?1:-1)*(t-YZ)*f.mm_per_px/10;
+      h+=`<text x="${px+13}" y="${y+4}" fill="#ffd24a" font-size="11">${v.toFixed(1)}</text>`;
+    }
+  });
+  f.labels.forEach(([y,v])=>{
+    const sus=(f.D_suspect||[]).some(p=>Math.abs(p[0]-y)<0.6);
+    h+=`<circle cx="${px}" cy="${y*sc}" r="5" fill="none" stroke="${sus?'#ff5470':'#ff5000'}" stroke-width="2"/>`
+     +`<text x="${px-15}" y="${y*sc+4}" fill="${sus?'#ff5470':'#ff8c46'}" font-size="11" text-anchor="end">${v}${sus?' ?':''}</text>`;
+  });
+  (s.nums||[]).forEach((p,n)=>{
+    h+=`<g data-num="${n}" style="cursor:pointer"><circle cx="${px}" cy="${p[0]*sc}" r="4"
+         fill="#ff5ec8" fill-opacity=".6" stroke="#ff5ec8" stroke-width="1.5"/>
+        <text x="${px+13}" y="${p[0]*sc+4}" fill="#ff5ec8" font-size="11" font-weight="bold">${p[1]}</text></g>`;
+  });
+  if(YF!=null) h+=`<rect class="handle" data-h="far" x="${px}" y="${YF*sc}" width="13" height="13"
+     transform="translate(-6.5,-6.5)" fill="#a000c8" fill-opacity=".8" stroke="#fff" stroke-width="1"/>`;
+  if(YZ!=null) h+=`<circle class="handle" data-h="zero" cx="${px}" cy="${YZ*sc}" r="8" fill="#37d67a"
+     fill-opacity=".35" stroke="#37d67a" stroke-width="2.5"/>`
+     +`<text x="${px+15}" y="${YZ*sc-10}" fill="#37d67a" font-size="12" font-weight="bold">0</text>`;
+  o.innerHTML=h;
+}
+function layout(){
+  const f=cur(), sc=f.scale, W=Math.round(f.w*sc), H=Math.round(f.h*sc);
+  const im=$('img'); im.src=f.img; im.width=W; im.height=H;
+  $('wrap').style.width=W+'px'; $('wrap').style.height=H+'px';
+  const r=$('stage').getBoundingClientRect();
+  z=Math.min(r.width/W,r.height/H); tx=(r.width-W*z)/2; ty=(r.height-H*z)/2; applyT();
+}
+const applyT=()=>{$('wrap').style.transform=`translate(${tx}px,${ty}px) scale(${z})`;};
+
+function side(){
+  const f=cur(), s=st(), tk=ticksOf(f,s);
+  const zoneTxt = D.zone ? `x = ${D.zone.x} ± ${D.zone.half} px<br><span class="muted">rilevata su
+      ${D.zone.found}/${D.zone.total} frame della cartella</span>` : 'non determinata';
+  const og = Object.entries(D.orient_groups||{}).map(([k,v])=>`${k}: ${v}`).join(' · ') || 'non disponibile';
+  const votes = Object.entries(f.D_votes||{}).map(([k,v])=>`${k} mm ×${v}`).join(', ') || '—';
+  const susRows = (f.D_suspect||[]).map(p=>`<tr><td>y ${p[0]}</td><td style="color:#ff5470">${p[1]} cm</td></tr>`).join('');
+  const cohRows = (f.D_coherent||[]).map(p=>`<tr><td>y ${p[0]}</td><td style="color:#37d67a">${p[1]} cm</td></tr>`).join('');
+  const eCls = f.E_verdict.startsWith('coerente')?'ok':(f.E_verdict?'bad':'');
+  $('side').innerHTML = `
+   <h3>A · zona della scala</h3>
+   <div class="st ${D.zone?'ok':'bad'}"><b>cartella</b>${zoneTxt}
+     ${f.A_used_zone?'<br><span class="pill warn">questo frame ha usato la zona della cartella</span>':''}</div>
+   <h3>B · orientamento e zero</h3>
+   <div class="st ${f.B_orient?'ok':'warn'}"><b>gruppi nella cartella</b>${og}<br>
+     questo frame: <b>${f.B_orient||'?'}</b>${f.B_conf!=null?` (conf ${f.B_conf})`:''}
+     → zero in <b>${f.B_zero_end==='top'?'alto':'basso'}</b>
+     ${f.B_zero_moved?'<br><span class="pill warn">zero spostato all\'estremo indicato dall\'orientamento</span>':''}</div>
+   <h3>C · tacche</h3>
+   <div class="st ${tk.length?'ok':'bad'}"><b>rilevate</b>${tk.length} tacche
+     ${(s.ticks_add||[]).length?` (+${s.ticks_add.length} a mano)`:''}
+     ${(s.ticks_del||[]).length?` (−${s.ticks_del.length})`:''}<br>
+     passo ${f.pitch?f.pitch.toFixed(1)+' px':'n/d'} · ultima tacca
+     <span style="color:#a000c8">y ${s.y_far??f.y_far??'n/d'}</span></div>
+   <h3>D · numeri e coerenza del passo</h3>
+   <div class="st ${(f.D_suspect||[]).length?'warn':((f.D_coherent||[]).length?'ok':'bad')}">
+     <b>passo dedotto dai numeri</b>${f.D_step_mm?f.D_step_mm+' mm per tacca':'non deducibile'}<br>
+     <span class="muted">voti: ${votes}</span>
+     ${cohRows?`<table><tr><th>coerenti</th><th></th></tr>${cohRows}</table>`:''}
+     ${susRows?`<table><tr><th>sospetti</th><th></th></tr>${susRows}</table>`:''}
+     ${(s.nums||[]).length?`<span class="pill warn">${s.nums.length} numeri inseriti a mano</span>`:''}</div>
+   <h3>E · confronto con la depth</h3>
+   <div class="st ${eCls}"><b>interfaccia</b>${f.E_depth_interface!=null?f.E_depth_interface+' mm'+(f.E_depth_from_interface?'':' (non dall\'interfaccia)'):'non disponibile'}<br>
+     <b>dalla scala</b>${f.E_depth_scale!=null?f.E_depth_scale+' mm':'n/d'}<br>
+     ${f.E_verdict?`<b>esito</b>${f.E_verdict}`:'<span class="muted">non verificabile</span>'}</div>
+   <h3>calibrazione</h3>
+   <div class="st"><b>mm per pixel</b>${f.mm_per_px?f.mm_per_px.toFixed(4):'n/d'}
+     ${f.reason?`<br><span class="muted">${f.reason}</span>`:''}</div>`;
+}
+function show(){
+  const f=cur(), s=st();
+  $('fold').textContent=D.folder; $('vend').textContent='vendor '+D.vendor;
+  $('counter').textContent=`${i+1}/${F.length}`;
+  const cls={accepted:'good',review:'warn',reject:'bad'}[f.status]||'';
+  $('meta').innerHTML=`<span class="pill ${cls}">${f.status}</span>`
+    +`<span class="pill">frame ${f.idx+1}</span>`
+    +`<span class="pill">tacche ${ticksOf(f,s).length}</span>`
+    +((s.x!=null||s.y_zero!=null||s.y_far!=null||(s.ticks_add||[]).length||(s.ticks_del||[]).length||(s.nums||[]).length)
+      ?' <span class="pill warn">corretto a mano</span>':'');
+  $('note').value=s.note||'';
+  [...$('flags').children].forEach(b=>b.classList.toggle('on',!!(s.flags||{})[b.dataset.f]));
+  layout(); draw(); side();
+}
+const go=d=>{i=(i+d+F.length)%F.length; show();};
+$('pv').onclick=()=>go(-1); $('nx').onclick=()=>go(1); $('rz').onclick=()=>layout();
+$('tgl').onclick=()=>{document.body.classList.toggle('hideovl');
+  const on=!document.body.classList.contains('hideovl');
+  $('tgl').classList.toggle('on',on); $('tgl').textContent='elaborazione: '+(on?'ON':'OFF');};
+function setMode(m){mode=(mode===m?null:m);
+  $('m-tick').classList.toggle('on',mode==='tick'); $('m-num').classList.toggle('on',mode==='num');
+  $('stage').classList.toggle('adding',!!mode);}
+$('m-tick').onclick=()=>setMode('tick'); $('m-num').onclick=()=>setMode('num');
+FLAGS.forEach(([f,lab],n)=>{const b=document.createElement('button');b.dataset.f=f;
+  b.textContent=`${n+1} ${lab}`;
+  b.onclick=()=>{const s=st();s.flags=s.flags||{};s.flags[f]=!s.flags[f];b.classList.toggle('on');save();show();};
+  $('flags').appendChild(b);});
+$('note').addEventListener('input',()=>{st().note=$('note').value;save();});
+document.addEventListener('keydown',e=>{
+  if(e.target===$('note')){if(e.key==='Escape')$('note').blur();return;}
+  if(e.key==='ArrowRight'){go(1);e.preventDefault();}
+  else if(e.key==='ArrowLeft'){go(-1);e.preventDefault();}
+  else if(e.key==='h'||e.key==='H')$('tgl').click();
+  else if(e.key==='0')layout();
+  else if(e.key==='t'||e.key==='T')setMode('tick');
+  else if(e.key==='n'||e.key==='N')setMode('num');
+  else if('12345'.includes(e.key)){const b=$('flags').children[+e.key-1];if(b)b.click();}
+});
+const stage=$('stage'); let drag=null,sx=0,sy=0;
+const toOrig=e=>{const f=cur(),r=$('wrap').getBoundingClientRect();
+  return {x:(e.clientX-r.left)/z/f.scale, y:(e.clientY-r.top)/z/f.scale};};
+stage.addEventListener('wheel',e=>{e.preventDefault();
+  const r=stage.getBoundingClientRect(),cx=e.clientX-r.left,cy=e.clientY-r.top;
+  const k=e.deltaY<0?1.15:1/1.15,nz=Math.max(.05,Math.min(20,z*k));
+  tx=cx-(cx-tx)*(nz/z);ty=cy-(cy-ty)*(nz/z);z=nz;applyT();},{passive:false});
+stage.addEventListener('pointerdown',e=>{
+  const f=cur(), s=st(), p=toOrig(e);
+  if(mode==='tick'){
+    const g=e.target.getAttribute&&e.target.getAttribute('data-tick');
+    if(g!=null){ s.ticks_del=(s.ticks_del||[]).concat([parseFloat(g)]);
+                 s.ticks_add=(s.ticks_add||[]).filter(v=>Math.abs(v-parseFloat(g))>0.6); }
+    else s.ticks_add=(s.ticks_add||[]).concat([Math.round(p.y*10)/10]);
+    save(); show(); e.preventDefault(); return;
+  }
+  if(mode==='num'){
+    const g=e.target.closest&&e.target.closest('[data-num]');
+    if(g){ s.nums.splice(+g.getAttribute('data-num'),1); }
+    else { const v=prompt('Valore in cm a questa altezza:');
+           if(v && v.trim()) s.nums=(s.nums||[]).concat([[Math.round(p.y*10)/10, v.trim()]]); }
+    save(); show(); e.preventDefault(); return;
+  }
+  const h=e.target.getAttribute&&e.target.getAttribute('data-h');
+  if(h) drag={mode:'handle',h};
+  else {drag={mode:'pan'};sx=e.clientX-tx;sy=e.clientY-ty;stage.classList.add('dragging');}
+  stage.setPointerCapture(e.pointerId); e.preventDefault();
+});
+stage.addEventListener('pointermove',e=>{
+  if(!drag)return;
+  if(drag.mode==='pan'){tx=e.clientX-sx;ty=e.clientY-sy;applyT();return;}
+  const f=cur(),s=st(),p=toOrig(e);
+  if(drag.h==='col') s.x=Math.max(0,Math.min(f.w,Math.round(p.x*10)/10));
+  else if(drag.h==='zero') s.y_zero=Math.max(0,Math.min(f.h,Math.round(p.y*10)/10));
+  else if(drag.h==='far') s.y_far=Math.max(0,Math.min(f.h,Math.round(p.y*10)/10));
+  draw();
+});
+stage.addEventListener('pointerup',()=>{if(drag&&drag.mode==='handle'){save();show();}
+  drag=null;stage.classList.remove('dragging');});
+const esc=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
+$('exp').onclick=()=>{
+  const out=[["cartella","vendor","immagine","frame_pos","stato","orientamento","zero_end",
+    "pred_x","pred_y_zero","pred_y_far","corr_x","corr_y_zero","corr_y_far",
+    "tacche_aggiunte","tacche_rimosse","numeri_inseriti","mm_per_px","passo_dai_numeri",
+    "numeri_sospetti","depth_interfaccia","depth_da_scala","esito_depth","flag","commento"]];
+  F.forEach(f=>{
+    const s=ST[D.folder+'|'+f.name]; if(!s) return;
+    const fl=Object.keys(s.flags||{}).filter(x=>s.flags[x]).join('|');
+    const touched=s.x!=null||s.y_zero!=null||s.y_far!=null||(s.ticks_add||[]).length
+                  ||(s.ticks_del||[]).length||(s.nums||[]).length;
+    if(!fl && !(s.note||'').trim() && !touched) return;
+    out.push([D.folder,D.vendor,f.name,f.idx,f.status,f.B_orient,f.B_zero_end,
+      f.x??'',f.y_zero??'',f.y_far??'',s.x??'',s.y_zero??'',s.y_far??'',
+      (s.ticks_add||[]).join('|'),(s.ticks_del||[]).join('|'),
+      (s.nums||[]).map(p=>p[0]+':'+p[1]).join('|'),
+      f.mm_per_px??'',f.D_step_mm??'',(f.D_suspect||[]).map(p=>p[0]+':'+p[1]).join('|'),
+      f.E_depth_interface??'',f.E_depth_scale??'',f.E_verdict,fl,(s.note||'').trim()]);
+  });
+  if(out.length===1){alert('Niente da esportare.');return;}
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([out.map(r=>r.map(esc).join(',')).join('\n')],
+    {type:'text/csv;charset=utf-8;'}));
+  a.download='studio_scala_'+D.folder.replace(/[^A-Za-z0-9_-]+/g,'_')+'.csv';
+  document.body.appendChild(a);a.click();a.remove();
+};
+window.addEventListener('resize',()=>layout());
+show(); count();
+</script></body></html>
