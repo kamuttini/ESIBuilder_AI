@@ -118,7 +118,10 @@ def run_study(folder: str, opts: dict) -> None:
             JOB["state"] = "error"
 
 
-HOME = """<!doctype html><html lang="it"><head><meta charset="utf-8">
+# Raw string: the JS below contains \n escapes, and letting Python interpret them
+# turned them into real line breaks that split the JS string literals in half —
+# a SyntaxError that killed the whole script, so nothing on the page worked.
+HOME = r"""<!doctype html><html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Studio scala — scegli la cartella</title>
 <style>
