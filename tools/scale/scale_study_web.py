@@ -167,38 +167,54 @@ HOME = """<!doctype html><html lang="it"><head><meta charset="utf-8">
 let cur = null;
 const $ = id => document.getElementById(id);
 const pat = () => $('pat').value.trim() || 'image_depth_value_setup_*.png';
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                          .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
+// One listener per container and the path in a data attribute: putting a JSON path inside an
+// inline onclick broke the attribute on any path containing a quote, and every click silently
+// did nothing.
+function rowsHtml(d){
+  const out=[];
+  if(d.parent && d.parent !== d.path)
+    out.push(`<div class="row"><span class="nm">⤴ ..</span>
+      <button data-act="open" data-path="${esc(d.parent)}">apri</button></div>`);
+  if(d.self_images)
+    out.push(`<div class="row"><span class="nm"><b>questa cartella</b></span>
+      <span class="pill good">${d.self_images} immagini</span>
+      <button class="go" data-act="run" data-path="${esc(d.path)}">studia</button></div>`);
+  d.entries.forEach(e=>{
+    out.push(`<div class="row"><span class="nm">${esc(e.name)}</span>
+      ${e.images?`<span class="pill good">${e.images} img</span>`:'<span class="pill">—</span>'}
+      <button data-act="open" data-path="${esc(e.path)}">apri</button>
+      ${e.images?`<button class="go" data-act="run" data-path="${esc(e.path)}">studia</button>`:''}
+      </div>`);
+  });
+  return out.join('') || '<div class="muted">nessuna sottocartella</div>';
+}
 async function loadRoots(){
   const r = await (await fetch('/api/roots')).json();
   $('roots').innerHTML = r.map(x =>
-    `<button onclick="go(${JSON.stringify(x.path).replace(/"/g,'&quot;')})">${x.name}</button>`
-  ).join(' ');
+    `<button data-act="open" data-path="${esc(x.path)}">${esc(x.name)}</button>`).join(' ');
 }
 async function go(path){
   cur = path;
+  $('list').innerHTML = '<div class="muted">apro…</div>';
   const d = await (await fetch('/api/list?pattern='+encodeURIComponent(pat())
                    +'&path='+encodeURIComponent(path))).json();
   $('crumb').textContent = d.path + (d.error ? '  —  ' + d.error : '');
-  const rows = [];
-  if(d.parent && d.parent !== d.path)
-    rows.push(`<div class="row"><span class="nm">⤴ ..</span>
-      <button onclick="go(${JSON.stringify(d.parent)})">apri</button></div>`);
-  if(d.self_images)
-    rows.push(`<div class="row"><span class="nm"><b>questa cartella</b></span>
-      <span class="pill good">${d.self_images} immagini</span>
-      <button class="go" onclick="run(${JSON.stringify(d.path)})">studia</button></div>`);
-  d.entries.forEach(e=>{
-    rows.push(`<div class="row"><span class="nm">${e.name}</span>
-      ${e.images?`<span class="pill good">${e.images} img</span>`:'<span class="pill">—</span>'}
-      <button onclick="go(${JSON.stringify(e.path)})">apri</button>
-      ${e.images?`<button class="go" onclick="run(${JSON.stringify(e.path)})">studia</button>`:''}
-      </div>`);
-  });
-  $('list').innerHTML = rows.join('') || '<div class="muted">nessuna sottocartella</div>';
+  $('list').innerHTML = rowsHtml(d);
 }
+document.addEventListener('click', e=>{
+  const b = e.target.closest('button[data-act]');
+  if(!b) return;
+  const path = b.getAttribute('data-path');
+  if(b.getAttribute('data-act')==='open') go(path); else run(path);
+});
+$('pat').addEventListener('change', ()=>{ if(cur) go(cur); });
 async function run(path){
   $('log').style.display='block';
-  $('log').textContent='avvio dello studio su:\\n'+path+'\\n\\n';
+  $('log').textContent='avvio dello studio su:\n'+path+'\n\n';
+  $('log').scrollIntoView({behavior:'smooth',block:'nearest'});
   const body = new URLSearchParams({folder:path, pattern:pat(),
     max_images:$('maxi').value, no_depth:$('nodepth').checked?'1':'',
     high_recall:$('hr').checked?'1':''});
@@ -208,14 +224,16 @@ async function run(path){
 }
 async function poll(){
   const s = await (await fetch('/api/status')).json();
-  $('log').textContent = s.log.join('\\n');
+  $('log').textContent = s.log.join('\n');
+  $('log').scrollTop = $('log').scrollHeight;
   if(s.state==='running'){ setTimeout(poll, 900); return; }
   if(s.state==='done' && s.out){
-    $('log').innerHTML += `\\n\\n<span class="done">Pronto.</span> `
-      + `<a href="/study/${encodeURIComponent(s.out)}" target="_blank">apri la revisione</a>`;
-    window.open('/study/'+encodeURIComponent(s.out),'_blank');
+    const href='/study/'+encodeURIComponent(s.out);
+    $('log').innerHTML += `\n\n<span class="done">Pronto.</span> `
+      + `<a href="${href}" target="_blank">apri la revisione</a>`;
+    window.open(href,'_blank');
   } else {
-    $('log').innerHTML += '\\n\\n<span class="err">Finito con errori.</span>';
+    $('log').innerHTML += '\n\n<span class="err">Finito con errori.</span>';
   }
 }
 loadRoots();
