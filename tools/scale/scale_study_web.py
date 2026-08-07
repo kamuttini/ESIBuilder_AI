@@ -15,14 +15,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
 import html
 import io
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
+import time
 import traceback
 import urllib.parse
 from contextlib import redirect_stdout
@@ -36,7 +39,109 @@ IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp")
 
 # one job at a time: the study is heavy and the operator looks at one folder at a time
 JOB: Dict[str, object] = {"state": "idle", "log": [], "out": None, "folder": ""}
+# the sweep is a separate, much longer job, so it gets its own slot instead of fighting for JOB
+SWEEP: Dict[str, object] = {"state": "idle", "log": [], "label": "", "index": None}
 LOCK = threading.Lock()
+
+CORR_DIR = OUT_DIR / "corrections"
+FEEDBACK_LOG = CORR_DIR / "feedback.jsonl"      # append-only history, never rewritten
+CORRECTIONS = CORR_DIR / "corrections.json"     # consolidated, what the next run reads
+
+CORR_FIELDS = ("x", "y_zero", "y_far", "ticks_add", "ticks_del", "nums", "depth_mm",
+               "flags", "note")
+
+
+def load_corrections() -> dict:
+    try:
+        return json.loads(CORRECTIONS.read_text("utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def store_feedback(payload: dict) -> dict:
+    """Merge one folder's corrections into the consolidated store, keeping the history.
+
+    Merging per frame, not per folder: sending feedback twice for the same folder must not drop
+    what an earlier session corrected in frames this one did not touch.
+    """
+    CORR_DIR.mkdir(parents=True, exist_ok=True)
+    folder = str(payload.get("folder") or "").strip()
+    if not folder:
+        return {"error": "manca il nome della cartella"}
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with LOCK:
+        with open(FEEDBACK_LOG, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"at": stamp, **payload}, ensure_ascii=False) + "\n")
+        allc = load_corrections()
+        entry = allc.setdefault(folder, {"frames": {}, "note": "", "history": []})
+        if payload.get("note"):
+            entry["note"] = payload["note"]
+        n = 0
+        for name, corr in (payload.get("frames") or {}).items():
+            keep = {k: corr[k] for k in CORR_FIELDS if corr.get(k) not in (None, "", [], {})}
+            if not keep:
+                continue
+            entry["frames"].setdefault(name, {}).update(keep)
+            n += 1
+        entry["history"].append({"at": stamp, "frames": n})
+        CORRECTIONS.write_text(json.dumps(allc, indent=1, ensure_ascii=False), "utf-8")
+    return {"ok": True, "frames": n, "folders_stored": len(allc), "at": stamp}
+
+
+def corrections_csv() -> bytes:
+    allc = load_corrections()
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["cartella", "immagine", "corr_x", "corr_y_zero", "corr_y_far",
+                "tacche_aggiunte", "tacche_rimosse", "numeri_inseriti", "depth_letta_da_te",
+                "flag", "commento_frame", "commento_cartella", "ultimo_invio"])
+    for folder, e in sorted(allc.items()):
+        last = (e.get("history") or [{}])[-1].get("at", "")
+        frames = e.get("frames") or {}
+        if not frames:
+            w.writerow([folder, "", "", "", "", "", "", "", "", "", "", e.get("note", ""), last])
+        for name, c in sorted(frames.items()):
+            w.writerow([folder, name, c.get("x", ""), c.get("y_zero", ""), c.get("y_far", ""),
+                        "|".join(str(v) for v in (c.get("ticks_add") or [])),
+                        "|".join(str(v) for v in (c.get("ticks_del") or [])),
+                        "|".join(f"{p[0]}:{p[1]}" for p in (c.get("nums") or [])),
+                        c.get("depth_mm", ""),
+                        "|".join(k for k, v in (c.get("flags") or {}).items() if v),
+                        c.get("note", ""), e.get("note", ""), last])
+    return out.getvalue().encode("utf-8")
+
+
+def run_sweep(label: str, opts: dict) -> None:
+    """Re-study every folder of the last sweep, feeding the corrections back in."""
+    def log(msg: str) -> None:
+        with LOCK:
+            SWEEP["log"].append(msg)  # type: ignore[union-attr]
+            del SWEEP["log"][:-400]   # type: ignore[index]
+
+    cmd = [sys.executable, str(Path(__file__).with_name("sweep_scale_volume.py")),
+           "--run-label", label, "--python", sys.executable,
+           "--per-family", str(opts.get("per_family") or 3),
+           "--max-images", str(opts.get("max_images") or 12)]
+    if CORRECTIONS.exists():
+        cmd += ["--corrections", str(CORRECTIONS)]
+    if opts.get("root"):
+        cmd += ["--root", str(opts["root"])]
+    log("comando: " + " ".join(cmd[-8:]))
+    try:
+        p = subprocess.Popen(cmd, cwd=str(REPO), stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, bufsize=1)
+        for line in p.stdout:  # type: ignore[union-attr]
+            if line.strip():
+                log(line.rstrip())
+        rc = p.wait()
+        idx = OUT_DIR / f"{label}_indice.html"
+        with LOCK:
+            SWEEP["state"] = "done" if rc == 0 else "error"
+            SWEEP["index"] = idx.name if idx.exists() else None
+    except Exception:
+        log("ERRORE: " + traceback.format_exc(limit=4))
+        with LOCK:
+            SWEEP["state"] = "error"
 
 
 def count_images(d: str, pattern: str) -> int:
@@ -278,10 +383,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # quieter console
         pass
 
-    def _send(self, code: int, body: bytes, ctype: str = "text/html; charset=utf-8") -> None:
+    def _send(self, code: int, body: bytes, ctype: str = "text/html; charset=utf-8",
+              extra: Optional[Dict[str, str]] = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -307,6 +415,22 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 self._json({"state": JOB["state"], "log": list(JOB["log"]),  # type: ignore[arg-type]
                             "out": JOB["out"], "folder": JOB["folder"]})
+        elif u.path == "/api/sweep_status":
+            with LOCK:
+                self._json({"state": SWEEP["state"], "log": list(SWEEP["log"]),  # type: ignore[arg-type]
+                            "label": SWEEP["label"], "index": SWEEP["index"]})
+        elif u.path == "/api/corrections":
+            allc = load_corrections()
+            self._json({"folders": len(allc),
+                        "frames": sum(len(e.get("frames") or {}) for e in allc.values()),
+                        "detail": [{"folder": k, "frames": len(v.get("frames") or {}),
+                                    "note": bool(v.get("note")),
+                                    "last": (v.get("history") or [{}])[-1].get("at", "")}
+                                   for k, v in sorted(allc.items())]})
+        elif u.path == "/api/corrections.csv":
+            self._send(200, corrections_csv(), "text/csv; charset=utf-8",
+                       extra={"Content-Disposition":
+                              'attachment; filename="correzioni_scala.csv"'})
         elif u.path.startswith("/study/"):
             name = urllib.parse.unquote(u.path[len("/study/"):])
             p = (OUT_DIR / name).resolve()
@@ -320,10 +444,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         u = urllib.parse.urlparse(self.path)
+        n = int(self.headers.get("Content-Length") or 0)
+        if u.path == "/api/feedback":
+            try:
+                payload = json.loads(self.rfile.read(n).decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                self._json({"error": f"non riesco a leggere il feedback: {exc}"})
+                return
+            self._json(store_feedback(payload))
+            return
+        if u.path == "/api/rerun":
+            form = urllib.parse.parse_qs(self.rfile.read(n).decode("utf-8"))
+            with LOCK:
+                if SWEEP["state"] == "running":
+                    self._json({"error": "una rielaborazione e' gia' in corso"})
+                    return
+                label = (form.get("label") or [""])[0].strip() or \
+                    "run_" + time.strftime("%Y%m%d_%H%M")
+                label = re.sub(r"[^A-Za-z0-9_-]+", "_", label)[:40]
+                SWEEP.update({"state": "running", "label": label, "index": None,
+                              "log": [f"nuova run: {label}"]})
+            opts = {"per_family": (form.get("per_family") or ["3"])[0],
+                    "max_images": (form.get("max_images") or ["12"])[0],
+                    "root": (form.get("root") or [""])[0]}
+            threading.Thread(target=run_sweep, args=(label, opts), daemon=True).start()
+            self._json({"ok": True, "label": label})
+            return
         if u.path != "/api/run":
             self._send(404, b"non trovato")
             return
-        n = int(self.headers.get("Content-Length") or 0)
         form = urllib.parse.parse_qs(self.rfile.read(n).decode("utf-8"))
         folder = (form.get("folder") or [""])[0]
         if not folder or not os.path.isdir(folder):

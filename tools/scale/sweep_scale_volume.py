@@ -73,7 +73,8 @@ def slug(s: str, n: int = 58) -> str:
     return re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9]+", "_", s)).strip("_")[:n]
 
 
-def select(root: str, per_family: int, target: int, lo: int, hi: int) -> List[dict]:
+def select(root: str, per_family: int, target: int, lo: int, hi: int,
+           prefix: str = "v3") -> List[dict]:
     acqs = sorted([e.path for e in os.scandir(root)
                    if e.is_dir() and not e.name.startswith(("$", "."))
                    and e.name != "System Volume Information"])
@@ -97,17 +98,19 @@ def select(root: str, per_family: int, target: int, lo: int, hi: int) -> List[di
             leaf, n = got
             chosen.append({"family": fam, "acquisition": os.path.basename(acq),
                            "folder": leaf, "n_images": n,
-                           "out": f"v3_{slug(os.path.basename(acq))}.html"})
+                           "out": f"{prefix}_{slug(os.path.basename(acq))}.html"})
     return chosen
 
 
 def run_one(item: dict, python_bin: str, max_images: int, with_depth: bool,
-            pattern: str) -> dict:
+            pattern: str, corrections: str = "") -> dict:
     cmd = [python_bin, str(REPO / "tools/scale/study_scale_folder.py"),
            "--folder", item["folder"], "--pattern", pattern,
            "--max-images", str(max_images), "--out", str(OUT_DIR / item["out"])]
     if not with_depth:
         cmd.append("--no-depth")
+    if corrections:
+        cmd += ["--corrections", corrections]
     t0 = time.time()
     try:
         p = subprocess.run(cmd, cwd=str(REPO), capture_output=True, text=True, timeout=1800)
@@ -154,13 +157,25 @@ def main() -> int:
     ap.add_argument("--pattern", default="*.png")
     ap.add_argument("--with-depth", action="store_true")
     ap.add_argument("--python", default=sys.executable)
-    ap.add_argument("--results", default=str(OUT_DIR / "v3_sweep.json"))
+    ap.add_argument("--results", default="")
     ap.add_argument("--only-select", action="store_true")
+    # A labelled run keeps its own pages, results and index, so a run made after feeding the
+    # corrections back can be compared with the one before instead of overwriting it.
+    ap.add_argument("--run-label", default="v3")
+    ap.add_argument("--corrections", default="", help="JSON of operator corrections to feed back")
     args = ap.parse_args()
 
+    label = re.sub(r"[^A-Za-z0-9_-]+", "_", args.run_label)[:40] or "v3"
+    results_path = args.results or str(OUT_DIR / f"{label}_sweep.json")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     print(f"[sel] esamino {args.root}")
-    items = select(args.root, args.per_family, args.target, args.min_images, args.max_leaf)
+    if args.corrections:
+        try:
+            ncorr = len(json.loads(Path(args.corrections).read_text("utf-8")))
+            print(f"[corr] correzioni disponibili per {ncorr} cartelle")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[corr] non riesco a leggere le correzioni: {exc}")
+    items = select(args.root, args.per_family, args.target, args.min_images, args.max_leaf, label)
     print(f"[sel] {len(items)} cartelle scelte su "
           f"{len({i['family'] for i in items})} famiglie di ecografi")
     for i in items:
@@ -174,16 +189,28 @@ def main() -> int:
         if not os.path.isdir(item["folder"]):
             print("  cartella non raggiungibile (volume smontato?), la salto")
             continue
-        r = run_one(item, args.python, args.max_images, args.with_depth, args.pattern)
+        r = run_one(item, args.python, args.max_images, args.with_depth, args.pattern,
+                    args.corrections)
         done.append(r)
-        head = [l for l in r["log"] if l.startswith(("[info]", "[A]", "[C/D]", "[D]", "[E]"))]
+        head = [l for l in r["log"] if l.startswith(("[info]", "[A]", "[C/D]", "[D]", "[E]",
+                                                     "[corr]"))]
         for line in head:
             print("  " + line)
         if not r["ok"]:
             print("  NON riuscito")
-        Path(args.results).write_text(json.dumps(done, indent=1, ensure_ascii=False), "utf-8")
+        Path(results_path).write_text(json.dumps(done, indent=1, ensure_ascii=False), "utf-8")
     print(f"\n[ok] {sum(1 for d in done if d['ok'])}/{len(done)} studi riusciti "
-          f"-> {args.results}")
+          f"-> {results_path}")
+    # The index belongs to the run: building it here means a labelled run is complete on its own.
+    idx = OUT_DIR / f"{label}_indice.html"
+    try:
+        import build_scale_sweep_index as B
+        B.main_with(results_path, str(idx),
+                    f"Studio della scala — {label}"
+                    + (" (con le tue correzioni)" if args.corrections else ""))
+        print(f"[ok] indice -> {idx}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] indice non generato: {exc}")
     return 0
 
 

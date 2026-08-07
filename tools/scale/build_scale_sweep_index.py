@@ -38,6 +38,101 @@ a{color:#6aa6ff;text-decoration:none} a:hover{text-decoration:underline}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:11px 15px}
 .card b{display:block;font-size:21px;font-weight:700}
 .nm{max-width:430px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chk{width:17px;height:17px;cursor:pointer;accent-color:#37d67a}
+tr.done td{opacity:.42}
+tr.done td:first-child, tr.done td:nth-child(2){opacity:.62}
+.bar{display:flex;gap:12px;align-items:center;margin:0 0 12px;flex-wrap:wrap}
+button{background:#232732;color:var(--ink);border:1px solid var(--line);border-radius:6px;
+       padding:5px 11px;font-size:12px;cursor:pointer}
+button.on{background:#1f6feb;border-color:#1f6feb}
+.seen{color:var(--good);font-weight:700}
+button.go{background:#1f6feb;border-color:#1f6feb;font-weight:600}
+#rlog{position:fixed;right:16px;bottom:16px;z-index:50;width:min(580px,calc(100vw - 32px));
+      background:#0c0e13;border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 34px #000b;
+      padding:12px 14px;max-height:56vh;overflow:auto;
+      font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap}
+#rlog .bar2{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;
+            font-family:-apple-system,Segoe UI,Roboto,sans-serif}
+"""
+
+# Plain (non f-string) so the braces in this JavaScript need no escaping.
+JS = """
+// Same registry the review pages write, keyed by the study's file name: ticking here or there is
+// the same tick, because both sides key on the name this page links to.
+const DK='scale_study_done';
+const rows=[...document.querySelectorAll('tr[data-out]')];
+function all(){ try{return JSON.parse(localStorage.getItem(DK)||'{}');}catch(e){return {};} }
+function paint(){
+  const A=all(); let n=0;
+  rows.forEach(tr=>{
+    const d=!!(A[tr.dataset.out]||{}).done;
+    if(d) n++;
+    tr.classList.toggle('done',d);
+    tr.querySelector('.chk').checked=d;
+    const w=tr.querySelector('.when');
+    if(w) w.textContent = d ? ((A[tr.dataset.out]||{}).at||'') : '';
+  });
+  document.getElementById('seen').textContent=n;
+  filter();
+}
+function filter(){
+  const only=document.getElementById('flt').classList.contains('on');
+  rows.forEach(tr=>{ tr.style.display = (only && tr.classList.contains('done')) ? 'none' : ''; });
+}
+document.addEventListener('change',e=>{
+  if(!e.target.classList.contains('chk')) return;
+  const tr=e.target.closest('tr'), A=all();
+  if(e.target.checked) A[tr.dataset.out]={done:true, at:new Date().toISOString().slice(0,16).replace('T',' ')};
+  else delete A[tr.dataset.out];
+  localStorage.setItem(DK,JSON.stringify(A));
+  paint();
+});
+document.getElementById('flt').onclick=e=>{ e.currentTarget.classList.toggle('on'); filter(); };
+document.getElementById('clr').onclick=()=>{
+  if(!confirm('Togliere la spunta a tutte le cartelle?')) return;
+  localStorage.removeItem(DK); paint();
+};
+// Another tab may have ticked a folder while this page was open.
+window.addEventListener('storage',e=>{ if(e.key===DK) paint(); });
+window.addEventListener('focus',paint);
+paint();
+
+// ---- how much feedback the server holds, and re-running with it ----
+async function cstat(){
+  try{
+    const j=await (await fetch('/api/corrections')).json();
+    document.getElementById('cstat').textContent = j.folders
+      ? ('il server ha correzioni per ' + j.folders + ' cartelle, ' + j.frames + ' frame')
+      : 'il server non ha ancora ricevuto correzioni: inviale da dentro una revisione';
+  }catch(e){ document.getElementById('cstat').textContent =
+    'questa pagina non e\' servita dal tool, quindi non posso rielaborare da qui'; }
+}
+cstat();
+document.getElementById('rerun').onclick=async()=>{
+  const label=prompt('Nome della nuova run (per distinguerla dalle altre):',
+    'run_' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '_corretta');
+  if(label===null) return;
+  const L=document.getElementById('rlog');
+  L.hidden=false;
+  L.innerHTML='<div class="bar2"><b>rielaborazione in corso…</b>'
+    +'<button onclick="document.getElementById(\\'rlog\\').hidden=true">chiudi</button></div>'
+    +'<div id="rbody">avvio…</div>';
+  const r=await (await fetch('/api/rerun',{method:'POST',
+    body:new URLSearchParams({label})})).json();
+  if(r.error){ document.getElementById('rbody').textContent='ERRORE: '+r.error; return; }
+  poll2();
+};
+async function poll2(){
+  const s=await (await fetch('/api/sweep_status')).json();
+  const b=document.getElementById('rbody');
+  if(b){ b.textContent=s.log.join('\\n'); b.scrollTop=b.scrollHeight; }
+  document.getElementById('rlog').scrollTop=document.getElementById('rlog').scrollHeight;
+  if(s.state==='running'){ setTimeout(poll2,2000); return; }
+  if(s.state==='done' && s.index){
+    b.innerHTML += '\\n\\nPronto. <a href="/study/'+encodeURIComponent(s.index)
+      +'">apri l\\'indice della nuova run</a> e confronta con questo.';
+  } else { b.textContent += '\\n\\nfinito con errori.'; }
+}
 """
 
 
@@ -73,9 +168,11 @@ def build(results: list, title: str) -> str:
                 if r.get("ok") else f'{name} <span class="pill bd">non riuscito</span>')
         s = r.get("suspect")
         rows.append(
-            f'<tr><td class="fam">{html.escape(r.get("family",""))}</td>'
+            f'<tr data-out="{html.escape(r.get("out",""))}">'
+            f'<td><input class="chk" type="checkbox" title="gia\' riguardata"></td>'
+            f'<td class="fam">{html.escape(r.get("family",""))}</td>'
             f'<td class="nm">{link}<div class="muted">{r.get("n_images","?")} frame '
-            f'nella cartella</div></td>'
+            f'nella cartella<span class="when muted"></span></div></td>'
             f'<td>{vend}<div class="muted">{vsrc}</div></td>'
             f'<td>{zone}</td><td>{" ".join(parts) or "—"}</td>'
             f'<td>{pill(f"{s}/{n}", "wr" if s else "ok") if s is not None else "—"}</td>'
@@ -97,10 +194,30 @@ def build(results: list, title: str) -> str:
   <div class="card"><b>{acc}/{tot}</b><span class="muted">frame accepted</span></div>
   <div class="card"><b>{sus}</b><span class="muted">frame con numeri sospetti</span></div>
  </div>
- <table><tr><th>famiglia</th><th>cartella</th><th>vendor</th><th>zona</th><th>stati</th>
+ <div class="bar">
+  <span class="muted">riguardate: <span class="seen" id="seen">0</span> su {len(results)}</span>
+  <button id="flt">nascondi quelle riguardate</button>
+  <button id="clr">azzera le spunte</button>
+  <span class="muted">la spunta vale anche dentro la revisione (tasto <b>d</b>)</span>
+ </div>
+ <div class="bar">
+  <button id="rerun" class="go">rielabora tutto con le mie correzioni (nuova run)</button>
+  <a href="/api/corrections.csv">scarica tutte le correzioni raccolte</a>
+  <span class="muted" id="cstat">…</span>
+ </div>
+ <div id="rlog" hidden></div>
+ <table><tr><th></th><th>famiglia</th><th>cartella</th><th>vendor</th><th>zona</th><th>stati</th>
    <th>sospetti</th><th>orientamento</th><th>tempo</th></tr>
  {"".join(rows)}</table>
-</div></body></html>"""
+</div><script>{JS}</script></body></html>"""
+
+
+def main_with(results: str, out: str, title: str) -> int:
+    """Callable entry point, so a sweep can build its own index without a subprocess."""
+    data = json.loads(Path(results).read_text("utf-8"))
+    Path(out).write_text(build(data, title), "utf-8")
+    print(f"[ok] {len(data)} studi -> {out}")
+    return 0
 
 
 def main() -> int:
@@ -109,10 +226,7 @@ def main() -> int:
     ap.add_argument("--out", default=str(OUT_DIR / "v3_indice.html"))
     ap.add_argument("--title", default="Studio della scala — volume 3")
     args = ap.parse_args()
-    data = json.loads(Path(args.results).read_text("utf-8"))
-    Path(args.out).write_text(build(data, args.title), "utf-8")
-    print(f"[ok] {len(data)} studi -> {args.out}")
-    return 0
+    return main_with(args.results, args.out, args.title)
 
 
 if __name__ == "__main__":

@@ -270,6 +270,43 @@ def run_depth_module(folder: str, python_bin: str,
         return out
 
 
+def load_folder_corrections(path: str, folder: str) -> dict:
+    """The operator's corrections for this folder: {frame_name: {...}}, plus the folder note.
+
+    Keyed by the folder's own name, the same key the review page uses. An empty result is normal
+    and must never be treated as an error: most folders have never been reviewed.
+    """
+    if not path:
+        return {}
+    try:
+        allc = json.loads(Path(path).read_text("utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[corr] non riesco a leggere {path}: {exc}")
+        return {}
+    entry = allc.get(os.path.basename(folder.rstrip("/\\"))) or {}
+    frames = entry.get("frames") or {}
+    if frames or entry.get("note"):
+        print(f"[corr] correzioni per questa cartella: {len(frames)} frame"
+              + (", piu' il commento" if entry.get("note") else ""))
+    return entry
+
+
+def _corr_anchor_x(frames: dict) -> Optional[float]:
+    """The column the operator settled on, if they agreed with themselves across frames.
+
+    A single corrected column is worth more than the median of the detections, but only when the
+    corrections do not disagree among themselves — otherwise it is not a folder-wide fact.
+    """
+    xs = [float(c["x"]) for c in frames.values() if c.get("x") not in (None, "")]
+    if not xs:
+        return None
+    if max(xs) - min(xs) > 12.0:
+        print(f"[corr] colonne corrette discordi ({min(xs):.0f}..{max(xs):.0f}), non le uso "
+              f"come ancora della cartella")
+        return None
+    return float(statistics.median(xs))
+
+
 def _tally(items) -> str:
     c: Dict[str, int] = {}
     for i in items:
@@ -286,7 +323,8 @@ def _b64(img: np.ndarray, q: int = 72) -> str:
 
 
 def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
-          with_depth: bool, python_bin: str, device: str) -> Optional[dict]:
+          with_depth: bool, python_bin: str, device: str,
+          corrections: str = "") -> Optional[dict]:
     base = os.path.join(folder, "image_samples")
     if not os.path.isdir(base):
         base = folder
@@ -294,6 +332,9 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
     if not paths:
         print(f"[error] nessuna immagine con pattern {pattern} in {base}")
         return None
+    corr_entry = load_folder_corrections(corrections, folder)
+    corr = corr_entry.get("frames") or {}
+    corr_x = _corr_anchor_x(corr)
     vendor_src = "indicato a mano"
     if not vendor:
         vendor, vendor_src = predict_vendor(paths, device)
@@ -345,8 +386,22 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
                 "found": len(xs), "total": len(first)}
         print(f"[A] zona scala: x={cx:.0f} ±{half:.0f} px (trovata su {len(xs)}/{len(first)})")
 
+    # A column the operator corrected consistently replaces the detections' median: it anchors the
+    # zone for every frame, including the ones where no ruler was found at all.
+    if corr_x is not None:
+        if zone:
+            print(f"[corr] zona della cartella: x={corr_x:.0f} dalle tue correzioni "
+                  f"(era {zone['x']:.0f})")
+            zone = {**zone, "x": round(corr_x, 1), "from_corrections": True}
+        else:
+            zone = {"x": round(corr_x, 1), "half": 60.0, "found": 0, "total": len(first),
+                    "from_corrections": True}
+            print(f"[corr] zona della cartella: x={corr_x:.0f} dalle tue correzioni "
+                  f"(il detector non l'aveva trovata)")
+
     # ---- second pass: frames without a ruler get told where the folder's zone is ----
     frames: List[dict] = []
+    n_applied = 0
     for f in first:
         pred = f["pred"]
         used_zone = False
@@ -375,12 +430,66 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
         far = max(pred.ticks_y) if (dirn >= 0 and pred.ticks_y) else (
             min(pred.ticks_y) if pred.ticks_y else None)
 
+        # The operator's corrections for this very frame win over the detection: they are the one
+        # piece of ground truth in the loop. Applied here, after detection, so the run still shows
+        # what the detector would have said on its own.
+        c = corr.get(name) or {}
+        applied: List[str] = []
+        if c.get("x") not in (None, ""):
+            pred.x = float(c["x"]); applied.append("colonna")
+        if c.get("y_zero") not in (None, ""):
+            y_zero = float(c["y_zero"]); zero_moved = False; applied.append("zero")
+        if c.get("ticks_del") or c.get("ticks_add"):
+            dele = {round(float(v)) for v in (c.get("ticks_del") or [])}
+            keep = [t for t in (pred.ticks_y or []) if round(t) not in dele]
+            pred.ticks_y = sorted(keep + [float(v) for v in (c.get("ticks_add") or [])])
+            pred.n_ticks = len(pred.ticks_y)
+            if len(pred.ticks_y) > 1:
+                d = sorted(pred.ticks_y[k + 1] - pred.ticks_y[k]
+                           for k in range(len(pred.ticks_y) - 1))
+                pred.tick_pitch_px = d[len(d) // 2]
+            applied.append("tacche")
+        if c.get("y_far") not in (None, ""):
+            far = float(c["y_far"]); applied.append("ultima tacca")
+        elif "tacche" in applied and pred.ticks_y:
+            far = max(pred.ticks_y) if dirn >= 0 else min(pred.ticks_y)
+        if applied:
+            n_applied += 1
+
         # stage D: numbers vs constant pitch
         labels_cm = [(y, round(v / 10.0, 2)) for y, v in (pred.labels_all or [])]
+        for pair in (c.get("nums") or []):
+            try:
+                labels_cm.append((float(pair[0]), float(str(pair[1]).replace(",", "."))))
+            except (TypeError, ValueError, IndexError):
+                continue
+        if c.get("nums"):
+            labels_cm.sort()
+            applied.append("numeri")
+            # Numbers the operator read are the calibration: refit mm/px on them through the zero
+            if y_zero is not None and len(labels_cm) >= 1:
+                num = den = 0.0
+                for y, v in labels_cm:
+                    if v == 0:
+                        continue
+                    d = dirn * (y - y_zero)
+                    num += v * 10.0 * d
+                    den += d * d
+                if den > 0.5:
+                    pred.mm_per_px = num / den
         coh = check_numbers(labels_cm, pred.tick_pitch_px or 0.0, pred.mm_per_px)
 
         # stage E: does the scale agree with the depth printed in the interface?
         dep = depth_info.get(os.path.realpath(f["path"]))
+        if c.get("depth_mm") not in (None, ""):
+            try:
+                # read by a person off the interface: the strongest kind of evidence there is
+                dep = {"depth_mm": float(str(c["depth_mm"]).replace(",", ".")),
+                       "from_interface": True, "mode": "letta dall'operatore",
+                       "status": "accepted", "ocr_text": ""}
+                applied.append("depth")
+            except ValueError:
+                pass
         scale_depth = None
         depth_verdict = ""
         if pred.mm_per_px and y_zero is not None and far is not None:
@@ -421,11 +530,14 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
             "E_depth_status": (dep or {}).get("status", ""),
             "E_depth_ocr": (dep or {}).get("ocr_text", ""),
             "E_depth_scale": scale_depth, "E_verdict": depth_verdict,
+            "corr_applied": applied,
         })
 
     st: Dict[str, int] = {}
     for fr in frames:
         st[fr["status"]] = st.get(fr["status"], 0) + 1
+    if n_applied:
+        print(f"[corr] applicate le tue correzioni su {n_applied}/{len(frames)} frame")
     print(f"[C/D] stati: {st}")
     n_sus = sum(1 for fr in frames if fr["D_suspect"])
     print(f"[D] frame con numeri sospetti: {n_sus}/{len(frames)}")
@@ -560,6 +672,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Open the page in the browser when it is ready.")
     ap.add_argument("--pattern", default="image_depth_value_setup_*.png")
     ap.add_argument("--vendor", default="")
+    ap.add_argument("--corrections", default="",
+                    help="JSON with the operator's corrections, fed back into this run")
     ap.add_argument("--max-images", type=int, default=14)
     ap.add_argument("--cap-width", type=int, default=1400)
     ap.add_argument("--no-depth", action="store_true", help="Skip the stage-E depth cross-check.")
@@ -586,7 +700,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.out = REPO / "artifacts" / "50_scale_study" / f"{safe or 'studio'}.html"
 
     data = study(args.folder, args.pattern, args.max_images, args.cap_width, args.vendor,
-                 not args.no_depth, args.python_bin, args.device)
+                 not args.no_depth, args.python_bin, args.device, args.corrections)
     if not data:
         return 2
     tpl = PAGE.read_text(encoding="utf-8")

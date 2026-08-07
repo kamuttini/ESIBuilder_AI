@@ -44,6 +44,14 @@
          border-radius:7px;padding:9px 11px;font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
          resize:vertical}
  button#fc.has{background:var(--good);border-color:var(--good);color:#08130c;font-weight:700}
+ button#done.has{background:var(--good);border-color:var(--good);color:#08130c;font-weight:700}
+ a#back{color:#6aa6ff;text-decoration:none;padding:3px 9px;border:1px solid var(--line);
+        border-radius:6px;font-size:12px;white-space:nowrap}
+ a#back:hover{background:#1b2028}
+ button.send{background:#1f6feb;border-color:#1f6feb;font-weight:600}
+ button.send.sent{background:var(--good);border-color:var(--good);color:#08130c}
+ button#delf,button#delall{border-color:#5a2733;color:#ff8fa3}
+ button#delf:hover,button#delall:hover{background:#2a1620}
  .st b{display:block;font-size:11px;color:var(--mut);text-transform:uppercase}
  table{border-collapse:collapse;width:100%;font-size:11px;margin:4px 0}
  td,th{border-bottom:1px solid var(--line);padding:2px 4px;text-align:left}
@@ -51,6 +59,7 @@
  .k{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:middle;margin-right:3px}
 </style></head><body>
 <div class="bar">
+  <a id="back" href="/" title="torna all'elenco">&larr; studi</a>
   <b id="fold"></b><span class="muted" id="vend"></span>
   <b id="counter">–</b>
   <button id="pv" title="←">◀</button><button id="nx" title="→">▶</button>
@@ -58,8 +67,13 @@
   <span style="flex:1"></span>
   <button id="tgl" class="tgl on" title="h">elaborazione: ON</button>
   <button id="rz" title="0">reset zoom</button>
+  <button id="done" title="d">segna come riguardata</button>
   <button id="fc" title="c">commento cartella</button>
+  <button id="send" class="send">invia il feedback</button>
   <button id="exp">Esporta CSV</button>
+  <button id="expall" title="tutte le cartelle di questo browser">esporta tutto</button>
+  <button id="delf" title="solo questo frame">annulla frame</button>
+  <button id="delall" title="tutti i frame di questa cartella">annulla cartella</button>
   <span class="muted">rivisti <b id="cnt">0</b></span>
 </div>
 <div id="fcbox" hidden>
@@ -104,6 +118,127 @@ function save(){localStorage.setItem(SK,JSON.stringify(ST)); count();}
 // mistaken for a frame: every loop over ST skips it.
 const FK='#cartella';
 function fnote(){ if(!ST[FK])ST[FK]={note:''}; return ST[FK]; }
+
+// Which folders are already reviewed lives in one registry shared with the index page, keyed by
+// this page's own file name: the index links to exactly that name, so both sides agree without
+// either having to reconstruct the other's paths.
+const DK='scale_study_done';
+const ME=decodeURIComponent((location.pathname.split('/').pop()||'studio.html'));
+function doneAll(){ try{return JSON.parse(localStorage.getItem(DK)||'{}');}catch(e){return {};} }
+function isDone(){ return !!(doneAll()[ME]||{}).done; }
+function setDone(v){
+  const all=doneAll();
+  if(v) all[ME]={done:true, folder:D.folder, at:new Date().toISOString().slice(0,16).replace('T',' ')};
+  else delete all[ME];
+  localStorage.setItem(DK,JSON.stringify(all));
+  paintDone();
+}
+function paintDone(){
+  const d=isDone();
+  $('done').classList.toggle('has',d);
+  $('done').textContent = d ? 'riguardata ✓' : 'segna come riguardata';
+}
+$('done').onclick=()=>setDone(!isDone());
+
+// ---- sending the feedback, and undoing corrections without touching the others ----
+function frameCorrections(){
+  const out={};
+  F.forEach(f=>{
+    const s=ST[D.folder+'|'+f.name]; if(!s) return;
+    const keep={};
+    ['x','y_zero','y_far','depth_mm','note'].forEach(k=>{
+      if(s[k]!=null && String(s[k]).trim!==undefined && String(s[k]).trim()!=='') keep[k]=s[k];
+      else if(s[k]!=null && typeof s[k]==='number') keep[k]=s[k];
+    });
+    ['ticks_add','ticks_del','nums'].forEach(k=>{ if((s[k]||[]).length) keep[k]=s[k]; });
+    const fl={}; Object.keys(s.flags||{}).forEach(k=>{ if(s.flags[k]) fl[k]=true; });
+    if(Object.keys(fl).length) keep.flags=fl;
+    if(Object.keys(keep).length) out[f.name]=keep;
+  });
+  return out;
+}
+$('send').onclick=async()=>{
+  const frames=frameCorrections(), note=(fnote().note||'').trim();
+  const n=Object.keys(frames).length;
+  if(!n && !note){ alert('Non c\'e\' niente da inviare: nessuna correzione e nessun commento.'); return; }
+  $('send').disabled=true; $('send').textContent='invio…';
+  try{
+    const r=await fetch('/api/feedback',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({folder:D.folder, vendor:D.vendor, page:ME, frames, note})});
+    const j=await r.json();
+    if(j.error) throw new Error(j.error);
+    $('send').classList.add('sent');
+    $('send').textContent='feedback inviato ✓';
+    setDone(true);
+    alert('Feedback ricevuto: '+j.frames+' frame da questa cartella, '
+      +j.folders_stored+' cartelle in tutto.\n\nLe correzioni restano salvate qui e sono ora'
+      +' sul disco. Per vedere se funzionano, dall\'indice premi "rielabora tutto".');
+  }catch(err){
+    $('send').textContent='invio fallito';
+    alert('Non ho potuto inviare: '+err.message
+      +'\n\nLe correzioni non sono perse: sono ancora qui nel browser.');
+  }finally{ $('send').disabled=false; }
+};
+$('delf').onclick=()=>{
+  const k=key();
+  if(!ST[k]){ alert('Su questo frame non c\'e\' niente da annullare.'); return; }
+  if(!confirm('Annullare le correzioni di questo frame?\nGli altri frame non vengono toccati.')) return;
+  delete ST[k]; save(); show();
+};
+$('delall').onclick=()=>{
+  const n=Object.keys(ST).filter(k=>k!==FK).length;
+  if(!n && !(fnote().note||'').trim()){ alert('Questa cartella non ha correzioni.'); return; }
+  if(!confirm('Annullare le correzioni di tutti i '+n+' frame di questa cartella'
+    +'\ne anche il commento sulla cartella?\n\nLe altre cartelle non vengono toccate.')) return;
+  ST={}; save(); show();
+  $('fcnote').value=''; $('fcbox').hidden=true;
+};
+// Everything corrected in this browser, across folders: one CSV for the whole review session.
+$('expall').onclick=()=>{
+  const head=["cartella","immagine","corr_x","corr_y_zero","corr_y_far","tacche_aggiunte",
+    "tacche_rimosse","numeri_inseriti","depth_letta_da_te","flag","commento","commento_cartella"];
+  const out=[head];
+  for(let n=0;n<localStorage.length;n++){
+    const lk=localStorage.key(n);
+    if(!lk||!lk.startsWith('scale_study_')||lk==='scale_study_done') continue;
+    const fold=lk.slice('scale_study_'.length);
+    let S2={}; try{S2=JSON.parse(localStorage.getItem(lk)||'{}');}catch(e){continue;}
+    const fn=((S2[FK]||{}).note||'').trim();
+    let rows=0;
+    Object.keys(S2).forEach(k2=>{
+      if(k2===FK) return;
+      const s=S2[k2], img=k2.split('|').slice(1).join('|');
+      const fl=Object.keys(s.flags||{}).filter(x=>s.flags[x]).join('|');
+      const has=s.x!=null||s.y_zero!=null||s.y_far!=null||(s.ticks_add||[]).length
+        ||(s.ticks_del||[]).length||(s.nums||[]).length||String(s.depth_mm||'').trim()
+        ||(s.note||'').trim()||fl;
+      if(!has) return;
+      rows++;
+      out.push([fold,img,s.x??'',s.y_zero??'',s.y_far??'',
+        (s.ticks_add||[]).join('|'),(s.ticks_del||[]).join('|'),
+        (s.nums||[]).map(p=>p[0]+':'+p[1]).join('|'),
+        String(s.depth_mm||'').trim(),fl,(s.note||'').trim(),fn]);
+    });
+    if(!rows && fn){const r=new Array(head.length).fill(''); r[0]=fold; r[head.length-1]=fn; out.push(r);}
+  }
+  if(out.length===1){alert('Non hai ancora corretto niente, in nessuna cartella.');return;}
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([out.map(r=>r.map(esc).join(',')).join('\n')],
+    {type:'text/csv;charset=utf-8;'}));
+  a.download='correzioni_scala_tutte.csv';
+  document.body.appendChild(a);a.click();a.remove();
+};
+// Back to wherever this was opened from — the index or the folder chooser — instead of always
+// dumping the operator at the top of the tree.
+$('back').addEventListener('click',e=>{
+  try{
+    const r=document.referrer;
+    if(r && new URL(r).origin===location.origin && r!==location.href){
+      e.preventDefault(); location.href=r;
+    }
+  }catch(err){/* no referrer: the plain href does its job */}
+});
 function count(){let n=0; for(const k in ST){ if(k===FK) continue; const s=ST[k];
   if((s.note&&s.note.trim())||Object.values(s.flags||{}).some(Boolean)||s.x!=null||s.y_zero!=null
      ||s.y_far!=null||(s.ticks_add||[]).length||(s.ticks_del||[]).length||(s.nums||[]).length
@@ -386,6 +521,7 @@ document.addEventListener('keydown',e=>{
     return;
   }
   if(e.key==='c'||e.key==='C'){$('fc').click();e.preventDefault();return;}
+  if(e.key==='d'||e.key==='D'){$('done').click();e.preventDefault();return;}
   if(e.key==='ArrowRight'){go(1);e.preventDefault();}
   else if(e.key==='ArrowLeft'){go(-1);e.preventDefault();}
   else if(e.key==='h'||e.key==='H')$('tgl').click();
@@ -471,5 +607,5 @@ $('exp').onclick=()=>{
   document.body.appendChild(a);a.click();a.remove();
 };
 window.addEventListener('resize',()=>layout());
-show(); count();
+show(); count(); paintDone();
 </script></body></html>
