@@ -36,6 +36,14 @@
  #side h3:first-child{margin-top:0}
  .st{border-left:3px solid var(--line);padding:5px 9px;margin:5px 0;background:#12141a}
  .st.ok{border-color:var(--good)} .st.warn{border-color:var(--warn)} .st.bad{border-color:var(--bad)}
+ #fcbox{position:fixed;right:14px;top:44px;z-index:60;width:min(520px,calc(100vw - 28px));
+        background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        box-shadow:0 14px 36px #000c;padding:12px 14px}
+ #fcbox .fchead{display:flex;gap:10px;align-items:center;margin-bottom:6px}
+ #fcnote{width:100%;background:#0c0e13;color:var(--ink);border:1px solid var(--line);
+         border-radius:7px;padding:9px 11px;font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;
+         resize:vertical}
+ button#fc.has{background:var(--good);border-color:var(--good);color:#08130c;font-weight:700}
  .st b{display:block;font-size:11px;color:var(--mut);text-transform:uppercase}
  table{border-collapse:collapse;width:100%;font-size:11px;margin:4px 0}
  td,th{border-bottom:1px solid var(--line);padding:2px 4px;text-align:left}
@@ -50,8 +58,18 @@
   <span style="flex:1"></span>
   <button id="tgl" class="tgl on" title="h">elaborazione: ON</button>
   <button id="rz" title="0">reset zoom</button>
+  <button id="fc" title="c">commento cartella</button>
   <button id="exp">Esporta CSV</button>
   <span class="muted">rivisti <b id="cnt">0</b></span>
+</div>
+<div id="fcbox" hidden>
+  <div class="fchead"><b>Commento su tutta la cartella</b>
+    <span class="muted" id="fcfold"></span>
+    <span style="flex:1"></span><button id="fcx">chiudi</button></div>
+  <div class="muted" style="margin:0 0 6px">Quello che vale per l'insieme dei frame: come si
+    comporta questa macchina, cosa sbaglia sempre, cosa va rivisto. Finisce nel CSV su ogni riga,
+    e viene esportato anche se non hai corretto nessun frame.</div>
+  <textarea id="fcnote" rows="6" placeholder="es: su questa macchina il righello e' grigio scuro e le tacche intermedie non si vedono; lo zero e' sempre giusto ma l'ultima tacca cade una tacca corta..."></textarea>
 </div>
 <div id="main">
   <div id="stage"><div id="wrap"><img id="img" alt=""><svg id="ovl"></svg></div></div>
@@ -80,12 +98,18 @@ const $=id=>document.getElementById(id);
 const cur=()=>F[i];
 const key=()=>D.folder+'|'+cur().name;
 function st(){const k=key(); if(!ST[k])ST[k]={flags:{},note:'',x:null,y_zero:null,y_far:null,
-  ticks_add:[],ticks_del:[],nums:[]}; return ST[k];}
+  ticks_add:[],ticks_del:[],nums:[],depth_mm:''}; return ST[k];}
 function save(){localStorage.setItem(SK,JSON.stringify(ST)); count();}
-function count(){let n=0; for(const k in ST){const s=ST[k];
+// Reserved key so the folder-wide comment lives in the same saved state without ever being
+// mistaken for a frame: every loop over ST skips it.
+const FK='#cartella';
+function fnote(){ if(!ST[FK])ST[FK]={note:''}; return ST[FK]; }
+function count(){let n=0; for(const k in ST){ if(k===FK) continue; const s=ST[k];
   if((s.note&&s.note.trim())||Object.values(s.flags||{}).some(Boolean)||s.x!=null||s.y_zero!=null
-     ||s.y_far!=null||(s.ticks_add||[]).length||(s.ticks_del||[]).length||(s.nums||[]).length)n++;}
-  $('cnt').textContent=n;}
+     ||s.y_far!=null||(s.ticks_add||[]).length||(s.ticks_del||[]).length||(s.nums||[]).length
+     ||String(s.depth_mm||'').trim())n++;}
+  $('cnt').textContent=n;
+  $('fc').classList.toggle('has', !!(fnote().note||'').trim());}
 
 function ticksOf(f,s){
   const del=new Set((s.ticks_del||[]).map(v=>Math.round(v)));
@@ -147,6 +171,18 @@ function side(){
   // interface depth look like a detection error.
   const eCls = f.E_verdict.startsWith('coerente') ? 'ok'
              : (f.E_verdict.startsWith('NON coerente') ? 'bad' : '');
+  // A depth typed by the operator is stronger evidence than anything OCR produced, so the
+  // comparison is redone against it right away — that is the whole point of correcting it.
+  let dv = '';
+  const dman = parseFloat(String(s.depth_mm ?? '').replace(',', '.'));
+  if (isFinite(dman) && dman > 0 && f.E_depth_scale != null) {
+    const same = Math.round(dman/10) === Math.round(f.E_depth_scale/10);
+    dv = `<br><b>esito con la tua depth</b><span class="pill ${same?'':'bad'}"
+      style="${same?'border-color:var(--good);color:var(--good)':''}">${
+      same?'coerente':'NON coerente'} (${dman} mm contro ${f.E_depth_scale} mm dalla scala)</span>`;
+  } else if (isFinite(dman) && dman > 0) {
+    dv = '<br><span class="muted">la scala non da\' una lunghezza, non c\'e\' niente da confrontare</span>';
+  }
   $('side').innerHTML = `
    <h3>A · zona della scala</h3>
    <div class="st ${D.zone?'ok':'bad'}"><b>cartella</b>${zoneTxt}
@@ -171,8 +207,17 @@ function side(){
      ${(s.nums||[]).length?`<span class="pill warn">${s.nums.length} numeri inseriti a mano</span>`:''}</div>
    <h3>E · confronto con la depth</h3>
    <div class="st ${eCls}"><b>interfaccia</b>${f.E_depth_interface!=null?f.E_depth_interface+' mm'+(f.E_depth_from_interface?'':' (non dall\'interfaccia)'):'non disponibile'}<br>
+     ${f.E_depth_mode?`<span class="muted">modulo depth: ${f.E_depth_mode}${f.E_depth_status?' · '+f.E_depth_status:''}${f.E_depth_ocr?' · testo letto: «'+f.E_depth_ocr+'»':''}</span><br>`:''}
      <b>dalla scala</b>${f.E_depth_scale!=null?f.E_depth_scale+' mm':'n/d'}<br>
-     ${f.E_verdict?`<b>esito</b>${f.E_verdict}`:'<span class="muted">non verificabile</span>'}</div>
+     ${f.E_verdict?`<b>esito</b>${f.E_verdict}`:'<span class="muted">non verificabile</span>'}
+     <div style="margin-top:9px;border-top:1px solid var(--line);padding-top:8px">
+       <b>la depth che leggi tu</b>
+       <input id="edep" type="text" inputmode="decimal" value="${s.depth_mm??''}"
+              placeholder="es 70" style="width:78px"> mm
+       <span class="muted"> — il modulo la accetta solo se nel testo trova la parola
+         &laquo;depth&raquo;, quindi le macchine che la scrivono in altro modo la perdono</span>
+       ${dv}
+     </div></div>
    <h3>calibrazione</h3>
    <div class="st"><b>mm per pixel</b>${f.mm_per_px?f.mm_per_px.toFixed(4):'n/d'}
      ${f.reason?`<br><span class="muted">${f.reason}</span>`:''}</div>`;
@@ -205,8 +250,27 @@ FLAGS.forEach(([f,lab],n)=>{const b=document.createElement('button');b.dataset.f
   b.onclick=()=>{const s=st();s.flags=s.flags||{};s.flags[f]=!s.flags[f];b.classList.toggle('on');save();show();};
   $('flags').appendChild(b);});
 $('note').addEventListener('input',()=>{st().note=$('note').value;save();});
+$('fcnote').addEventListener('input',()=>{fnote().note=$('fcnote').value;save();});
+// The side panel is rebuilt on every frame change, so the depth field is reached by delegation
+// instead of a listener that would be lost with the old DOM.
+$('side').addEventListener('input',e=>{
+  if(e.target.id!=='edep') return;
+  st().depth_mm=e.target.value.trim(); save();});
+$('side').addEventListener('change',e=>{ if(e.target.id==='edep') show(); });
+$('fc').onclick=()=>{const b=$('fcbox');b.hidden=!b.hidden;
+  if(!b.hidden){$('fcnote').value=fnote().note||'';$('fcfold').textContent=D.folder;
+                $('fcnote').focus();}};
+$('fcx').onclick=()=>{$('fcbox').hidden=true;};
 document.addEventListener('keydown',e=>{
-  if(e.target===$('note')){if(e.key==='Escape')$('note').blur();return;}
+  // Any field the operator can type into keeps its keys. Guarding only the two comment boxes by
+  // identity meant the digits typed into the depth field were eaten by the 1-5 flag shortcuts and
+  // 0 by reset-zoom: the field took focus and stayed empty.
+  const t=e.target, tag=(t.tagName||'').toLowerCase();
+  if(tag==='input'||tag==='textarea'||t.isContentEditable){
+    if(e.key==='Escape'){ if(t===$('fcnote'))$('fcbox').hidden=true; t.blur(); }
+    return;
+  }
+  if(e.key==='c'||e.key==='C'){$('fc').click();e.preventDefault();return;}
   if(e.key==='ArrowRight'){go(1);e.preventDefault();}
   else if(e.key==='ArrowLeft'){go(-1);e.preventDefault();}
   else if(e.key==='h'||e.key==='H')$('tgl').click();
@@ -259,20 +323,31 @@ $('exp').onclick=()=>{
   const out=[["cartella","vendor","immagine","frame_pos","stato","orientamento","zero_end",
     "pred_x","pred_y_zero","pred_y_far","corr_x","corr_y_zero","corr_y_far",
     "tacche_aggiunte","tacche_rimosse","numeri_inseriti","mm_per_px","passo_dai_numeri",
-    "numeri_sospetti","depth_interfaccia","depth_da_scala","esito_depth","flag","commento"]];
+    "numeri_sospetti","depth_interfaccia","depth_da_scala","esito_depth","depth_letta_da_te",
+    "flag","commento","commento_cartella"]];
+  const fn=(fnote().note||'').trim();
   F.forEach(f=>{
     const s=ST[D.folder+'|'+f.name]; if(!s) return;
     const fl=Object.keys(s.flags||{}).filter(x=>s.flags[x]).join('|');
     const touched=s.x!=null||s.y_zero!=null||s.y_far!=null||(s.ticks_add||[]).length
-                  ||(s.ticks_del||[]).length||(s.nums||[]).length;
+                  ||(s.ticks_del||[]).length||(s.nums||[]).length
+                  ||String(s.depth_mm||'').trim();
     if(!fl && !(s.note||'').trim() && !touched) return;
     out.push([D.folder,D.vendor,f.name,f.idx,f.status,f.B_orient,f.B_zero_end,
       f.x??'',f.y_zero??'',f.y_far??'',s.x??'',s.y_zero??'',s.y_far??'',
       (s.ticks_add||[]).join('|'),(s.ticks_del||[]).join('|'),
       (s.nums||[]).map(p=>p[0]+':'+p[1]).join('|'),
       f.mm_per_px??'',f.D_step_mm??'',(f.D_suspect||[]).map(p=>p[0]+':'+p[1]).join('|'),
-      f.E_depth_interface??'',f.E_depth_scale??'',f.E_verdict,fl,(s.note||'').trim()]);
+      f.E_depth_interface??'',f.E_depth_scale??'',f.E_verdict,
+      String(s.depth_mm||'').trim(),fl,(s.note||'').trim(),fn]);
   });
+  // The folder comment must survive on its own: it is often the whole point of the review even
+  // when no single frame needed a correction.
+  if(out.length===1 && fn){
+    const row=new Array(out[0].length).fill('');
+    row[0]=D.folder; row[1]=D.vendor; row[out[0].length-1]=fn;
+    out.push(row);
+  }
   if(out.length===1){alert('Niente da esportare.');return;}
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([out.map(r=>r.map(esc).join(',')).join('\n')],

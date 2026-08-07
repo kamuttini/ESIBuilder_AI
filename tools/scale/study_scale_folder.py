@@ -179,7 +179,10 @@ def check_numbers(labels_cm: List[Tuple[float, float]], pitch: float,
 # stage E: depth printed in the interface
 # --------------------------------------------------------------------------- #
 def run_depth_module(folder: str, python_bin: str,
-                     only_paths: Optional[List[str]] = None) -> Dict[str, dict]:
+                     only_paths: Optional[List[str]] = None,
+                     vendor: str = "",
+                     rect_echo: Optional[Tuple[float, float, float, float]] = None,
+                     ) -> Dict[str, dict]:
     """{realpath: {depth_mm, from_interface}} from the depth module.
 
     ``only_paths`` stages exactly the frames under study into a temporary tree of symlinks and
@@ -205,6 +208,13 @@ def run_depth_module(folder: str, python_bin: str,
             target = str(Path(td) / "stage")
         cmd = [python_bin, str(script), "--folder", target, "--output-dir", td,
                "--max-images", str(max(40, len(only_paths or [])))]
+        # The module's own checkpoint asks for vendor and the ultrasound rectangle when there is
+        # no .fss: both drive its vendor profile and its search region, and we already know them
+        # from the classifier and the rect regressor. Calling it bare threw that away.
+        if vendor:
+            cmd += ["--vendor", vendor]
+        if rect_echo:
+            cmd += ["--rect-echo", ",".join(str(int(round(v))) for v in rect_echo)]
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         except Exception as exc:  # noqa: BLE001
@@ -238,13 +248,33 @@ def run_depth_module(folder: str, python_bin: str,
                         continue
                 if d is None:
                     continue
-                has_text = str(r.get("ocr_text_has_depth", "")).strip().lower() in ("1", "true", "yes")
+                # 'mode' is the module's own verdict on where the value came from:
+                # direct_label means it read it in the interface text, introduced by
+                # Depth/D/P/R or by stable unit evidence. Using ocr_text_has_depth instead
+                # demanded the literal word "depth" and threw away every machine that writes
+                # it differently — the module had found it, this join discarded it.
+                mode = str(r.get("mode", "") or "").strip()
+                status = str(r.get("status", "") or "").strip()
+                from_iface = mode == "direct_label" or str(
+                    r.get("ocr_text_has_depth", "")).strip().lower() in ("1", "true", "yes")
+                rank = ({"accepted": 2, "review": 1}.get(status, 0), 1 if from_iface else 0)
                 prev = out.get(key)
-                if prev is None or (has_text and not prev["from_interface"]):
-                    out[key] = {"depth_mm": round(d, 1), "from_interface": has_text}
+                if prev is None or rank > prev["rank"]:
+                    out[key] = {"depth_mm": round(d, 1), "from_interface": from_iface,
+                                "mode": mode, "status": status, "rank": rank,
+                                "ocr_text": str(r.get("ocr_text", "") or "")[:60]}
         if out:
-            print(f"[depth] letta la depth su {len(out)} immagini")
+            n_iface = sum(1 for v in out.values() if v["from_interface"])
+            print(f"[depth] letta su {len(out)} immagini, {n_iface} dall'interfaccia "
+                  f"(modi: {_tally(v['mode'] for v in out.values())})")
         return out
+
+
+def _tally(items) -> str:
+    c: Dict[str, int] = {}
+    for i in items:
+        c[i or "?"] = c.get(i or "?", 0) + 1
+    return ", ".join(f"{k}:{v}" for k, v in sorted(c.items(), key=lambda kv: -kv[1]))
 
 
 # --------------------------------------------------------------------------- #
@@ -281,7 +311,14 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
     else:
         print("[B] orientamento non disponibile: il verso verra' dalle etichette")
 
-    depth_info = run_depth_module(folder, python_bin, paths) if with_depth else {}
+    # median rect over the folder, in the left,top,right,bottom order the depth module expects
+    rects = [o["rect"] for o in orient.values() if o.get("rect")]
+    rect_echo = None
+    if rects:
+        med = [statistics.median([r[k] for r in rects]) for k in range(4)]
+        rect_echo = (med[1], med[0], med[3], med[2])  # (top,left,bottom,right) -> l,t,r,b
+    depth_info = (run_depth_module(folder, python_bin, paths, vendor=vendor, rect_echo=rect_echo)
+                  if with_depth else {})
 
     # ---- first pass: detect on every frame, to learn the folder's scale zone ----
     first: List[dict] = []
@@ -380,6 +417,9 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
             "D_coherent": coh["coherent"], "D_suspect": coh["suspect"],
             "E_depth_interface": dep["depth_mm"] if dep else None,
             "E_depth_from_interface": bool(dep and dep["from_interface"]),
+            "E_depth_mode": (dep or {}).get("mode", ""),
+            "E_depth_status": (dep or {}).get("status", ""),
+            "E_depth_ocr": (dep or {}).get("ocr_text", ""),
             "E_depth_scale": scale_depth, "E_verdict": depth_verdict,
         })
 
@@ -413,6 +453,13 @@ def predict_vendor(paths: Sequence[str], device_name: str = "auto") -> Tuple[str
     """
     from scale.detect_scale_ladder import PROFILES
     known = {v.lower(): v for v in PROFILES if v != "default"}
+    # The classifier's vocabulary is wider than the scale profiles: names that mean the same
+    # machine family must map onto the profile, or a confident answer gets thrown away. Measured
+    # on the corpus: 'Toshiba' at 0.97 was being discarded and the Canon profile lost.
+    known.update({"toshiba": "Canon", "aloka": "Hitachi", "fujifilm": "Hitachi"})
+    # Below this the answer is noise: 'Mindray 0.20' on an Alpinion and 'Hitachi 0.19' on an
+    # Alpio were both accepted as fact. The default profile is the honest answer instead.
+    MIN_CONF = 0.35
     try:
         import importlib.util
         import numpy as np
@@ -453,7 +500,14 @@ def predict_vendor(paths: Sequence[str], device_name: str = "auto") -> Tuple[str
         if votes:
             best = max(votes, key=lambda k: votes[k])
             n = len(paths[:10])
-            return known.get(best.lower(), ""), f"dalla rete: {best}, {votes[best] / n:.2f} su {n} frame"
+            conf = votes[best] / n
+            src = f"dalla rete: {best}, {conf:.2f} su {n} frame"
+            if conf < MIN_CONF:
+                return "", src + " — troppo incerto, uso il profilo generico"
+            mapped = known.get(best.lower(), "")
+            if not mapped:
+                return "", src + " — nessun profilo scala per questo vendor"
+            return mapped, src
     except Exception as exc:  # noqa: BLE001 - never block the study on the classifier
         print(f"[vendor] rete non disponibile ({exc}); ricado sul nome della cartella")
     guessed = _guess_vendor(folder_of(paths[0]))
