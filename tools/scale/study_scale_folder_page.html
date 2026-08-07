@@ -115,6 +115,92 @@ function ticksOf(f,s){
   const del=new Set((s.ticks_del||[]).map(v=>Math.round(v)));
   return f.ticks.filter(t=>!del.has(Math.round(t))).concat(s.ticks_add||[]).sort((a,b)=>a-b);
 }
+// A hand correction is evidence about the whole ruler, not about one mark: the pitch is constant
+// inside an image, so moving the zero or a tick moves where every other tick and number *should*
+// be. This redoes that grid and reports what no longer sits on it.
+function recompute(f,s){
+  const zero=(s.y_zero??f.y_zero), far=(s.y_far??f.y_far), tk=ticksOf(f,s);
+  const dir=(f.B_zero_end==='top')?1:-1;
+  let pitch=null;
+  if(tk.length>1){const d=[]; for(let k=1;k<tk.length;k++) d.push(tk[k]-tk[k-1]);
+    d.sort((a,b)=>a-b); pitch=d[Math.floor(d.length/2)];}
+  const labs=(f.labels||[]).map(p=>[p[0],parseFloat(p[1])])
+    .concat((s.nums||[]).map(p=>[p[0],parseFloat(String(p[1]).replace(',','.'))]))
+    .filter(p=>isFinite(p[1]) && p[1]!==0);
+  // mm per pixel refitted on the labels through the corrected zero, least squares through the
+  // origin: the corrected zero is an anchor we trust more than the original fit.
+  let mmpp=f.mm_per_px, refit=false;
+  if(zero!=null && labs.length){let sn=0,sd=0;
+    labs.forEach(([y,v])=>{const d=dir*(y-zero); sn+=v*10*d; sd+=d*d;});
+    if(sd>0.5){mmpp=sn/sd; refit=true;}}
+  const tol=Math.max(1.5,(pitch||6)*0.18);
+  const offGrid=[], missing=[];
+  if(zero!=null && pitch>1){
+    tk.forEach(t=>{const k=Math.round((t-zero)/pitch);
+      if(Math.abs(t-(zero+k*pitch))>tol) offGrid.push(t);});
+    if(far!=null){const K=Math.round((far-zero)/pitch);
+      for(let k=Math.min(0,K);k<=Math.max(0,K);k++){const y=zero+k*pitch;
+        if(!tk.some(t=>Math.abs(t-y)<=tol)) missing.push(Math.round(y*10)/10);}}
+  }
+  const move=[];
+  if(zero!=null && mmpp>0) labs.forEach(([y,v])=>{const ey=zero+dir*v*10/mmpp;
+    if(Math.abs(y-ey)>Math.max(tol,2)) move.push([y,v,Math.round(ey*10)/10]);});
+  return {zero,far,pitch,mmpp,refit,offGrid,missing,move,tol,dir};
+}
+function touchedOf(s){return s.x!=null||s.y_zero!=null||s.y_far!=null||(s.ticks_add||[]).length
+  ||(s.ticks_del||[]).length||(s.nums||[]).length;}
+
+// What a correction to the column or to the zero implies for the rest of the folder. The spread of
+// the other frames' own predictions is shown next to it: same machine, same layout usually means
+// the same value everywhere, but that is for the operator to see, not for the tool to assume.
+function spread(field){
+  const v=F.map(f=>field==='x'?f.x:f.y_zero).filter(v=>v!=null);
+  if(!v.length) return null;
+  return {min:Math.min(...v), max:Math.max(...v), n:v.length};
+}
+function propagate(field){
+  const s=st(), v=s[field];
+  if(v==null) return;
+  let n=0;
+  F.forEach(f2=>{
+    const k=D.folder+'|'+f2.name;
+    if(!ST[k]) ST[k]={flags:{},note:'',x:null,y_zero:null,y_far:null,
+                      ticks_add:[],ticks_del:[],nums:[],depth_mm:''};
+    if(ST[k][field]!==v){ ST[k][field]=v; n++; }
+  });
+  save(); show();
+  $('pmsg').textContent = 'applicato a ' + n + ' frame';
+}
+function corrHtml(f,s){
+  if(!touchedOf(s)) return '';
+  const R=recompute(f,s);
+  const rows=[];
+  if(R.pitch) rows.push(`<b>passo ricalcolato</b>${R.pitch.toFixed(1)} px`
+    + (f.pitch?` <span class="muted">(prima ${f.pitch.toFixed(1)})</span>`:''));
+  if(R.refit && R.mmpp>0) rows.push(`<b>mm per pixel rifatto sui numeri</b>${R.mmpp.toFixed(4)}`
+    + (f.mm_per_px?` <span class="muted">(prima ${f.mm_per_px.toFixed(4)})</span>`:''));
+  if(R.missing.length) rows.push(`<span class="pill wr">${R.missing.length} tacche mancanti</span>`
+    + ` <span class="muted">segnate in azzurro sull'immagine</span>`
+    + ` <button data-p="addmiss">aggiungile</button>`);
+  if(R.offGrid.length) rows.push(`<span class="pill bad">${R.offGrid.length} tacche fuori griglia</span>`
+    + ` <span class="muted">cerchiate in rosso: da spostare o togliere</span>`);
+  if(R.move.length) rows.push('<b>numeri fuori posto</b>' + R.move.map(
+    ([y,v,ey])=>`<br><span class="muted">${v} cm sta a y ${y}, dovrebbe stare a y ${ey}</span>`).join(''));
+  if(!R.missing.length && !R.offGrid.length && !R.move.length)
+    rows.push('<span class="pill ok">tutto torna con la tua correzione</span>');
+
+  const sx=spread('x'), sz=spread('y_zero');
+  const prop=[];
+  if(s.x!=null) prop.push(`<button data-p="x">usa questa colonna su tutti i ${F.length} frame</button>`
+    + (sx?` <span class="muted">gli altri stanno fra x ${sx.min.toFixed(0)} e ${sx.max.toFixed(0)}</span>`:''));
+  if(s.y_zero!=null) prop.push(`<button data-p="y_zero">usa questo zero su tutti i ${F.length} frame</button>`
+    + (sz?` <span class="muted">gli altri stanno fra y ${sz.min.toFixed(0)} e ${sz.max.toFixed(0)}</span>`:''));
+  return `<h3>ricalcolo dalla tua correzione</h3>
+   <div class="st ${R.offGrid.length||R.move.length?'warn':'ok'}">${rows.join('<br>')}</div>
+   ${prop.length?`<div class="st"><b>vale per tutta la cartella?</b>${prop.join('<br>')}
+     <div class="muted" id="pmsg"></div></div>`:''}`;
+}
+
 function draw(){
   const f=cur(), s=st(), sc=f.scale, o=$('ovl');
   const X=(s.x??f.x), YZ=(s.y_zero??f.y_zero), YF=(s.y_far??f.y_far);
@@ -143,6 +229,24 @@ function draw(){
          fill="#ff5ec8" fill-opacity=".6" stroke="#ff5ec8" stroke-width="1.5"/>
         <text x="${px+13}" y="${p[0]*sc+4}" fill="#ff5ec8" font-size="11" font-weight="bold">${p[1]}</text></g>`;
   });
+  // Only once something was corrected: showing suggestions over an untouched prediction would
+  // just be the detector arguing with itself.
+  if(touchedOf(s)){
+    const R=recompute(f,s);
+    R.missing.forEach(y=>{
+      h+=`<line x1="${px-16}" y1="${y*sc}" x2="${px+16}" y2="${y*sc}" stroke="#00e5ff"
+           stroke-width="1.4" stroke-dasharray="3 3" opacity=".95"/>`
+       +`<text x="${px+19}" y="${y*sc+4}" fill="#00e5ff" font-size="10">manca</text>`;});
+    R.offGrid.forEach(t=>{
+      h+=`<circle cx="${px}" cy="${t*sc}" r="9" fill="none" stroke="#ff5470" stroke-width="1.6"
+           stroke-dasharray="3 3"/>`;});
+    R.move.forEach(([y,v,ey])=>{
+      h+=`<line x1="${px-11}" y1="${ey*sc}" x2="${px+11}" y2="${ey*sc}" stroke="#00e5ff"
+           stroke-width="2" opacity=".9"/>`
+       +`<line x1="${px}" y1="${y*sc}" x2="${px}" y2="${ey*sc}" stroke="#00e5ff"
+           stroke-width="1" stroke-dasharray="2 3" opacity=".8"/>`
+       +`<text x="${px+13}" y="${ey*sc-4}" fill="#00e5ff" font-size="10">${v} qui</text>`;});
+  }
   if(YF!=null) h+=`<rect class="handle" data-h="far" x="${px}" y="${YF*sc}" width="13" height="13"
      transform="translate(-6.5,-6.5)" fill="#a000c8" fill-opacity=".8" stroke="#fff" stroke-width="1"/>`;
   if(YZ!=null) h+=`<circle class="handle" data-h="zero" cx="${px}" cy="${YZ*sc}" r="8" fill="#37d67a"
@@ -218,6 +322,7 @@ function side(){
          &laquo;depth&raquo;, quindi le macchine che la scrivono in altro modo la perdono</span>
        ${dv}
      </div></div>
+   ${corrHtml(f,s)}
    <h3>calibrazione</h3>
    <div class="st"><b>mm per pixel</b>${f.mm_per_px?f.mm_per_px.toFixed(4):'n/d'}
      ${f.reason?`<br><span class="muted">${f.reason}</span>`:''}</div>`;
@@ -257,6 +362,16 @@ $('side').addEventListener('input',e=>{
   if(e.target.id!=='edep') return;
   st().depth_mm=e.target.value.trim(); save();});
 $('side').addEventListener('change',e=>{ if(e.target.id==='edep') show(); });
+$('side').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-p]'); if(!b) return;
+  const p=b.getAttribute('data-p');
+  if(p==='addmiss'){
+    const f=cur(), s=st(), R=recompute(f,s);
+    s.ticks_add=(s.ticks_add||[]).concat(R.missing);
+    save(); show(); return;
+  }
+  propagate(p);
+});
 $('fc').onclick=()=>{const b=$('fcbox');b.hidden=!b.hidden;
   if(!b.hidden){$('fcnote').value=fnote().note||'';$('fcfold').textContent=D.folder;
                 $('fcnote').focus();}};
