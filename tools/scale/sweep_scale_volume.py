@@ -120,29 +120,54 @@ def run_one(item: dict, python_bin: str, max_images: int, with_depth: bool,
         out, ok = "timeout", False
     res = dict(item)
     res.update({"ok": ok, "seconds": round(time.time() - t0, 1), "log": out.strip().splitlines()})
-    for line in res["log"]:
+    parse_log(res)
+    return res
+
+
+def parse_log(res: dict) -> dict:
+    """Pull the summary fields out of a study's log lines.
+
+    Separate from run_one so a results file written by an older run can be re-read: the raw log is
+    stored, so nothing has to be recomputed when the parsing changes.
+
+    Tags of both stage namings are accepted: renaming the stages silently emptied every column of
+    the index, because the summary is scraped from these lines.
+    """
+    for line in res.get("log") or []:
         if line.startswith("[info]") and "vendor=" in line:
             m = re.search(r"vendor='([^']*)'", line)
             res["vendor"] = m.group(1) if m else ""
             res["vendor_src"] = line.split("(", 1)[1].rstrip(")") if "(" in line else ""
-        elif line.startswith("[A]"):
-            m = re.search(r"trovata su (\d+)/(\d+)", line)
+        elif line.startswith(("[A]", "[3] righello")):
+            m = re.search(r"trovat[ao] su (\d+)/(\d+)", line)
             if m:
                 res["zone_found"], res["zone_total"] = int(m.group(1)), int(m.group(2))
-        elif line.startswith("[C/D] stati:"):
+        elif line.startswith(("[C/D] stati:", "[6] stati:")):
             try:
                 res["stati"] = json.loads(line.split(":", 1)[1].strip().replace("'", '"'))
             except Exception:  # noqa: BLE001
                 pass
-        elif line.startswith("[D] frame con numeri sospetti:"):
+        elif "frame con numeri sospetti:" in line:
             m = re.search(r"(\d+)/(\d+)", line)
             if m:
                 res["suspect"] = int(m.group(1))
-        elif line.startswith("[B] orientamento:"):
+        elif line.startswith(("[B] orientamento:", "[1] orientamento:")):
+            body = line.split(":", 1)[1].strip()
+            body = body.split("} (")[0] + "}" if "} (" in body else body
             try:
-                res["orient"] = json.loads(line.split(":", 1)[1].strip().replace("'", '"'))
+                res["orient"] = json.loads(body.replace("'", '"'))
             except Exception:  # noqa: BLE001
                 pass
+        elif line.startswith("[1b]"):
+            res["zero_check"] = line.split(":", 1)[1].strip()
+        elif line.startswith("[5] passo"):
+            m = re.search(r"mediana ([\d.]+) px", line)
+            if m:
+                res["pitch_median"] = float(m.group(1))
+        elif line.startswith("[corr]") and "applicate" in line:
+            m = re.search(r"su (\d+)/(\d+)", line)
+            if m:
+                res["corr_applied"] = int(m.group(1))
     return res
 
 

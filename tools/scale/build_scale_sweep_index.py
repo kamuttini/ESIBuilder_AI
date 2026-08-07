@@ -10,6 +10,7 @@ import argparse
 import html
 import json
 import re
+import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -143,14 +144,22 @@ def pill(txt: str, cls: str = "") -> str:
     return f'<span class="pill {cls}">{html.escape(txt)}</span>'
 
 
+def zchk(text: str) -> str:
+    """The zero cross-check tally, shortened: 'confermato:6' reads better than the whole line."""
+    return (text or "").replace("confermato", "ok").replace("in disaccordo", "discorde") \
+                       .replace("non verificabile", "n/v")
+
+
 def build(results: list, title: str) -> str:
     rows = []
     n_ok = sum(1 for r in results if r.get("ok"))
-    zf = sum(r.get("zone_found", 0) for r in results)
-    zt = sum(r.get("zone_total", 0) for r in results)
+    # 'or 0' and not a default: a study that failed leaves these keys present but None, and
+    # summing None is a crash that would take the whole index down over one bad folder.
+    zf = sum(r.get("zone_found") or 0 for r in results)
+    zt = sum(r.get("zone_total") or 0 for r in results)
     acc = sum((r.get("stati") or {}).get("accepted", 0) for r in results)
     tot = sum(sum((r.get("stati") or {}).values()) for r in results)
-    sus = sum(r.get("suspect", 0) for r in results)
+    sus = sum(r.get("suspect") or 0 for r in results)
 
     for r in sorted(results, key=lambda x: (x.get("family", ""), x.get("acquisition", ""))):
         st = r.get("stati") or {}
@@ -179,7 +188,9 @@ def build(results: list, title: str) -> str:
             f'<td>{vend}<div class="muted">{vsrc}</div></td>'
             f'<td>{zone}</td><td>{" ".join(parts) or "—"}</td>'
             f'<td>{pill(f"{s}/{n}", "wr" if s else "ok") if s is not None else "—"}</td>'
+            f'<td class="muted">{html.escape(zchk(r.get("zero_check", "")))}</td>'
             f'<td class="muted">{html.escape(ori)}</td>'
+            f'<td class="muted">{r.get("corr_applied") or ""}</td>'
             f'<td class="muted">{r.get("seconds","")}s</td></tr>')
 
     return f"""<!doctype html><html lang="it"><head><meta charset="utf-8">
@@ -209,8 +220,8 @@ def build(results: list, title: str) -> str:
   <span class="muted" id="cstat">…</span>
  </div>
  <div id="rlog" hidden></div>
- <table><tr><th></th><th>famiglia</th><th>cartella</th><th>vendor</th><th>zona</th><th>stati</th>
-   <th>sospetti</th><th>orientamento</th><th>tempo</th></tr>
+ <table><tr><th></th><th>famiglia</th><th>cartella</th><th>vendor</th><th>righello</th><th>stati</th>
+   <th>sospetti</th><th>zero vs OCR</th><th>orientamento</th><th>corretti</th><th>tempo</th></tr>
  {"".join(rows)}</table>
 </div><script>{JS}</script></body></html>"""
 
@@ -262,6 +273,18 @@ def main_with(results: str, out: str, title: str) -> int:
             print("  " + p)
         return 2
     data = json.loads(Path(results).read_text("utf-8"))
+    # Re-derive the summary from the stored logs: a run made before a parsing change (or with the
+    # stage tags renamed under it) would otherwise show an index full of empty columns.
+    missing = [r for r in data if r.get("ok") and r.get("stati") is None]
+    if missing:
+        try:
+            sys.path.insert(0, str(Path(__file__).parent))
+            from sweep_scale_volume import parse_log
+            for r in missing:
+                parse_log(r)
+            print(f"[fix] riletti dal log {len(missing)} studi che avevano i campi vuoti")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] non ho potuto rileggere i log: {exc}")
     Path(out).write_text(build(data, title), "utf-8")
     print(f"[ok] {len(data)} studi -> {out}")
     return 0
