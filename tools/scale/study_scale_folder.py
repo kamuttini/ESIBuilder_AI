@@ -1,21 +1,25 @@
-"""Study the depth scale of one folder in five stages, and open it up for correction.
+"""Study the depth scale of one folder in six stages, and open it up for correction.
 
 The stages follow the operator's reasoning rather than the code's convenience:
 
-  A  scale zone      where the ruler lives in *this* folder, from all its frames at once,
-                     so a frame that fails on its own can still be told where to look
-  B  orientation     split the frames by up/down with the orientation net, then place the
-                     zero at the end that orientation implies (up -> top, down -> bottom)
-  C  ticks           every tick of the ruler, with the last one marked apart
-  D  numbers         OCR the labels, then use the fact that the tick pitch is constant
-                     inside one frame to check the numbers against each other and refit
-  E  depth check     if the depth is printed in the interface (the depth module reads it),
-                     compare it with the depth the scale implies at its last tick — the two
-                     should land in the same ten
+  1  orientation     from the orientation marker (the net is only its prior): up means the zero
+                     is at the top, down means the bottom. Cross-checked against the OCR: the
+                     smallest number must sit at the distance from the zero its value implies
+  2  depth           the depth printed in the interface, cross-checked against the largest
+                     number on the ruler and against the last tick - they should land close
+  3  ruler           where the ruler is, one position for the whole folder, so a frame that
+                     fails on its own can still be told where to look
+  4  ticks           every tick, with the zero end and the far end kept distinct
+  5  pitch           the step between one tick and the next
+  6  numbers         OCR, verified against each other through that constant pitch
+
+Detection necessarily runs before all of this: the cross-checks in 1 and 2 need numbers and
+ticks to exist. The order above is the order of the decisions, not of the computation.
 
 Everything is a proposal: the page shows each stage's outcome per frame and lets the ruler
-position, the zero, the ticks and the numbers be corrected by hand, with a comment. The
-export feeds ``ingest_scale_corrections.py``.
+position, the zero, the ticks, the numbers, the orientation and the depth be corrected by
+hand, with a comment. Corrections about the marker and the depth are exported in the shapes
+those two modules already read.
 
 Usage:
   OldSoftwareEsiBuilder/.venv-mps/bin/python tools/scale/study_scale_folder.py \
@@ -213,7 +217,8 @@ def predict_orientation(models, paths: List[Path]) -> Dict[str, dict]:
 # cross-checks: the zero against the OCR, the scale against the interface depth
 # --------------------------------------------------------------------------- #
 def check_zero_with_ocr(y_zero: Optional[float], labels_mm: List[Tuple[float, float]],
-                        mm_per_px: Optional[float], pitch: Optional[float]) -> dict:
+                        mm_per_px: Optional[float], pitch: Optional[float],
+                        y_far: Optional[float] = None) -> dict:
     """Do the read numbers agree that the zero is where orientation says it is?
 
     The smallest label is the one nearest the zero, so its distance from the zero must equal its
@@ -236,6 +241,15 @@ def check_zero_with_ocr(y_zero: Optional[float], labels_mm: List[Tuple[float, fl
     expected_px = v_lo / mm_per_px
     res["expected_y"] = round(y_zero + (1 if y_lo > y_zero else -1) * expected_px, 1)
     tol = max(6.0, 0.35 * (pitch or 8.0))
+    # If the smallest label is as far from one end of the ladder as from the other, the check
+    # passes whichever end is called zero: it confirms nothing. Measured on BK 18L5, where the
+    # ruler runs 0..2 cm and the 1 cm label sits 162 px from one end and 161 from the other.
+    if y_far is not None and abs(abs(y_lo - y_zero) - abs(y_lo - y_far)) <= tol:
+        res["verdict"] = "ambiguo"
+        res["detail"] = (f"il numero piu' piccolo ({v_lo / 10.0:g} cm) sta a mezza scala: dista "
+                         f"{abs(y_lo - y_zero):.0f} px da un capo e {abs(y_lo - y_far):.0f} px "
+                         f"dall'altro, quindi l'OCR non puo' dire quale dei due sia lo zero")
+        return res
     if abs(dist_px - expected_px) <= tol:
         res["verdict"] = "confermato"
         res["detail"] = (f"il numero piu' piccolo ({v_lo / 10.0:g} cm) sta a {dist_px:.0f} px "
@@ -419,9 +433,20 @@ def run_depth_module(folder: str, python_bin: str,
                 rank = ({"accepted": 2, "review": 1}.get(status, 0), 1 if from_iface else 0)
                 prev = out.get(key)
                 if prev is None or rank > prev["rank"]:
+                    # Keep the evidence, not just the number: where the module looked, what it
+                    # read there and why it chose it. A depth with no visible evidence cannot be
+                    # judged, only believed.
+                    box = None
+                    try:
+                        box = [float(r[k]) for k in ("left", "top", "right", "bottom")]
+                    except (KeyError, TypeError, ValueError):
+                        box = None
                     out[key] = {"depth_mm": round(d, 1), "from_interface": from_iface,
                                 "mode": mode, "status": status, "rank": rank,
-                                "ocr_text": str(r.get("ocr_text", "") or "")[:60]}
+                                "ocr_text": str(r.get("ocr_text", "") or "")[:80],
+                                "box": box,
+                                "score": _f(r.get("score")), "ranker": _f(r.get("ranker_score")),
+                                "reason": str(r.get("reason", "") or "")[:160]}
         if out:
             n_iface = sum(1 for v in out.values() if v["from_interface"])
             print(f"[depth] letta su {len(out)} immagini, {n_iface} dall'interfaccia "
@@ -464,6 +489,13 @@ def _corr_anchor_x(frames: dict) -> Optional[float]:
               f"come ancora della cartella")
         return None
     return float(statistics.median(xs))
+
+
+def _f(v) -> Optional[float]:
+    try:
+        return round(float(v), 3)
+    except (TypeError, ValueError):
+        return None
 
 
 def _tally(items) -> str:
@@ -607,6 +639,18 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
         # what the detector would have said on its own.
         c = corr.get(name) or {}
         applied: List[str] = []
+        # The end the zero sits at, when the operator overturned the marker. Applied before the
+        # zero itself, because it decides which extreme of the ladder the zero is taken from.
+        if c.get("zero_end") in ("top", "bottom"):
+            zero_from_orient = str(c["zero_end"])
+            if pred.ticks_y:
+                y_zero = (min(pred.ticks_y) if zero_from_orient == "top" else max(pred.ticks_y))
+            zero_moved = zero_from_orient != zero_detected
+            # direction and far end were derived from the old verso a few lines above
+            dirn = 1 if zero_from_orient == "top" else -1
+            if pred.ticks_y:
+                far = max(pred.ticks_y) if dirn >= 0 else min(pred.ticks_y)
+            applied.append("verso")
         if c.get("x") not in (None, ""):
             pred.x = float(c["x"]); applied.append("colonna")
         if c.get("y_zero") not in (None, ""):
@@ -654,7 +698,7 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
         # 1b. cross-check the zero with the OCR: the smallest number must sit at the distance
         # from the zero that its own value implies
         labels_mm = [(y, v * 10.0) for y, v in labels_cm]
-        zchk = check_zero_with_ocr(y_zero, labels_mm, pred.mm_per_px, pred.tick_pitch_px)
+        zchk = check_zero_with_ocr(y_zero, labels_mm, pred.mm_per_px, pred.tick_pitch_px, far)
 
         # 2b. cross-check the interface depth against the ruler's largest number
         dep = depth_info.get(os.path.realpath(f["path"]))
@@ -709,6 +753,11 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
             "E_depth_mode": (dep or {}).get("mode", ""),
             "E_depth_status": (dep or {}).get("status", ""),
             "E_depth_ocr": (dep or {}).get("ocr_text", ""),
+            "E_depth_box": (dep or {}).get("box"),
+            "E_depth_score": (dep or {}).get("score"),
+            "E_depth_ranker": (dep or {}).get("ranker"),
+            "E_depth_reason": (dep or {}).get("reason", ""),
+            "rect": list(f["orient"].get("rect") or []) if f.get("orient") else [],
             "E_depth_scale": scale_depth, "E_verdict": depth_verdict,
             "corr_applied": applied,
             "M_marker": marker.get(f["path"]) or {},

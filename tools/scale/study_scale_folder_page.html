@@ -50,6 +50,8 @@
  a#back:hover{background:#1b2028}
  button.send{background:#1f6feb;border-color:#1f6feb;font-weight:600}
  button.send.sent{background:var(--good);border-color:var(--good);color:#08130c}
+ button#tmk.on{background:#00b4ff;border-color:#00b4ff;color:#04141c;font-weight:700}
+ button#tdp.on{background:#ffb020;border-color:#ffb020;color:#1c1204;font-weight:700}
  button#delf,button#delall{border-color:#5a2733;color:#ff8fa3}
  button#delf:hover,button#delall:hover{background:#2a1620}
  .st b{display:block;font-size:11px;color:var(--mut);text-transform:uppercase}
@@ -66,6 +68,8 @@
   <span id="meta" class="muted"></span>
   <span style="flex:1"></span>
   <button id="tgl" class="tgl on" title="h">elaborazione: ON</button>
+  <button id="tmk" title="m">marker</button>
+  <button id="tdp" title="p">depth</button>
   <button id="rz" title="0">reset zoom</button>
   <button id="done" title="d">segna come riguardata</button>
   <button id="fc" title="c">commento cartella</button>
@@ -107,12 +111,15 @@ const F = D.frames;
 const FLAGS=[["zona","zona"],["zero","zero"],["tacche","tacche"],["numeri","numeri"],["depth","depth"]];
 const SK='scale_study_'+(D.folder||'x');
 let ST={}; try{ST=JSON.parse(localStorage.getItem(SK)||'{}');}catch(e){ST={};}
-let i=0, z=1, tx=0, ty=0, mode=null;
+let i=0, z=1, tx=0, ty=0, mode=null, showMk=false, showDp=false;
 const $=id=>document.getElementById(id);
 const cur=()=>F[i];
 const key=()=>D.folder+'|'+cur().name;
 function st(){const k=key(); if(!ST[k])ST[k]={flags:{},note:'',x:null,y_zero:null,y_far:null,
-  ticks_add:[],ticks_del:[],nums:[],depth_mm:''}; return ST[k];}
+  ticks_add:[],ticks_del:[],nums:[],depth_mm:'',zero_end:'',marker_box:null,depth_box:null};
+  return ST[k];}
+// The end the zero sits at, corrected by hand when the marker got the orientation wrong.
+const zeroEnd=(f,s)=>s.zero_end||f.B_zero_end;
 function save(){localStorage.setItem(SK,JSON.stringify(ST)); count();}
 // Reserved key so the folder-wide comment lives in the same saved state without ever being
 // mistaken for a frame: every loop over ST skips it.
@@ -139,6 +146,8 @@ function paintDone(){
   $('done').textContent = d ? 'riguardata ✓' : 'segna come riguardata';
 }
 $('done').onclick=()=>setDone(!isDone());
+$('tmk').onclick=()=>{showMk=!showMk; $('tmk').classList.toggle('on',showMk); show();};
+$('tdp').onclick=()=>{showDp=!showDp; $('tdp').classList.toggle('on',showDp); show();};
 
 // ---- sending the feedback, and undoing corrections without touching the others ----
 function frameCorrections(){
@@ -146,11 +155,18 @@ function frameCorrections(){
   F.forEach(f=>{
     const s=ST[D.folder+'|'+f.name]; if(!s) return;
     const keep={};
-    ['x','y_zero','y_far','depth_mm','note'].forEach(k=>{
+    ['x','y_zero','y_far','depth_mm','note','zero_end'].forEach(k=>{
       if(s[k]!=null && String(s[k]).trim!==undefined && String(s[k]).trim()!=='') keep[k]=s[k];
       else if(s[k]!=null && typeof s[k]==='number') keep[k]=s[k];
     });
     ['ticks_add','ticks_del','nums'].forEach(k=>{ if((s[k]||[]).length) keep[k]=s[k]; });
+    ['marker_box','depth_box'].forEach(k=>{ if((s[k]||[]).length===4) keep[k]=s[k]; });
+    // the marker's own identity travels with the correction: the module fixes templates, not pixels
+    if(keep.zero_end||keep.marker_box){
+      const mk=f.M_marker||{};
+      keep.marker_template=mk.template||''; keep.marker_group=mk.group||'';
+      keep.marker_score=mk.score??''; keep.verso_predetto=f.B_orient||'';
+    }
     const fl={}; Object.keys(s.flags||{}).forEach(k=>{ if(s.flags[k]) fl[k]=true; });
     if(Object.keys(fl).length) keep.flags=fl;
     if(Object.keys(keep).length) out[f.name]=keep;
@@ -242,7 +258,7 @@ $('back').addEventListener('click',e=>{
 function count(){let n=0; for(const k in ST){ if(k===FK) continue; const s=ST[k];
   if((s.note&&s.note.trim())||Object.values(s.flags||{}).some(Boolean)||s.x!=null||s.y_zero!=null
      ||s.y_far!=null||(s.ticks_add||[]).length||(s.ticks_del||[]).length||(s.nums||[]).length
-     ||String(s.depth_mm||'').trim())n++;}
+     ||String(s.depth_mm||'').trim()||s.zero_end||s.marker_box||s.depth_box)n++;}
   $('cnt').textContent=n;
   $('fc').classList.toggle('has', !!(fnote().note||'').trim());}
 
@@ -255,7 +271,7 @@ function ticksOf(f,s){
 // be. This redoes that grid and reports what no longer sits on it.
 function recompute(f,s){
   const zero=(s.y_zero??f.y_zero), far=(s.y_far??f.y_far), tk=ticksOf(f,s);
-  const dir=(f.B_zero_end==='top')?1:-1;
+  const dir=(zeroEnd(f,s)==='top')?1:-1;
   let pitch=null;
   if(tk.length>1){const d=[]; for(let k=1;k<tk.length;k++) d.push(tk[k]-tk[k-1]);
     d.sort((a,b)=>a-b); pitch=d[Math.floor(d.length/2)];}
@@ -283,7 +299,7 @@ function recompute(f,s){
   return {zero,far,pitch,mmpp,refit,offGrid,missing,move,tol,dir};
 }
 function touchedOf(s){return s.x!=null||s.y_zero!=null||s.y_far!=null||(s.ticks_add||[]).length
-  ||(s.ticks_del||[]).length||(s.nums||[]).length;}
+  ||(s.ticks_del||[]).length||(s.nums||[]).length||!!s.zero_end;}
 
 // What a correction to the column or to the zero implies for the rest of the folder. The spread of
 // the other frames' own predictions is shown next to it: same machine, same layout usually means
@@ -382,6 +398,33 @@ function draw(){
            stroke-width="1" stroke-dasharray="2 3" opacity=".8"/>`
        +`<text x="${px+13}" y="${ey*sc-4}" fill="#00e5ff" font-size="10">${v} qui</text>`;});
   }
+  // Evidence overlays, on request: the marker that decided the orientation and the box the depth
+  // module read. A verdict you cannot see on the image can only be believed, not judged.
+  if(showMk){
+    const b=(s.marker_box&&s.marker_box.length===4)?s.marker_box:(f.M_marker||{}).box;
+    if(b){ const [t,l,bo,r2]=b;
+      h+=`<rect x="${l*sc}" y="${t*sc}" width="${(r2-l)*sc}" height="${(bo-t)*sc}" fill="none"
+           stroke="#00b4ff" stroke-width="2"/>`
+       +`<text x="${l*sc}" y="${t*sc-5}" fill="#00b4ff" font-size="11" font-weight="bold">marker${
+          s.marker_box?' (tuo)':''}${(f.M_marker||{}).score!=null?' '+f.M_marker.score:''}</text>`;
+    } else {
+      h+=`<text x="14" y="${H-16}" fill="#00b4ff" font-size="12">marker non trovato in questo frame — Shift+trascina per indicarlo</text>`;
+    }
+    if(f.rect&&f.rect.length===4){ const [t,l,bo,r2]=f.rect;
+      h+=`<rect x="${l*sc}" y="${t*sc}" width="${(r2-l)*sc}" height="${(bo-t)*sc}" fill="none"
+           stroke="#00b4ff" stroke-width="1" stroke-dasharray="6 6" opacity=".45"/>`;}
+  }
+  if(showDp){
+    const b=(s.depth_box&&s.depth_box.length===4)?s.depth_box:f.E_depth_box;
+    if(b){ const [l,t,r2,bo]=b;   // the depth module writes left,top,right,bottom
+      h+=`<rect x="${l*sc}" y="${t*sc}" width="${(r2-l)*sc}" height="${(bo-t)*sc}" fill="none"
+           stroke="#ffb020" stroke-width="2"/>`
+       +`<text x="${l*sc}" y="${t*sc-5}" fill="#ffb020" font-size="11" font-weight="bold">depth${
+          s.depth_box?' (tuo)':''}${f.E_depth_interface!=null?' '+f.E_depth_interface+' mm':''}</text>`;
+    } else {
+      h+=`<text x="14" y="${H-34}" fill="#ffb020" font-size="12">il modulo depth non ha dato un riquadro — Shift+trascina per indicarlo</text>`;
+    }
+  }
   if(YF!=null) h+=`<rect class="handle" data-h="far" x="${px}" y="${YF*sc}" width="13" height="13"
      transform="translate(-6.5,-6.5)" fill="#a000c8" fill-opacity=".8" stroke="#fff" stroke-width="1"/>`;
   if(YZ!=null) h+=`<circle class="handle" data-h="zero" cx="${px}" cy="${YZ*sc}" r="8" fill="#37d67a"
@@ -437,12 +480,22 @@ function side(){
      <b>verso</b>${f.B_orient||'?'} <span class="muted">(${f.M_orient_source||'rete'})</span>
      ${f.M_net_label&&f.M_net_label!==f.B_orient
        ? `<br><span class="pill bad">il marker ha corretto la rete, che diceva ${f.M_net_label}</span>`:''}
-     <br><b>zero</b>in <b>${f.B_zero_end==='top'?'alto':'basso'}</b>
+     <br><b>zero</b>in <b>${zeroEnd(f,s)==='top'?'alto':'basso'}</b>
+     ${s.zero_end?' <span class="pill warn">corretto da te</span>':''}
      ${f.B_zero_moved?'<br><span class="pill warn">zero spostato all\'estremo indicato dall\'orientamento</span>':''}
      <div style="margin-top:8px;border-top:1px solid var(--line);padding-top:7px">
        <b>controprova con l\'OCR</b>
        <span class="pill ${vcls(zc.verdict)}">${zc.verdict||'non verificabile'}</span>
        ${zc.detail?`<br><span class="muted">${zc.detail}</span>`:''}
+     </div>
+     <div style="margin-top:8px;border-top:1px solid var(--line);padding-top:7px">
+       <b>se e' sbagliato</b><br>
+       <button data-o="top">lo zero e' in alto</button>
+       <button data-o="bottom">e' in basso</button>
+       ${s.zero_end?'<button data-o="">annulla</button>':''}
+       <br><span class="muted">premi <b>m</b> per vedere il marker; con quella vista attiva
+         Shift+trascina per indicare dov\'e' davvero${s.marker_box?' — indicato':''}</span>
+       ${s.marker_box?' <button data-o="nomk">togli il riquadro</button>':''}
      </div></div>
    <h3>2 · depth dall\'interfaccia, come controprova</h3>
    <div class="st ${dc.verdict==='conferma'?'ok':(dc.verdict&&dc.verdict.indexOf('NON')===0?'bad':'')}">
@@ -459,7 +512,15 @@ function side(){
        <span class="muted"> — il modulo la prende dall\'interfaccia solo quando riconosce
          l\'etichetta (Depth, D, P, R): le macchine che la scrivono altrimenti la perdono</span>
        ${dv}
+       <br><span class="muted">premi <b>p</b> per vedere dove ha letto; con quella vista attiva
+         Shift+trascina per indicare la zona giusta${s.depth_box?' — indicata':''}</span>
+       ${s.depth_box?' <button data-o="nodp">togli il riquadro</button>':''}
      </div></div>
+   <div class="st ${f.E_depth_score!=null?'':'warn'}"><span class="muted">prove del modulo depth:
+     ${f.E_depth_score!=null?'punteggio '+f.E_depth_score:'nessun punteggio'}${
+       f.E_depth_ranker!=null?' · ranker '+f.E_depth_ranker:''}${
+       f.E_depth_box?' · riquadro '+f.E_depth_box.map(v=>Math.round(v)).join(', '):' · nessun riquadro'}
+     ${f.E_depth_reason?'<br>motivo: '+f.E_depth_reason:''}</span></div>
    <h3>3 · posizione del righello</h3>
    <div class="st ${D.zone?'ok':'bad'}"><b>cartella</b>${zoneTxt}
      ${f.A_used_zone?'<br><span class="pill warn">questo frame ha usato la posizione della cartella</span>':''}
@@ -522,6 +583,14 @@ $('side').addEventListener('input',e=>{
   st().depth_mm=e.target.value.trim(); save();});
 $('side').addEventListener('change',e=>{ if(e.target.id==='edep') show(); });
 $('side').addEventListener('click',e=>{
+  const o=e.target.closest('button[data-o]');
+  if(o){
+    const v=o.getAttribute('data-o'), s=st();
+    if(v==='nomk') s.marker_box=null;
+    else if(v==='nodp') s.depth_box=null;
+    else s.zero_end=v;
+    save(); show(); return;
+  }
   const b=e.target.closest('button[data-p]'); if(!b) return;
   const p=b.getAttribute('data-p');
   if(p==='addmiss'){
@@ -546,6 +615,8 @@ document.addEventListener('keydown',e=>{
   }
   if(e.key==='c'||e.key==='C'){$('fc').click();e.preventDefault();return;}
   if(e.key==='d'||e.key==='D'){$('done').click();e.preventDefault();return;}
+  if(e.key==='m'||e.key==='M'){$('tmk').click();e.preventDefault();return;}
+  if(e.key==='p'||e.key==='P'){$('tdp').click();e.preventDefault();return;}
   if(e.key==='ArrowRight'){go(1);e.preventDefault();}
   else if(e.key==='ArrowLeft'){go(-1);e.preventDefault();}
   else if(e.key==='h'||e.key==='H')$('tgl').click();
@@ -577,6 +648,12 @@ stage.addEventListener('pointerdown',e=>{
            if(v && v.trim()) s.nums=(s.nums||[]).concat([[Math.round(p.y*10)/10, v.trim()]]); }
     save(); show(); e.preventDefault(); return;
   }
+  // Shift+drag draws the box for whichever evidence overlay is showing: the marker the
+  // orientation module missed, or the region the depth module should have read.
+  if(e.shiftKey && (showMk||showDp)){
+    drag={mode:'box', what:showDp?'depth_box':'marker_box', x0:p.x, y0:p.y};
+    stage.setPointerCapture(e.pointerId); e.preventDefault(); return;
+  }
   const h=e.target.getAttribute&&e.target.getAttribute('data-h');
   if(h) drag={mode:'handle',h};
   else {drag={mode:'pan'};sx=e.clientX-tx;sy=e.clientY-ty;stage.classList.add('dragging');}
@@ -585,13 +662,22 @@ stage.addEventListener('pointerdown',e=>{
 stage.addEventListener('pointermove',e=>{
   if(!drag)return;
   if(drag.mode==='pan'){tx=e.clientX-sx;ty=e.clientY-sy;applyT();return;}
+  if(drag.mode==='box'){
+    const p2=toOrig(e), s2=st();
+    const t=Math.round(Math.min(drag.y0,p2.y)), b=Math.round(Math.max(drag.y0,p2.y));
+    const l=Math.round(Math.min(drag.x0,p2.x)), r=Math.round(Math.max(drag.x0,p2.x));
+    // stored in each module's own order: top,left,bottom,right for the marker, l,t,r,b for depth
+    s2[drag.what] = drag.what==='depth_box' ? [l,t,r,b] : [t,l,b,r];
+    draw(); return;
+  }
   const f=cur(),s=st(),p=toOrig(e);
   if(drag.h==='col') s.x=Math.max(0,Math.min(f.w,Math.round(p.x*10)/10));
   else if(drag.h==='zero') s.y_zero=Math.max(0,Math.min(f.h,Math.round(p.y*10)/10));
   else if(drag.h==='far') s.y_far=Math.max(0,Math.min(f.h,Math.round(p.y*10)/10));
   draw();
 });
-stage.addEventListener('pointerup',()=>{if(drag&&drag.mode==='handle'){save();show();}
+stage.addEventListener('pointerup',()=>{
+  if(drag&&(drag.mode==='handle'||drag.mode==='box')){save();show();}
   drag=null;stage.classList.remove('dragging');});
 const esc=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
 $('exp').onclick=()=>{
@@ -606,7 +692,7 @@ $('exp').onclick=()=>{
     const fl=Object.keys(s.flags||{}).filter(x=>s.flags[x]).join('|');
     const touched=s.x!=null||s.y_zero!=null||s.y_far!=null||(s.ticks_add||[]).length
                   ||(s.ticks_del||[]).length||(s.nums||[]).length
-                  ||String(s.depth_mm||'').trim();
+                  ||String(s.depth_mm||'').trim()||s.zero_end||s.marker_box||s.depth_box;
     if(!fl && !(s.note||'').trim() && !touched) return;
     out.push([D.folder,D.vendor,f.name,f.idx,f.status,f.B_orient,f.B_zero_end,
       f.x??'',f.y_zero??'',f.y_far??'',s.x??'',s.y_zero??'',s.y_far??'',

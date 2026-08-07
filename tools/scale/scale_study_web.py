@@ -48,7 +48,69 @@ FEEDBACK_LOG = CORR_DIR / "feedback.jsonl"      # append-only history, never rew
 CORRECTIONS = CORR_DIR / "corrections.json"     # consolidated, what the next run reads
 
 CORR_FIELDS = ("x", "y_zero", "y_far", "ticks_add", "ticks_del", "nums", "depth_mm",
-               "flags", "note")
+               "flags", "note", "zero_end", "marker_box", "depth_box",
+               "marker_template", "marker_group", "marker_score", "verso_predetto")
+
+# Corrections about the marker and about the depth do not belong to the scale block: they are
+# evidence for the modules that produced them. Written in the shapes those modules already read,
+# so nothing has to be transcribed by hand.
+ORIENT_CSV = CORR_DIR / "orientation_corrections.csv"
+MARKER_PROPOSAL = CORR_DIR / "review_decisions_proposed.json"
+DEPTH_REVIEW = CORR_DIR / "depth_review_export.json"
+
+
+def _export_module_feedback() -> dict:
+    """Re-derive the two modules' files from the consolidated store. Idempotent by construction."""
+    allc = load_corrections()
+    orient_rows, depth_rows = [], []
+    suspect: Dict[str, Dict[str, int]] = {}
+    for folder, e in sorted(allc.items()):
+        for name, c in sorted((e.get("frames") or {}).items()):
+            if c.get("zero_end") or c.get("marker_box"):
+                orient_rows.append({
+                    "folder": folder, "image": name,
+                    "verso_vero": {"top": "su", "bottom": "giu"}.get(c.get("zero_end", ""), ""),
+                    "verso_predetto": c.get("verso_predetto", ""),
+                    "marker_template": c.get("marker_template", ""),
+                    "marker_group": c.get("marker_group", ""),
+                    "marker_score": c.get("marker_score", ""),
+                    "marker_box_tlbr": "|".join(str(v) for v in (c.get("marker_box") or [])),
+                    "commento": c.get("note", ""),
+                })
+                # a template whose orientation had to be overturned is a template to look at
+                tpl = str(c.get("marker_template") or "")
+                pred = str(c.get("verso_predetto") or "")
+                true = {"top": "su", "bottom": "giu"}.get(c.get("zero_end", ""), "")
+                if tpl and true and pred and true != pred:
+                    suspect.setdefault(tpl, {"sbagliato": 0, "totale": 0})["sbagliato"] += 1
+                if tpl:
+                    suspect.setdefault(tpl, {"sbagliato": 0, "totale": 0})["totale"] += 1
+            if c.get("depth_box") or c.get("depth_mm"):
+                depth_rows.append({
+                    "image_path": name, "folder": folder,
+                    "corrected_gt_box": "|".join(str(v) for v in (c.get("depth_box") or [])),
+                    "depth_mm_letta": c.get("depth_mm", ""),
+                    "comment": c.get("note", "") or e.get("note", ""),
+                })
+    CORR_DIR.mkdir(parents=True, exist_ok=True)
+    if orient_rows:
+        with open(ORIENT_CSV, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(orient_rows[0].keys()))
+            w.writeheader()
+            w.writerows(orient_rows)
+        # A proposal, never the library itself: review_decisions.json is a production artifact of
+        # the whole orientation block, and overwriting it from here would be a silent side effect.
+        MARKER_PROPOSAL.write_text(json.dumps({
+            "nota": ("proposta da unire a mano in templates/review_decisions.json: sono i "
+                     "template il cui verso e' stato smentito dall'operatore"),
+            "template_sospetti": {k: v for k, v in sorted(suspect.items())
+                                  if v["sbagliato"]},
+        }, indent=1, ensure_ascii=False), "utf-8")
+    if depth_rows:
+        DEPTH_REVIEW.write_text(json.dumps({"rows": depth_rows}, indent=1, ensure_ascii=False),
+                                "utf-8")
+    return {"orientamento": len(orient_rows), "depth": len(depth_rows),
+            "template_sospetti": sum(1 for v in suspect.values() if v["sbagliato"])}
 
 
 def load_corrections() -> dict:
@@ -85,7 +147,8 @@ def store_feedback(payload: dict) -> dict:
             n += 1
         entry["history"].append({"at": stamp, "frames": n})
         CORRECTIONS.write_text(json.dumps(allc, indent=1, ensure_ascii=False), "utf-8")
-    return {"ok": True, "frames": n, "folders_stored": len(allc), "at": stamp}
+    mods = _export_module_feedback()
+    return {"ok": True, "frames": n, "folders_stored": len(allc), "at": stamp, "moduli": mods}
 
 
 def corrections_csv() -> bytes:
