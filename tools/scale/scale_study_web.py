@@ -148,8 +148,8 @@ HOME = """<!doctype html><html lang="it"><head><meta charset="utf-8">
  .done{color:var(--good);font-weight:700} .err{color:var(--bad);font-weight:700}
 </style></head><body>
 <header><h1>Studio della scala</h1>
-  <div class="muted">Naviga fino alla cartella e premi <b>studia</b>. Il verde indica quante
-    immagini contiene.</div></header>
+  <div class="muted">Scegli qui sotto: <b>apri</b> per entrare in una cartella,
+    <b>studia</b> per analizzarla. Il numero verde dice quante immagini contiene.</div></header>
 <div class="wrap">
   <div class="opts">
     <label>immagini max <input id="maxi" type="number" value="14" min="2" max="60" style="width:70px"></label>
@@ -158,8 +158,8 @@ HOME = """<!doctype html><html lang="it"><head><meta charset="utf-8">
     <label><input id="hr" type="checkbox"> alta recall</label>
     <span class="muted">per il materiale grezzo usa pattern <code>*.png</code></span>
   </div>
-  <div id="roots"></div>
-  <div class="crumb" id="crumb"></div>
+  <div><span class="muted">volumi:</span> <span id="roots"></span></div>
+  <div class="crumb">sei in: <span id="crumb"></span></div>
   <div id="list"></div>
   <div id="log" style="display:none"></div>
 </div>
@@ -236,7 +236,9 @@ async function poll(){
     $('log').innerHTML += '\n\n<span class="err">Finito con errori.</span>';
   }
 }
-loadRoots();
+// Open /Volumes straight away: showing only the volume buttons with an empty list below
+// made the page look like it had nowhere to choose the folder.
+(async ()=>{ await loadRoots(); await go('/Volumes'); })();
 </script></body></html>"""
 
 
