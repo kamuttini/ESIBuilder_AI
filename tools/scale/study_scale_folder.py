@@ -39,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -264,9 +264,11 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
     if not paths:
         print(f"[error] nessuna immagine con pattern {pattern} in {base}")
         return None
-    vendor = vendor or _guess_vendor(folder)
+    vendor_src = "indicato a mano"
+    if not vendor:
+        vendor, vendor_src = predict_vendor(paths, device)
     prof = profile_for(vendor)
-    print(f"[info] {len(paths)} immagini, vendor='{vendor or 'default'}'")
+    print(f"[info] {len(paths)} immagini, vendor='{vendor or 'default'}' ({vendor_src})")
 
     # ---- stage B first: orientation, so the zero end is known before we look at ticks ----
     models = load_orientation_models(device)
@@ -399,6 +401,67 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
             "zone": zone, "orient_groups": {k: sum(1 for v in orient.values() if v["label"] == k)
                                             for k in {v["label"] for v in orient.values()}} if orient else {},
             "status": st, "frames": frames}
+
+
+def predict_vendor(paths: Sequence[str], device_name: str = "auto") -> Tuple[str, str]:
+    """Vendor from the pixels, by majority over the folder's frames.
+
+    Reading it from the folder name works on the prepared corpus and breaks on raw material,
+    where the name carries nothing — exactly the case this tool exists to study. The production
+    vendor classifier (test acc 0.9824) is the honest source; the name stays as a last resort
+    and says so out loud.
+    """
+    from scale.detect_scale_ladder import PROFILES
+    known = {v.lower(): v for v in PROFILES if v != "default"}
+    try:
+        import importlib.util
+        import numpy as np
+        import torch
+        from PIL import Image
+
+        ck_path = (REPO / "artifacts/10_active_pipeline/pipeline_fss_head/models"
+                        / "vendor_training_no_negative_v2_power/best_model.pt")
+        if not ck_path.exists():
+            raise FileNotFoundError(ck_path)
+        for extra in (REPO, REPO / "tools" / "ultrasound"):
+            if str(extra) not in sys.path:
+                sys.path.insert(0, str(extra))
+        spec = importlib.util.spec_from_file_location(
+            "vend_mod", REPO / "tools/ultrasound/train_ultrasound_vendor_classifier.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["vend_mod"] = mod
+        spec.loader.exec_module(mod)
+        ck = torch.load(ck_path, map_location="cpu", weights_only=False)
+        classes = [str(c) for c in ck["class_names"]]
+        size = int(ck.get("args", {}).get("image_size", 320))
+        dev = torch.device("mps" if (device_name in ("auto", "mps")
+                                     and torch.backends.mps.is_available()) else "cpu")
+        net = mod.VendorClassifier(num_classes=len(classes), pretrained=False).to(dev)
+        net.load_state_dict(ck["model_state_dict"])
+        net.eval()
+        mean = np.array([0.485, 0.456, 0.406], dtype="float32")
+        std = np.array([0.229, 0.224, 0.225], dtype="float32")
+        votes: Dict[str, float] = {}
+        with torch.no_grad():
+            for p in paths[:10]:
+                im = Image.open(p).convert("RGB").resize((size, size), Image.BILINEAR)
+                a = (np.asarray(im, dtype="float32") / 255.0 - mean) / std
+                t = torch.from_numpy(a.transpose(2, 0, 1)).unsqueeze(0).to(dev)
+                pr = torch.softmax(net(t)[0], 0).cpu().numpy()
+                i = int(pr.argmax())
+                votes[classes[i]] = votes.get(classes[i], 0.0) + float(pr[i])
+        if votes:
+            best = max(votes, key=lambda k: votes[k])
+            n = len(paths[:10])
+            return known.get(best.lower(), ""), f"dalla rete: {best}, {votes[best] / n:.2f} su {n} frame"
+    except Exception as exc:  # noqa: BLE001 - never block the study on the classifier
+        print(f"[vendor] rete non disponibile ({exc}); ricado sul nome della cartella")
+    guessed = _guess_vendor(folder_of(paths[0]))
+    return guessed, "dal nome della cartella (non affidabile su immagini grezze)"
+
+
+def folder_of(path: str) -> str:
+    return os.path.dirname(path)
 
 
 def _guess_vendor(folder: str) -> str:
