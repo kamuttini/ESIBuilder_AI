@@ -105,6 +105,87 @@ def load_orientation_models(device_name: str = "auto"):
         return None
 
 
+def load_marker_detector():
+    """The orientation-marker detector bundle, or None.
+
+    The marker is the evidence the operator trusts for orientation: it can *correct* the up/down
+    the net predicted, and up/down is exactly what decides which end of the ruler carries the
+    zero. The net stays in front of it as the prior it expects.
+    """
+    bundle = REPO / "artifacts/41_orientation_marker_detector_bundle"
+    if not (bundle / "orientation_marker_detector" / "detector.py").is_file():
+        return None
+    try:
+        if str(bundle) not in sys.path:
+            sys.path.insert(0, str(bundle))
+        from orientation_marker_detector import detector as omd  # noqa: PLC0415
+        return omd
+    except Exception as exc:  # noqa: BLE001
+        print(f"[marker] bundle non caricabile: {exc}")
+        return None
+
+
+def marker_orientation(omd, paths: List[str], vendor: str,
+                       orient: Dict[str, dict]) -> Dict[str, dict]:
+    """{path: {vertical, group, corrected, score, status}} from the marker templates.
+
+    The template bank is chosen by vendor, and the vendor here comes from the classifier, not
+    from the folder name — on raw material the name says nothing.
+    """
+    if omd is None:
+        return {}
+    templates = []
+    for name in (vendor, vendor.capitalize(), vendor.upper()):
+        if not name:
+            break
+        try:
+            templates = omd.load_vendor_templates(None, name)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[marker] libreria non leggibile: {exc}")
+            return {}
+        if templates:
+            break
+    if not templates:
+        print(f"[marker] nessun template per vendor '{vendor or 'sconosciuto'}'")
+        return {}
+    inputs = []
+    for p in paths:
+        o = orient.get(p) or {}
+        rect = o.get("rect")
+        inputs.append(omd.ImageInput(
+            image_path=Path(p), image_id=os.path.basename(p),
+            crop_rect=tuple(int(round(v)) for v in rect) if rect else None,
+            crop_source="rect_net" if rect else "",
+            sugiu_pred=str(o.get("label", "")),
+            sugiu_conf=float(o.get("conf") or 0.0)))
+    params = omd.DetectionParams()
+    try:
+        template, _rows, _rank = omd.select_best_template(inputs[:4], templates, params)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[marker] scelta del template fallita: {exc}")
+        return {}
+    out: Dict[str, dict] = {}
+    for inp in inputs:
+        try:
+            r = omd.detect_marker(inp, template, params)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[marker] {inp.image_id}: {exc}")
+            continue
+        out[str(inp.image_path)] = {
+            "vertical": str(r.vertical_final or ""), "group": str(r.orientation_group or ""),
+            "corrected": str(r.vertical_correction or ""), "source": str(r.vertical_source or ""),
+            "score": round(float(r.match_score), 3) if r.match_score is not None else None,
+            "status": str(r.status or ""), "template": str(r.template_name or ""),
+            "box": list(r.marker_box_abs) if r.marker_box_abs else None,
+        }
+    if out:
+        ncorr = sum(1 for v in out.values() if v["corrected"] == "corrected")
+        print(f"[1] marker: template '{template.name}', trovato su "
+              f"{sum(1 for v in out.values() if v['score'])}/{len(out)} frame"
+              + (f", ha corretto il su/giu' su {ncorr}" if ncorr else ""))
+    return out
+
+
 def predict_orientation(models, paths: List[Path]) -> Dict[str, dict]:
     """{image_path: {label, conf, rect}} using rect model + up/down net."""
     if not models or not paths:
@@ -126,6 +207,84 @@ def predict_orientation(models, paths: List[Path]) -> Dict[str, dict]:
             "rect": [round(float(v), 1) for v in box],
         }
     return out
+
+
+# --------------------------------------------------------------------------- #
+# cross-checks: the zero against the OCR, the scale against the interface depth
+# --------------------------------------------------------------------------- #
+def check_zero_with_ocr(y_zero: Optional[float], labels_mm: List[Tuple[float, float]],
+                        mm_per_px: Optional[float], pitch: Optional[float]) -> dict:
+    """Do the read numbers agree that the zero is where orientation says it is?
+
+    The smallest label is the one nearest the zero, so its distance from the zero must equal its
+    own value converted to pixels. If it does not, either the zero is at the wrong end or the
+    number was misread — and saying which is not this function's job, only that they disagree.
+    """
+    res = {"verdict": "non verificabile", "detail": "", "expected_y": None, "label": None}
+    if y_zero is None:
+        res["detail"] = "nessuno zero da verificare"
+        return res
+    if not labels_mm:
+        res["detail"] = "nessun numero letto sulla scala"
+        return res
+    y_lo, v_lo = min(labels_mm, key=lambda t: t[1])
+    res["label"] = [round(y_lo, 1), round(v_lo / 10.0, 2)]
+    if not mm_per_px or mm_per_px <= 0:
+        res["detail"] = "senza mm per pixel non posso convertire"
+        return res
+    dist_px = abs(y_lo - y_zero)
+    expected_px = v_lo / mm_per_px
+    res["expected_y"] = round(y_zero + (1 if y_lo > y_zero else -1) * expected_px, 1)
+    tol = max(6.0, 0.35 * (pitch or 8.0))
+    if abs(dist_px - expected_px) <= tol:
+        res["verdict"] = "confermato"
+        res["detail"] = (f"il numero piu' piccolo ({v_lo / 10.0:g} cm) sta a {dist_px:.0f} px "
+                         f"dallo zero, e {expected_px:.0f} px e' quello che dovrebbe essere")
+    else:
+        res["verdict"] = "in disaccordo"
+        res["detail"] = (f"il numero piu' piccolo ({v_lo / 10.0:g} cm) sta a {dist_px:.0f} px "
+                         f"dallo zero, ma dovrebbe stare a {expected_px:.0f} px: "
+                         f"o lo zero e' all'altro capo, o quel numero e' letto male")
+    return res
+
+
+def check_depth_against_scale(depth_mm: Optional[float], from_interface: bool,
+                              labels_mm: List[Tuple[float, float]],
+                              scale_depth: Optional[float]) -> dict:
+    """Interface depth against the largest number on the ruler, and against the last tick.
+
+    The biggest label is the deepest mark the machine drew, so with the depth printed in the
+    interface the two should land close. Only a depth actually printed there is evidence: one
+    derived from the scale would be compared with itself.
+    """
+    res = {"verdict": "non verificabile", "detail": "", "max_label_mm": None}
+    if labels_mm:
+        res["max_label_mm"] = round(max(v for _y, v in labels_mm), 1)
+    if depth_mm is None:
+        res["detail"] = "il modulo depth non ha dato un valore"
+        return res
+    if not from_interface:
+        res["detail"] = "la depth non e' scritta nell'interfaccia, confrontarla non prova nulla"
+        return res
+    parts = []
+    ok = None
+    if res["max_label_mm"] is not None:
+        d = abs(depth_mm - res["max_label_mm"])
+        near = d <= max(10.0, 0.15 * depth_mm)
+        ok = near
+        parts.append(f"numero piu' grande {res['max_label_mm']:g} mm contro depth "
+                     f"{depth_mm:g} mm: {'vicini' if near else f'lontani di {d:.0f} mm'}")
+    if scale_depth is not None:
+        d2 = abs(depth_mm - scale_depth)
+        near2 = round(depth_mm / 10.0) == round(scale_depth / 10.0) or d2 <= max(10.0, 0.15 * depth_mm)
+        ok = near2 if ok is None else (ok and near2)
+        parts.append(f"ultima tacca {scale_depth:g} mm: {'vicina' if near2 else f'lontana di {d2:.0f} mm'}")
+    if ok is None:
+        res["detail"] = "niente da confrontare sulla scala"
+        return res
+    res["verdict"] = "conferma" if ok else "NON conferma"
+    res["detail"] = "; ".join(parts)
+    return res
 
 
 # --------------------------------------------------------------------------- #
@@ -341,17 +500,29 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
     prof = profile_for(vendor)
     print(f"[info] {len(paths)} immagini, vendor='{vendor or 'default'}' ({vendor_src})")
 
-    # ---- stage B first: orientation, so the zero end is known before we look at ticks ----
+    # ---- 1. orientation, from the marker, to decide which end carries the zero ----
+    # The net runs first only because the marker detector takes it as its prior and its rect crop;
+    # the marker has the last word, and can overturn it.
     models = load_orientation_models(device)
     orient = predict_orientation(models, [Path(p) for p in paths]) if models else {}
+    marker = marker_orientation(load_marker_detector(), paths, vendor, orient)
+    for p, m in marker.items():
+        if m.get("vertical") in ("su", "giu"):
+            o = orient.setdefault(p, {})
+            o["net_label"] = o.get("label", "")
+            o["label"] = m["vertical"]
+            o["source"] = "marker" + (" (ha corretto la rete)" if m.get("corrected") == "corrected"
+                                      else "")
     if orient:
         groups: Dict[str, int] = {}
         for v in orient.values():
-            groups[v["label"]] = groups.get(v["label"], 0) + 1
-        print(f"[B] orientamento: {groups}")
+            groups[v.get("label", "?")] = groups.get(v.get("label", "?"), 0) + 1
+        n_mark = sum(1 for v in orient.values() if str(v.get("source", "")).startswith("marker"))
+        print(f"[1] orientamento: {groups} ({n_mark}/{len(orient)} dal marker, il resto dalla rete)")
     else:
-        print("[B] orientamento non disponibile: il verso verra' dalle etichette")
+        print("[1] orientamento non disponibile: il verso verra' dalle etichette")
 
+    # ---- 2. depth from the interface, to be cross-checked against the ruler later ----
     # median rect over the folder, in the left,top,right,bottom order the depth module expects
     rects = [o["rect"] for o in orient.values() if o.get("rect")]
     rect_echo = None
@@ -361,7 +532,7 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
     depth_info = (run_depth_module(folder, python_bin, paths, vendor=vendor, rect_echo=rect_echo)
                   if with_depth else {})
 
-    # ---- first pass: detect on every frame, to learn the folder's scale zone ----
+    # ---- 3. the ruler's column: detected per frame, then agreed folder-wide ----
     first: List[dict] = []
     for p in paths:
         img = load_image(p)
@@ -384,7 +555,8 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
         half = max(40.0, 3.0 * spread + 25.0)
         zone = {"x": round(cx, 1), "half": round(half, 1),
                 "found": len(xs), "total": len(first)}
-        print(f"[A] zona scala: x={cx:.0f} ±{half:.0f} px (trovata su {len(xs)}/{len(first)})")
+        print(f"[3] righello: x={cx:.0f} ±{half:.0f} px, uguale per tutta la cartella "
+              f"(trovato su {len(xs)}/{len(first)} frame)")
 
     # A column the operator corrected consistently replaces the detections' median: it anchors the
     # zone for every frame, including the ones where no ruler was found at all.
@@ -414,7 +586,7 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
         name = os.path.basename(f["path"])
         idx = len(frames)  # position in the listing: no meaning is claimed beyond ordering
 
-        # stage B: the zero end implied by orientation, and whether detection agrees
+        # 1. the zero, from the orientation the marker settled: up means zero at the top
         ori = (f["orient"] or {}).get("label", "")
         zero_from_orient = "top" if ori == "su" else ("bottom" if ori == "giu" else "")
         zero_detected = "top" if pred.direction >= 0 else "bottom"
@@ -425,7 +597,7 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
             y_zero = min(pred.ticks_y) if zero_from_orient == "top" else max(pred.ticks_y)
             zero_moved = True
 
-        # stage C: ticks, last one apart
+        # 4. ticks: the zero end and the far end are the two that must not be confused
         dirn = 1 if (zero_from_orient or zero_detected) == "top" else -1
         far = max(pred.ticks_y) if (dirn >= 0 and pred.ticks_y) else (
             min(pred.ticks_y) if pred.ticks_y else None)
@@ -456,7 +628,7 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
         if applied:
             n_applied += 1
 
-        # stage D: numbers vs constant pitch
+        # 6. the numbers, checked against each other through the constant pitch
         labels_cm = [(y, round(v / 10.0, 2)) for y, v in (pred.labels_all or [])]
         for pair in (c.get("nums") or []):
             try:
@@ -479,7 +651,12 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
                     pred.mm_per_px = num / den
         coh = check_numbers(labels_cm, pred.tick_pitch_px or 0.0, pred.mm_per_px)
 
-        # stage E: does the scale agree with the depth printed in the interface?
+        # 1b. cross-check the zero with the OCR: the smallest number must sit at the distance
+        # from the zero that its own value implies
+        labels_mm = [(y, v * 10.0) for y, v in labels_cm]
+        zchk = check_zero_with_ocr(y_zero, labels_mm, pred.mm_per_px, pred.tick_pitch_px)
+
+        # 2b. cross-check the interface depth against the ruler's largest number
         dep = depth_info.get(os.path.realpath(f["path"]))
         if c.get("depth_mm") not in (None, ""):
             try:
@@ -503,6 +680,9 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
             else:
                 same_ten = round(dep["depth_mm"] / 10.0) == round(scale_depth / 10.0)
                 depth_verdict = "coerente" if same_ten else "NON coerente"
+        dchk = check_depth_against_scale(
+            (dep or {}).get("depth_mm"), bool(dep and dep.get("from_interface")),
+            labels_mm, scale_depth)
 
         s = min(1.0, cap_w / float(f["gray"].shape[1]))
         view = cv2.cvtColor(f["gray"], cv2.COLOR_GRAY2BGR)
@@ -531,6 +711,10 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
             "E_depth_ocr": (dep or {}).get("ocr_text", ""),
             "E_depth_scale": scale_depth, "E_verdict": depth_verdict,
             "corr_applied": applied,
+            "M_marker": marker.get(f["path"]) or {},
+            "M_orient_source": (f["orient"] or {}).get("source", "rete"),
+            "M_net_label": (f["orient"] or {}).get("net_label", ""),
+            "Z_check": zchk, "DE_check": dchk,
         })
 
     st: Dict[str, int] = {}
@@ -538,9 +722,22 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
         st[fr["status"]] = st.get(fr["status"], 0) + 1
     if n_applied:
         print(f"[corr] applicate le tue correzioni su {n_applied}/{len(frames)} frame")
-    print(f"[C/D] stati: {st}")
+    zc = _tally(fr["Z_check"]["verdict"] for fr in frames)
+    print(f"[1b] zero controverificato con l'OCR: {zc}")
+    if depth_info:
+        dc = _tally(fr["DE_check"]["verdict"] for fr in frames)
+        print(f"[2b] depth d'interfaccia contro il numero piu' grande della scala: {dc}")
+    n_t = [len(fr["ticks"]) for fr in frames]
+    if n_t:
+        print(f"[4] tacche per frame: da {min(n_t)} a {max(n_t)}, "
+              f"mediana {int(statistics.median(n_t))}")
+    pit = [fr["pitch"] for fr in frames if fr["pitch"]]
+    if pit:
+        print(f"[5] passo fra le tacche: mediana {statistics.median(pit):.1f} px "
+              f"(da {min(pit):.1f} a {max(pit):.1f})")
+    print(f"[6] stati: {st}")
     n_sus = sum(1 for fr in frames if fr["D_suspect"])
-    print(f"[D] frame con numeri sospetti: {n_sus}/{len(frames)}")
+    print(f"[6] frame con numeri sospetti: {n_sus}/{len(frames)}")
     if depth_info:
         agree = sum(1 for fr in frames if fr["E_verdict"].startswith("coerente"))
         checked = sum(1 for fr in frames if fr["E_verdict"] in ("coerente", "NON coerente"))

@@ -422,41 +422,65 @@ function side(){
   } else if (isFinite(dman) && dman > 0) {
     dv = '<br><span class="muted">la scala non da\' una lunghezza, non c\'e\' niente da confrontare</span>';
   }
+  const mk=f.M_marker||{}, zc=f.Z_check||{}, dc=f.DE_check||{};
+  const vcls=v=>v==='confermato'||v==='conferma'?'ok':(v&&v.indexOf('NON')===0||v==='in disaccordo'?'bad':'');
+  const pitchTxt = f.pitch
+    ? f.pitch.toFixed(1)+' px'+(f.mm_per_px?' = '+(f.pitch*f.mm_per_px).toFixed(1)+' mm':'')
+    : 'non determinato';
   $('side').innerHTML = `
-   <h3>A · zona della scala</h3>
+   <h3>1 · orientamento dal marker, e lo zero</h3>
+   <div class="st ${mk.score?'ok':(f.B_orient?'warn':'bad')}">
+     <b>marker</b>${mk.score!=null&&mk.score!==''
+       ? `trovato, somiglianza ${mk.score}${mk.template?' · '+mk.template:''}`
+       : 'non trovato in questo frame'}<br>
+     ${mk.group?`<b>gruppo</b>${mk.group}<br>`:''}
+     <b>verso</b>${f.B_orient||'?'} <span class="muted">(${f.M_orient_source||'rete'})</span>
+     ${f.M_net_label&&f.M_net_label!==f.B_orient
+       ? `<br><span class="pill bad">il marker ha corretto la rete, che diceva ${f.M_net_label}</span>`:''}
+     <br><b>zero</b>in <b>${f.B_zero_end==='top'?'alto':'basso'}</b>
+     ${f.B_zero_moved?'<br><span class="pill warn">zero spostato all\'estremo indicato dall\'orientamento</span>':''}
+     <div style="margin-top:8px;border-top:1px solid var(--line);padding-top:7px">
+       <b>controprova con l\'OCR</b>
+       <span class="pill ${vcls(zc.verdict)}">${zc.verdict||'non verificabile'}</span>
+       ${zc.detail?`<br><span class="muted">${zc.detail}</span>`:''}
+     </div></div>
+   <h3>2 · depth dall\'interfaccia, come controprova</h3>
+   <div class="st ${dc.verdict==='conferma'?'ok':(dc.verdict&&dc.verdict.indexOf('NON')===0?'bad':'')}">
+     <b>interfaccia</b>${f.E_depth_interface!=null?f.E_depth_interface+' mm'+(f.E_depth_from_interface?'':' (non dall\'interfaccia)'):'non disponibile'}<br>
+     ${f.E_depth_mode?`<span class="muted">modulo depth: ${f.E_depth_mode}${f.E_depth_status?' · '+f.E_depth_status:''}${f.E_depth_ocr?' · testo letto: «'+f.E_depth_ocr+'»':''}</span><br>`:''}
+     <b>numero piu' grande sulla scala</b>${dc.max_label_mm!=null?dc.max_label_mm+' mm':'n/d'}<br>
+     <b>ultima tacca</b>${f.E_depth_scale!=null?f.E_depth_scale+' mm':'n/d'}<br>
+     <b>esito</b><span class="pill ${vcls(dc.verdict)}">${dc.verdict||'non verificabile'}</span>
+     ${dc.detail?`<br><span class="muted">${dc.detail}</span>`:''}
+     <div style="margin-top:9px;border-top:1px solid var(--line);padding-top:8px">
+       <b>la depth che leggi tu</b>
+       <input id="edep" type="text" inputmode="decimal" value="${s.depth_mm??''}"
+              placeholder="es 70" style="width:78px"> mm
+       <span class="muted"> — il modulo la prende dall\'interfaccia solo quando riconosce
+         l\'etichetta (Depth, D, P, R): le macchine che la scrivono altrimenti la perdono</span>
+       ${dv}
+     </div></div>
+   <h3>3 · posizione del righello</h3>
    <div class="st ${D.zone?'ok':'bad'}"><b>cartella</b>${zoneTxt}
-     ${f.A_used_zone?'<br><span class="pill warn">questo frame ha usato la zona della cartella</span>':''}</div>
-   <h3>B · orientamento e zero</h3>
-   <div class="st ${f.B_orient?'ok':'warn'}"><b>gruppi nella cartella</b>${og}<br>
-     questo frame: <b>${f.B_orient||'?'}</b>${f.B_conf!=null?` (conf ${f.B_conf})`:''}
-     → zero in <b>${f.B_zero_end==='top'?'alto':'basso'}</b>
-     ${f.B_zero_moved?'<br><span class="pill warn">zero spostato all\'estremo indicato dall\'orientamento</span>':''}</div>
-   <h3>C · tacche</h3>
+     ${f.A_used_zone?'<br><span class="pill warn">questo frame ha usato la posizione della cartella</span>':''}
+     <br><b>in questo frame</b>x = ${s.x??f.x??'n/d'}</div>
+   <h3>4 · tacche, con zero e ultima distinte</h3>
    <div class="st ${tk.length?'ok':'bad'}"><b>rilevate</b>${tk.length} tacche
      ${(s.ticks_add||[]).length?` (+${s.ticks_add.length} a mano)`:''}
      ${(s.ticks_del||[]).length?` (−${s.ticks_del.length})`:''}<br>
-     passo ${f.pitch?f.pitch.toFixed(1)+' px':'n/d'} · ultima tacca
-     <span style="color:#a000c8">y ${s.y_far??f.y_far??'n/d'}</span></div>
-   <h3>D · numeri e coerenza del passo</h3>
+     <b>zero</b><span style="color:#37d67a">y ${s.y_zero??f.y_zero??'n/d'}</span>
+     &nbsp;·&nbsp; <b>ultima</b><span style="color:#a000c8">y ${s.y_far??f.y_far??'n/d'}</span></div>
+   <h3>5 · passo fra una tacca e l\'altra</h3>
+   <div class="st ${f.pitch?'ok':'warn'}"><b>passo</b>${pitchTxt}
+     ${f.D_step_mm?`<br><b>dai numeri</b>${f.D_step_mm} mm per tacca`:''}</div>
+   <h3>6 · numeri, verificati sul passo</h3>
    <div class="st ${(f.D_suspect||[]).length?'warn':((f.D_coherent||[]).length?'ok':'bad')}">
      <b>passo dedotto dai numeri</b>${f.D_step_mm?f.D_step_mm+' mm per tacca':'non deducibile'}<br>
      <span class="muted">voti: ${votes}</span>
      ${cohRows?`<table><tr><th>coerenti</th><th></th></tr>${cohRows}</table>`:''}
      ${susRows?`<table><tr><th>sospetti</th><th></th></tr>${susRows}</table>`:''}
      ${(s.nums||[]).length?`<span class="pill warn">${s.nums.length} numeri inseriti a mano</span>`:''}</div>
-   <h3>E · confronto con la depth</h3>
-   <div class="st ${eCls}"><b>interfaccia</b>${f.E_depth_interface!=null?f.E_depth_interface+' mm'+(f.E_depth_from_interface?'':' (non dall\'interfaccia)'):'non disponibile'}<br>
-     ${f.E_depth_mode?`<span class="muted">modulo depth: ${f.E_depth_mode}${f.E_depth_status?' · '+f.E_depth_status:''}${f.E_depth_ocr?' · testo letto: «'+f.E_depth_ocr+'»':''}</span><br>`:''}
-     <b>dalla scala</b>${f.E_depth_scale!=null?f.E_depth_scale+' mm':'n/d'}<br>
-     ${f.E_verdict?`<b>esito</b>${f.E_verdict}`:'<span class="muted">non verificabile</span>'}
-     <div style="margin-top:9px;border-top:1px solid var(--line);padding-top:8px">
-       <b>la depth che leggi tu</b>
-       <input id="edep" type="text" inputmode="decimal" value="${s.depth_mm??''}"
-              placeholder="es 70" style="width:78px"> mm
-       <span class="muted"> — il modulo la accetta solo se nel testo trova la parola
-         &laquo;depth&raquo;, quindi le macchine che la scrivono in altro modo la perdono</span>
-       ${dv}
-     </div></div>
+   <div class="st ${eCls}"><span class="muted">gruppi di orientamento nella cartella: ${og}</span></div>
    ${corrHtml(f,s)}
    <h3>calibrazione</h3>
    <div class="st"><b>mm per pixel</b>${f.mm_per_px?f.mm_per_px.toFixed(4):'n/d'}
