@@ -408,9 +408,31 @@ def _guess_vendor(folder: str) -> str:
 PAGE = Path(__file__).with_name("study_scale_folder_page.html")
 
 
+def pick_folder(start: str = "/Volumes") -> str:
+    """Ask the operator for a folder with the system dialog, so no path has to be typed."""
+    if sys.platform == "darwin":
+        script = (f'POSIX path of (choose folder with prompt '
+                  f'"Scegli la cartella da studiare" default location POSIX file "{start}")')
+        try:
+            p = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=300)
+            if p.returncode == 0 and p.stdout.strip():
+                return p.stdout.strip().rstrip("/")
+            return ""  # cancelled
+        except Exception as exc:  # noqa: BLE001
+            print(f"[pick] finestra non disponibile: {exc}")
+    # anywhere else: type or paste the path
+    try:
+        return input("Percorso della cartella: ").strip().rstrip("/")
+    except EOFError:
+        return ""
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--folder", required=True)
+    ap.add_argument("--folder", default="", help="Omit it (or pass --pick) to choose from a dialog.")
+    ap.add_argument("--pick", action="store_true", help="Always ask, even if --folder is given.")
+    ap.add_argument("--open", dest="open_after", action="store_true",
+                    help="Open the page in the browser when it is ready.")
     ap.add_argument("--pattern", default="image_depth_value_setup_*.png")
     ap.add_argument("--vendor", default="")
     ap.add_argument("--max-images", type=int, default=14)
@@ -419,11 +441,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--python-bin", default=sys.executable)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--high-recall", action="store_true")
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--out", type=Path, default=None,
+                    help="Default: artifacts/50_scale_study/<cartella>.html")
     args = ap.parse_args(argv)
 
     if args.high_recall:
         os.environ["SCALE_HIGH_RECALL"] = "1"
+
+    folder = args.folder
+    if args.pick or not folder:
+        folder = pick_folder()
+        if not folder:
+            print("[info] nessuna cartella scelta")
+            return 1
+        print(f"[info] cartella scelta: {folder}")
+    args.folder = folder
+    if args.out is None:
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(folder.rstrip("/\\")))[:60]
+        args.out = REPO / "artifacts" / "50_scale_study" / f"{safe or 'studio'}.html"
 
     data = study(args.folder, args.pattern, args.max_images, args.cap_width, args.vendor,
                  not args.no_depth, args.python_bin, args.device)
@@ -434,6 +469,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(html, encoding="utf-8")
     print(f"[ok] {len(data['frames'])} frame -> {args.out} ({len(html)/1024/1024:.1f} MB)")
+    if args.open_after and sys.platform == "darwin":
+        subprocess.run(["open", str(args.out)], check=False)
     return 0
 
 
