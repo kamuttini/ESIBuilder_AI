@@ -178,13 +178,33 @@ def check_numbers(labels_cm: List[Tuple[float, float]], pitch: float,
 # --------------------------------------------------------------------------- #
 # stage E: depth printed in the interface
 # --------------------------------------------------------------------------- #
-def run_depth_module(folder: str, python_bin: str) -> Dict[str, dict]:
-    """{image_name: {depth_mm, from_interface}} by calling the depth module on the folder."""
+def run_depth_module(folder: str, python_bin: str,
+                     only_paths: Optional[List[str]] = None) -> Dict[str, dict]:
+    """{realpath: {depth_mm, from_interface}} from the depth module.
+
+    ``only_paths`` stages exactly the frames under study into a temporary tree of symlinks and
+    points the module there, so its answers belong to *these* images. Left to itself the module
+    picks its own frames and there is nothing to pair with: measured on an Esaote folder it read
+    the depth on 40 images, none of which were the 12 being studied.
+    """
     script = REPO / "tools/depth/predict_rect_depth_autonomous.py"
     if not script.exists():
         return {}
     with tempfile.TemporaryDirectory() as td:
-        cmd = [python_bin, str(script), "--folder", folder, "--output-dir", td, "--max-images", "40"]
+        target = folder
+        if only_paths:
+            staged = Path(td) / "stage" / "image_samples"
+            staged.mkdir(parents=True, exist_ok=True)
+            for p in only_paths:
+                link = staged / os.path.basename(p)
+                if not link.exists():
+                    try:
+                        link.symlink_to(os.path.realpath(p))
+                    except OSError:
+                        pass
+            target = str(Path(td) / "stage")
+        cmd = [python_bin, str(script), "--folder", target, "--output-dir", td,
+               "--max-images", str(max(40, len(only_paths or [])))]
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         except Exception as exc:  # noqa: BLE001
@@ -259,7 +279,7 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
     else:
         print("[B] orientamento non disponibile: il verso verra' dalle etichette")
 
-    depth_info = run_depth_module(folder, python_bin) if with_depth else {}
+    depth_info = run_depth_module(folder, python_bin, paths) if with_depth else {}
 
     # ---- first pass: detect on every frame, to learn the folder's scale zone ----
     first: List[dict] = []
