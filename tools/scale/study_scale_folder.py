@@ -347,10 +347,14 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
         if pred.mm_per_px and y_zero is not None and far is not None:
             scale_depth = round(abs(far - y_zero) * pred.mm_per_px, 1)
         if dep and scale_depth:
-            same_ten = round(dep["depth_mm"] / 10.0) == round(scale_depth / 10.0)
-            depth_verdict = "coerente" if same_ten else "NON coerente"
+            # Only a depth actually printed in the interface is independent evidence. A derived
+            # one is guessed from the scale itself, so comparing the two proves nothing — it was
+            # reported as "NON coerente" and counted as verified, which made stage E look broken.
             if not dep["from_interface"]:
-                depth_verdict += " (depth non letta dall'interfaccia)"
+                depth_verdict = "non verificabile (depth non scritta nell'interfaccia)"
+            else:
+                same_ten = round(dep["depth_mm"] / 10.0) == round(scale_depth / 10.0)
+                depth_verdict = "coerente" if same_ten else "NON coerente"
 
         s = min(1.0, cap_w / float(f["gray"].shape[1]))
         view = cv2.cvtColor(f["gray"], cv2.COLOR_GRAY2BGR)
@@ -385,8 +389,12 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
     print(f"[D] frame con numeri sospetti: {n_sus}/{len(frames)}")
     if depth_info:
         agree = sum(1 for fr in frames if fr["E_verdict"].startswith("coerente"))
-        checked = sum(1 for fr in frames if fr["E_verdict"])
-        print(f"[E] depth coerente su {agree}/{checked} frame verificabili")
+        checked = sum(1 for fr in frames if fr["E_verdict"] in ("coerente", "NON coerente"))
+        if checked:
+            print(f"[E] depth coerente su {agree}/{checked} frame verificabili")
+        else:
+            print(f"[E] nessun frame verificabile: la depth non e' scritta "
+                  f"nell'interfaccia di questi {len(frames)} frame")
     return {"folder": os.path.basename(folder.rstrip("/\\")), "vendor": vendor or "default",
             "zone": zone, "orient_groups": {k: sum(1 for v in orient.values() if v["label"] == k)
                                             for k in {v["label"] for v in orient.values()}} if orient else {},

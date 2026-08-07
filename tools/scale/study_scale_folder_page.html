@@ -143,7 +143,10 @@ function side(){
   const votes = Object.entries(f.D_votes||{}).map(([k,v])=>`${k} mm ×${v}`).join(', ') || '—';
   const susRows = (f.D_suspect||[]).map(p=>`<tr><td>y ${p[0]}</td><td style="color:#ff5470">${p[1]} cm</td></tr>`).join('');
   const cohRows = (f.D_coherent||[]).map(p=>`<tr><td>y ${p[0]}</td><td style="color:#37d67a">${p[1]} cm</td></tr>`).join('');
-  const eCls = f.E_verdict.startsWith('coerente')?'ok':(f.E_verdict?'bad':'');
+  // "non verificabile" is neither a pass nor a failure: painting it red made a frame with no
+  // interface depth look like a detection error.
+  const eCls = f.E_verdict.startsWith('coerente') ? 'ok'
+             : (f.E_verdict.startsWith('NON coerente') ? 'bad' : '');
   $('side').innerHTML = `
    <h3>A · zona della scala</h3>
    <div class="st ${D.zone?'ok':'bad'}"><b>cartella</b>${zoneTxt}
