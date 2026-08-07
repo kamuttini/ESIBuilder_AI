@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -105,7 +106,7 @@ async function cstat(){
       ? ('il server ha correzioni per ' + j.folders + ' cartelle, ' + j.frames + ' frame')
       : 'il server non ha ancora ricevuto correzioni: inviale da dentro una revisione';
   }catch(e){ document.getElementById('cstat').textContent =
-    'questa pagina non e\' servita dal tool, quindi non posso rielaborare da qui'; }
+    "questa pagina non e' servita dal tool, quindi non posso rielaborare da qui"; }
 }
 cstat();
 document.getElementById('rerun').onclick=async()=>{
@@ -114,9 +115,11 @@ document.getElementById('rerun').onclick=async()=>{
   if(label===null) return;
   const L=document.getElementById('rlog');
   L.hidden=false;
+  // Handler wired in code, not in an onclick attribute: quoting an id inside an attribute inside
+  // a string inside Python is exactly how the last syntax error got in.
   L.innerHTML='<div class="bar2"><b>rielaborazione in corso…</b>'
-    +'<button onclick="document.getElementById(\\'rlog\\').hidden=true">chiudi</button></div>'
-    +'<div id="rbody">avvio…</div>';
+    +'<button id="rx">chiudi</button></div><div id="rbody">avvio…</div>';
+  document.getElementById('rx').onclick=()=>{ L.hidden=true; };
   const r=await (await fetch('/api/rerun',{method:'POST',
     body:new URLSearchParams({label})})).json();
   if(r.error){ document.getElementById('rbody').textContent='ERRORE: '+r.error; return; }
@@ -130,7 +133,7 @@ async function poll2(){
   if(s.state==='running'){ setTimeout(poll2,2000); return; }
   if(s.state==='done' && s.index){
     b.innerHTML += '\\n\\nPronto. <a href="/study/'+encodeURIComponent(s.index)
-      +'">apri l\\'indice della nuova run</a> e confronta con questo.';
+      +'">' + "apri l'indice della nuova run" + '</a> e confronta con questo.';
   } else { b.textContent += '\\n\\nfinito con errori.'; }
 }
 """
@@ -212,8 +215,52 @@ def build(results: list, title: str) -> str:
 </div><script>{JS}</script></body></html>"""
 
 
+def check_js(js: str) -> list:
+    """Catch the one mistake this file invites: a JS string closed by an Italian apostrophe.
+
+    The JS lives inside a Python string, so a single-quoted JS literal containing an escaped
+    apostrophe ends up containing a real one and the whole script dies with a SyntaxError - and
+    a dead script looks exactly like a page that simply does nothing.
+    """
+    bad = []
+    for n, line in enumerate(js.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("//"):
+            continue
+        # Walk the line tracking the quote we are inside. A bare apostrophe cannot be told from a
+        # closing quote by counting, but what follows gives it away: a real closing quote is
+        # followed by an operator, never by a word.
+        i, quote = 0, ""
+        while i < len(line):
+            ch = line[i]
+            if quote:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = ""
+                    j = i + 1
+                    while j < len(line) and line[j] == " ":
+                        j += 1
+                    if j < len(line) and (line[j].isalpha() or line[j] == "_"):
+                        bad.append(f"riga {n}: stringa chiusa da un apostrofo -> {stripped[:78]}")
+                        break
+            elif ch in "\"'":
+                quote = ch
+            elif ch == "/" and line[i + 1:i + 2] == "/":
+                break
+            i += 1
+    return bad
+
+
 def main_with(results: str, out: str, title: str) -> int:
     """Callable entry point, so a sweep can build its own index without a subprocess."""
+    problems = check_js(JS)
+    if problems:
+        print("[errore] il JavaScript della pagina e' rotto, non la scrivo:")
+        for p in problems:
+            print("  " + p)
+        return 2
     data = json.loads(Path(results).read_text("utf-8"))
     Path(out).write_text(build(data, title), "utf-8")
     print(f"[ok] {len(data)} studi -> {out}")
