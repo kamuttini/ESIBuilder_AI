@@ -145,10 +145,17 @@ HOME = r"""<!doctype html><html lang="it"><head><meta charset="utf-8">
  .pill.good{border-color:var(--good);color:var(--good)}
  .opts{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:14px 0;
        background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
- #log{background:#0c0e13;border:1px solid var(--line);border-radius:8px;padding:10px 12px;
-      font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;max-height:340px;
-      overflow:auto;margin-top:12px}
+ /* Fixed, not in the flow: with a few hundred folders listed the panel ended up ~16000px
+    below the fold, so clicking "studia" looked like it did nothing at all. */
+ #log{position:fixed;right:16px;bottom:16px;z-index:50;width:min(580px,calc(100vw - 32px));
+      background:#0c0e13;border:1px solid var(--line);border-radius:10px;
+      box-shadow:0 12px 34px #000b;padding:12px 14px 14px;max-height:56vh;overflow:auto}
+ #logbody{font:12px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap}
+ #log .bar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}
+ a.open{display:inline-block;margin-top:10px;background:#1f6feb;color:#fff;text-decoration:none;
+        padding:8px 15px;border-radius:6px;font-weight:600;font-size:13px}
  .done{color:var(--good);font-weight:700} .err{color:var(--bad);font-weight:700}
+ #ready{margin:10px 0 0;font-size:12px} #ready a{color:#6aa6ff}
 </style></head><body>
 <header><h1>Studio della scala</h1>
   <div class="muted">Scegli qui sotto: <b>apri</b> per entrare in una cartella,
@@ -162,9 +169,15 @@ HOME = r"""<!doctype html><html lang="it"><head><meta charset="utf-8">
     <span class="muted">per il materiale grezzo usa pattern <code>*.png</code></span>
   </div>
   <div><span class="muted">volumi:</span> <span id="roots"></span></div>
+  <div id="ready"></div>
   <div class="crumb">sei in: <span id="crumb"></span></div>
   <div id="list"></div>
-  <div id="log" style="display:none"></div>
+</div>
+<div id="log" hidden>
+  <div class="bar"><b id="logttl">studio in corso…</b>
+    <button id="logx">chiudi</button></div>
+  <div id="logbody"></div>
+  <div id="logact"></div>
 </div>
 <script>
 let cur = null;
@@ -215,33 +228,47 @@ document.addEventListener('click', e=>{
 });
 $('pat').addEventListener('change', ()=>{ if(cur) go(cur); });
 async function run(path){
-  $('log').style.display='block';
-  $('log').textContent='avvio dello studio su:\n'+path+'\n\n';
-  $('log').scrollIntoView({behavior:'smooth',block:'nearest'});
+  $('log').hidden = false;
+  $('logttl').textContent = 'studio in corso…';
+  $('logact').innerHTML = '';
+  $('logbody').textContent = 'avvio dello studio su:\n' + path + '\n\n';
   const body = new URLSearchParams({folder:path, pattern:pat(),
     max_images:$('maxi').value, no_depth:$('nodepth').checked?'1':'',
     high_recall:$('hr').checked?'1':''});
   const r = await (await fetch('/api/run',{method:'POST',body})).json();
-  if(r.error){ $('log').textContent += 'ERRORE: '+r.error; return; }
+  if(r.error){ $('logbody').textContent += 'ERRORE: '+r.error; return; }
   poll();
 }
 async function poll(){
   const s = await (await fetch('/api/status')).json();
-  $('log').textContent = s.log.join('\n');
+  $('logbody').textContent = s.log.join('\n');
   $('log').scrollTop = $('log').scrollHeight;
   if(s.state==='running'){ setTimeout(poll, 900); return; }
   if(s.state==='done' && s.out){
-    const href='/study/'+encodeURIComponent(s.out);
-    $('log').innerHTML += `\n\n<span class="done">Pronto.</span> `
-      + `<a href="${href}" target="_blank">apri la revisione</a>`;
-    window.open(href,'_blank');
+    // A link the user clicks, not window.open(): opening a tab from this async callback is
+    // not a user gesture, so Chrome blocked it and the finished study stayed unreachable.
+    $('logttl').innerHTML = '<span class="done">studio pronto</span>';
+    $('logact').innerHTML = '<a class="open" href="/study/' + encodeURIComponent(s.out)
+      + '" target="_blank" rel="noopener">apri la revisione delle immagini →</a>';
+    loadReady();
   } else {
-    $('log').innerHTML += '\n\n<span class="err">Finito con errori.</span>';
+    $('logttl').innerHTML = '<span class="err">finito con errori</span>';
   }
+}
+$('logx').addEventListener('click', ()=>{ $('log').hidden = true; });
+// Studies already on disk: without this a finished run was only reachable from the panel of
+// the session that produced it.
+async function loadReady(){
+  const r = await (await fetch('/api/studies')).json();
+  $('ready').innerHTML = r.length
+    ? '<span class="muted">revisioni pronte:</span> ' + r.slice(0,12).map(x =>
+        '<a href="/study/' + encodeURIComponent(x.name) + '" target="_blank" rel="noopener">'
+        + esc(x.label) + '</a>').join(' &middot; ')
+    : '';
 }
 // Open /Volumes straight away: showing only the volume buttons with an empty list below
 // made the page look like it had nowhere to choose the folder.
-(async ()=>{ await loadRoots(); await go('/Volumes'); })();
+(async ()=>{ await loadRoots(); await loadReady(); await go('/Volumes'); })();
 </script></body></html>"""
 
 
@@ -273,6 +300,9 @@ class Handler(BaseHTTPRequestHandler):
             path = (q.get("path") or ["/Volumes"])[0]
             pattern = (q.get("pattern") or ["image_depth_value_setup_*.png"])[0]
             self._json(list_dir(path, pattern))
+        elif u.path == "/api/studies":
+            done = sorted(OUT_DIR.glob("*.html"), key=lambda p: p.stat().st_mtime, reverse=True)
+            self._json([{"name": p.name, "label": p.stem.replace("_", " ")} for p in done])
         elif u.path == "/api/status":
             with LOCK:
                 self._json({"state": JOB["state"], "log": list(JOB["log"]),  # type: ignore[arg-type]
