@@ -38,7 +38,12 @@ stadio (dedup, rotazione, vendor, sonda, rect, orientamento, depth, scala) più 
 `folder_done` con l'intera `FolderPrediction`.
 
 Senza il flag l'output è **identico** a prima: il diff è additivo e la regola zero-regressioni è
-soddisfatta per costruzione, come per lo stadio scala.
+soddisfatta per costruzione, come per lo stadio scala. Verificato: con il flag assente
+`_emit_stage_event` non stampa nulla e `args.stage_events` è `False` per default.
+
+Gli eventi portano anche i valori, non solo lo stato, ed è per questo che la card della run può
+mostrare vendor, sonda e `#11` **su un frame vero** (endpoint `.../sample`, che pesca il frame
+di mezzo della cartella) mentre la cartella sta ancora girando.
 
 ## Il feedback: perché così meticoloso
 

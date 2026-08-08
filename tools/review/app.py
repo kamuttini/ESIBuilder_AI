@@ -246,6 +246,53 @@ def api_run_cancel(run_id: str) -> object:
     return jsonify({"ok": True, "state": run.state})
 
 
+@app.get("/api/runs/<run_id>/folders/<slug>/sample")
+def api_sample(run_id: str, slug: str) -> object:
+    """One frame of a folder that is still running, so vendor/probe/rect can be *seen*.
+
+    While the folder runs there is no CSV yet, only the stage events; a value like
+    ``79|220|573|1049`` means nothing without the frame it was measured on.
+    """
+    run = manager.get(run_id)
+    if run is None:
+        return jsonify({"error": "run non trovata"}), 404
+    job = next((j for j in run.jobs if j.slug == slug), None)
+    if job is None:
+        return jsonify({"error": "cartella non trovata"}), 404
+
+    roots = [run.folders_dir / slug / "input_ref", job.path]
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            candidates = sorted(
+                path for path in root.rglob("*")
+                if path.is_file() and path.suffix.lower() in
+                {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+                and not path.name.startswith("._")
+            )
+        except OSError:
+            continue
+        if not candidates:
+            continue
+        # Not the first frame: the middle one, because the first is often a splash or a menu.
+        chosen = candidates[len(candidates) // 2]
+        width = height = None
+        try:
+            with Image.open(chosen) as img:
+                width, height = img.size
+        except (OSError, ValueError):
+            pass
+        return jsonify({
+            "image_path": chosen.as_posix(),
+            "image_id": chosen.name,
+            "image_width": width,
+            "image_height": height,
+            "images_found": len(candidates),
+        })
+    return jsonify({"error": "nessuna immagine ancora disponibile"}), 404
+
+
 @app.get("/api/runs/<run_id>/folders/<slug>/study")
 def api_study(run_id: str, slug: str) -> object:
     run = manager.get(run_id)

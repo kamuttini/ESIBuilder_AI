@@ -354,6 +354,7 @@ function renderRun() {
       stages.appendChild(node);
     });
     const canOpen = job.state === 'done' || Object.keys(job.stages || {}).length > 0;
+    const live = el('div', { class: 'live-sample' });
     box.appendChild(el('div', { class: 'rf' }, [
       el('div', { class: 'rf-head' }, [
         el('div', {}, [
@@ -370,9 +371,59 @@ function renderRun() {
         ]),
       ]),
       stages,
+      live,
     ]));
+    if ((job.stages || {}).rect) renderLiveSample(live, job);
   });
   $('#run-log').textContent = S.logLines.join('\n');
+}
+
+/** Vendor, sonda and #11 on a real frame while the folder is still running.
+ *
+ * A rect like ``79|220|573|1049`` is unreadable as text; drawn on a frame it is immediate.
+ * The sample is fetched once per folder and cached on the job.
+ */
+async function renderLiveSample(container, job) {
+  if (container.dataset.done === '1') return;
+  container.dataset.done = '1';
+  if (!S.samples) S.samples = {};
+  let sample = S.samples[job.slug];
+  if (!sample) {
+    try {
+      sample = await api(`/api/runs/${S.run.run_id}/folders/${job.slug}/sample`);
+      S.samples[job.slug] = sample;
+    } catch (err) { return; }
+  }
+  const rect = parseLine11((job.stages.rect || {}).line_11);
+  const vendor = job.stages.vendor || {};
+  const probe = job.stages.probe || {};
+  container.innerHTML = '';
+  const wrap = el('div', { class: 'canvas-wrap live' });
+  container.appendChild(el('div', { class: 'live-layout' }, [
+    wrap,
+    el('div', { class: 'stack small' }, [
+      el('div', {}, [el('span', { class: 'muted', text: 'vendor ' }),
+        el('strong', { text: `${txt(vendor.vendor)} ` }),
+        el('span', { class: 'muted', text: `conf ${pct(vendor.confidence)}` })]),
+      el('div', {}, [el('span', { class: 'muted', text: 'sonda ' }),
+        el('strong', { text: `#${txt(probe.probe_id)} ` }),
+        el('span', { class: 'muted', text: `conf ${pct(probe.confidence)}` })]),
+      el('div', {}, [el('span', { class: 'muted', text: '#11 ' }),
+        el('strong', { text: txt((job.stages.rect || {}).line_11) })]),
+      el('div', { class: 'muted', text: `${(job.stages.rect || {}).method || ''} · campione ${sample.image_id}` }),
+    ]),
+  ]));
+  buildCanvas(wrap, sample, [
+    { kind: 'box', key: 'rect', box: rect, cls: 'rect', label: '#11' },
+  ]);
+}
+
+function parseLine11(text) {
+  const parts = String(text || '').split('|').filter((p) => p.trim() !== '');
+  if (parts.length < 4) return null;
+  const [top, left, bottom, right] = parts.slice(0, 4).map(Number);
+  if ([top, left, bottom, right].some((v) => !isFinite(v))) return null;
+  return { top: top, left: left, bottom: bottom, right: right };
 }
 
 /* ================================================================ REVIEW */
@@ -639,8 +690,75 @@ function renderSample() {
     ['come', folder.line13.source],
     ['supporto', num(folder.line13.support)],
   ]));
+  cards.appendChild(areaCard('su_giu', folder.su_giu, [
+    ['prevalente', folder.su_giu.majority],
+    ['consenso', pct(folder.su_giu.vote_ratio)],
+    ['confidenza media', num(folder.su_giu.mean_confidence)],
+    ['immagini', folder.su_giu.images],
+    ['come', folder.su_giu.source],
+  ]));
+  cards.appendChild(areaCard('lr_marker', folder.lr_marker, [
+    ['prevalente', folder.lr_marker.majority],
+    ['consenso', pct(folder.lr_marker.vote_ratio)],
+    ['score migliore', num(folder.lr_marker.best_score)],
+    ['#16', folder.lr_marker.line_16],
+    ['come', folder.lr_marker.source],
+    ['template', folder.lr_marker.best_template],
+  ]));
+  cards.appendChild(areaCard('lt', folder.lt, [
+    ['piano prevalente', folder.lt.majority],
+    ['consenso', pct(folder.lt.vote_ratio)],
+    ['confidenza media', num(folder.lt.mean_confidence)],
+    ['come', folder.lt.source],
+  ]));
+  cards.appendChild(areaCard('depth', folder.depth, [
+    ['esito', folder.depth.status],
+    ['accettate', `${folder.depth.accepted}/${folder.depth.images}`],
+    ['da rivedere / scartate', `${folder.depth.review} / ${folder.depth.reject}`],
+    ['modalità prevalente', folder.depth.majority_mode],
+    ['valori trovati (mm)', (folder.depth.unique_depths || []).join(', ')],
+    ['come', folder.depth.source],
+  ]));
+  cards.appendChild(scalaFolderCard(folder));
   cards.appendChild(areaCard('fss', folder.fss, (folder.fss.lines || [])
     .map((line) => [line.line, line.value])));
+}
+
+/** The scala at folder level: the #18-#21 answer plus the per-depth table behind it. */
+function scalaFolderCard(folder) {
+  const scala = folder.scala || {};
+  const card = areaCard('scala', scala, [
+    ['esito', scala.status],
+    ['depth con risposta', `${scala.depths_accepted}/${scala.depths_total}`
+      + (scala.depths_interpolated ? ` (${scala.depths_interpolated} interpolate)` : '')],
+    ['da rivedere / senza risposta', `${scala.depths_review} / ${scala.depths_reject}`],
+    ['frame studiati', scala.frames_studied],
+    ['colonna del righello', scala.ruler_x],
+    ['profilo', scala.profile],
+    ['#18 VECT_DEPTH', scala.line_18],
+    ['#19 / #20 PIXEL_RATIO', `${txt(scala.line_19)} / ${txt(scala.line_20)}`],
+    ['#21 SCALE_LINE', scala.line_21],
+    ['come', scala.source],
+  ]);
+
+  const rows = scala.per_depth || [];
+  if (rows.length) {
+    const table = el('table', { class: 'mini' });
+    table.appendChild(el('tr', {}, ['depth (mm)', 'esito', 'da', 'x', 'zero', 'mm/px',
+      'frame d\'accordo', 'note'].map((label) => el('th', { text: label }))));
+    rows.forEach((row) => {
+      const cells = [row.depth_mm, row.status, row.source, row.x, row.y_zero, row.mm_per_px,
+        `${txt(row.frames_agree)}/${txt(row.frames_usable)}`,
+        [row.weak_anchor === '1' || row.weak_anchor === 'True' ? 'evidenza debole' : '',
+          row.notes].filter(Boolean).join(' · ')];
+      table.appendChild(el('tr', { class: row.status === 'accepted' ? '' : 'warn' },
+        cells.map((value) => el('td', { text: txt(value) }))));
+    });
+    const body = card.querySelector('.acard-body');
+    body.appendChild(el('div', { style: 'margin-top:8px;overflow-x:auto', html: '' }));
+    body.lastChild.appendChild(table);
+  }
+  return card;
 }
 
 function areaCard(areaId, prediction, pairs, topk) {
@@ -993,7 +1111,9 @@ function openDrawer(config) {
       : ((S.study && S.study.folder[config.area]) || {}));
   $('#fbd-prediction').textContent = JSON.stringify(prediction, null, 1);
 
-  fillSelect($('#fbd-verdict'), S.catalog.verdicts, '');
+  // The verdict starts empty on purpose: a comment saved without judging would otherwise be
+  // recorded as "ok", which is a lie the statistics would then repeat.
+  fillSelect($('#fbd-verdict'), [''].concat(S.catalog.verdicts), '');
   fillSelect($('#fbd-severity'), S.catalog.severities, 'major');
   const scopes = (area.scopes || ['folder']).map((scope) => scope);
   fillSelect($('#fbd-scope'), scopes, S.drawer.scope);
@@ -1006,7 +1126,7 @@ function openDrawer(config) {
 function fillSelect(node, values, selected) {
   node.innerHTML = '';
   values.forEach((value) => {
-    const option = el('option', { value: value, text: value });
+    const option = el('option', { value: value, text: value || '— non dico —' });
     if (value === selected) option.selected = true;
     node.appendChild(option);
   });

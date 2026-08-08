@@ -33,7 +33,10 @@ depth, frame per la scala, salta uno stadio).
 **Run in corso.** Una card per cartella con la fila degli stadi che si accendono man mano:
 dedup → rotazione → vendor → sonda → rettangolo → orientamento → depth → scala → testa `.fss`.
 Ogni stadio mostra già il suo risultato (vendor con confidenza, `#11`, quante depth accettate).
-Appena una cartella finisce si apre la sua revisione, mentre le altre continuano.
+Appena lo stadio rettangolo ha risposto, la card mostra **un frame vero della cartella con il
+`#11` disegnato sopra**, accanto a vendor e sonda: un rect come `79|220|573|1049` da leggere come
+testo non dice niente, disegnato è immediato. Appena una cartella finisce si apre la sua
+revisione, mentre le altre continuano.
 
 **Revisione.** Una cartella per volta:
 
