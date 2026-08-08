@@ -10,8 +10,11 @@ Automazione della configurazione ecografi per ESI: riconoscimento automatico da 
   - `tools/depth/` — modulo RECT_DEPTH autonomo (entrypoint: `predict_rect_depth_autonomous.py`)
   - `tools/orientation/` — orientamento simbolico, GUI review
   - `tools/line16/` — riga #16 (template rect + parametri)
+  - `tools/scale/` — blocco scala (#18-#21), stadio della pipeline
+  - `tools/review/` — tool di revisione snella (web): run, correzioni, feedback, orchestratore
   - `tools/review_html/` — gallerie HTML di revisione
   - Vedi `tools/README.md` per i comandi completi di ogni blocco
+- `feedback/inbox.jsonl` — commenti e correzioni umane dal tool di revisione (versionato)
 - `artifacts/` — dataset, modelli, run, eval (~31GB, NON committati, naming `NN_categoria`)
 - `docs/` — report di stato e checkpoint (in italiano)
 - `OldSoftwareEsiBuilder/` — vecchio ESIBuilder Qt/C++ (riferimento per formato `.fss` e workflow legacy)
@@ -36,7 +39,30 @@ Automazione della configurazione ecografi per ESI: riconoscimento automatico da 
 | Scala | Workflow pronto, backlog GT da smaltire | coda P0=34, P1=49 |
 | Orientation | NON a livello produzione | trainer da riscrivere (rimosso) |
 | Piano L/T | Dataset tools pronti, rete da consolidare | priorità alta per il collega |
-| Pipeline fss_head | Integrata (vendor+probe+rect), smoke ok | manca depth + validazione batch reale |
+| Pipeline fss_head | Integrata (vendor+probe+rect+depth+scala), smoke ok | manca validazione batch reale |
+
+## Feedback umano (tool di revisione)
+
+`tools/review/app.py` è il tool con cui Camilla rivede le run e corregge. Ogni suo commento o
+correzione diventa una riga in `feedback/inbox.jsonl` con area, tag, verdetto, predizione,
+correzione, contesto (confidenze, soglie, checkpoint) e provenienza.
+
+**A inizio sessione, se l'inbox non è vuota:**
+
+```bash
+python3 tools/review/feedback_cli.py triage          # cosa lavorare, in ordine, per area
+python3 tools/review/feedback_cli.py show fb_...     # una voce completa
+```
+
+Quando una voce è risolta, marcarla con il commit:
+
+```bash
+python3 tools/review/feedback_cli.py resolve fb_... --commit <hash> --note "cosa è cambiato"
+```
+
+Le correzioni si portano nelle code dei moduli con `feedback_cli.py export --target
+{scale_corrections,depth_review,lr_seeds,labels}`. I verdetti `ok` sono il set di regressione:
+servono a dimostrare zero regressioni, non sono rumore.
 
 ## Convenzioni
 

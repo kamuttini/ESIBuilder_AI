@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Revisione snella — pipeline .fss</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <strong>Revisione snella</strong>
+    <span class="muted">pipeline .fss</span>
+  </div>
+  <nav class="tabs">
+    <button class="tab" data-view="home">Home</button>
+    <button class="tab" data-view="run">Run in corso</button>
+    <button class="tab" data-view="review">Revisione</button>
+    <button class="tab" data-view="feedback">Feedback <span class="badge" id="badge-feedback">0</span></button>
+    <button class="tab" data-view="orchestrator">Orchestratore</button>
+  </nav>
+  <div class="topbar-right">
+    <span id="run-status" class="pill"></span>
+  </div>
+</header>
+
+<main>
+
+<!-- ============================================================ HOME -->
+<section class="view" id="view-home">
+  <div class="grid-2">
+    <div class="card">
+      <h2>Nuova revisione</h2>
+      <label class="field">
+        <span>Cartella radice</span>
+        <input id="root-input" list="root-list" placeholder="/Volumes/SSD_esi1_n1/…" autocomplete="off">
+        <datalist id="root-list"></datalist>
+      </label>
+      <div class="row">
+        <button id="btn-load-folders" class="primary">Carica cartelle</button>
+        <span id="folders-hint" class="muted"></span>
+      </div>
+
+      <div id="folder-picker" class="hidden">
+        <div class="row spread">
+          <input id="folder-filter" placeholder="filtra per nome…" autocomplete="off">
+          <span class="muted"><span id="folder-selected-count">0</span> selezionate</span>
+        </div>
+        <div class="row">
+          <button data-select="all" class="ghost small">Tutte</button>
+          <button data-select="none" class="ghost small">Nessuna</button>
+          <button data-select="invert" class="ghost small">Inverti</button>
+        </div>
+        <ul id="folder-list" class="folder-list"></ul>
+      </div>
+
+      <details class="options">
+        <summary>Opzioni della run</summary>
+        <div class="opt-grid">
+          <label class="field">
+            <span>Immagini campionate per vendor/sonda</span>
+            <input type="number" id="opt-sample" value="40" min="1" max="400">
+          </label>
+          <label class="field">
+            <span>Immagini per la depth <em>(0 = tutte)</em></span>
+            <input type="number" id="opt-depth-images" value="0" min="0" max="5000">
+          </label>
+          <label class="field">
+            <span>Frame per la scala</span>
+            <input type="number" id="opt-scale-frames" value="48" min="1" max="500">
+          </label>
+          <label class="check"><input type="checkbox" id="opt-previews" checked> Genera anteprime e overlay</label>
+          <label class="check"><input type="checkbox" id="opt-depth"> Salta lo stadio depth</label>
+          <label class="check"><input type="checkbox" id="opt-scale"> Salta lo stadio scala</label>
+          <label class="check"><input type="checkbox" id="opt-lt"> Salta il piano L/T</label>
+        </div>
+      </details>
+
+      <div class="row">
+        <button id="btn-start" class="primary big" disabled>Avvia revisione</button>
+        <span id="start-error" class="error"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Storico run</h2>
+      <div id="history" class="history"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ RUN -->
+<section class="view" id="view-run">
+  <div class="card">
+    <div class="row spread">
+      <h2 id="run-title">Nessuna run</h2>
+      <div class="row">
+        <button id="btn-cancel-run" class="ghost small hidden">Annulla run</button>
+        <button id="btn-refresh-run" class="ghost small">Aggiorna</button>
+      </div>
+    </div>
+    <div id="run-folders" class="run-folders"></div>
+  </div>
+  <div class="card">
+    <h3>Log</h3>
+    <pre id="run-log" class="log"></pre>
+  </div>
+</section>
+
+<!-- ============================================================ REVIEW -->
+<section class="view" id="view-review">
+  <div id="review-empty" class="card muted">
+    Scegli una cartella dalla run o dallo storico per aprire la revisione.
+  </div>
+
+  <div id="review-body" class="hidden">
+    <div class="card sticky-head">
+      <div class="row spread wrap">
+        <div>
+          <h2 id="rv-folder" class="tight"></h2>
+          <div id="rv-dedup" class="muted small"></div>
+        </div>
+        <div class="row wrap" id="rv-headline"></div>
+      </div>
+      <div id="rv-folder-checks" class="checks"></div>
+    </div>
+
+    <div class="card">
+      <div class="row spread">
+        <h3 class="tight">Immagine campione — vendor, sonda, rettangolo</h3>
+        <div class="row">
+          <button id="btn-sample-prev" class="ghost small">‹</button>
+          <span id="sample-label" class="muted small"></span>
+          <button id="btn-sample-next" class="ghost small">›</button>
+        </div>
+      </div>
+      <div class="sample-layout">
+        <div class="canvas-wrap" id="sample-canvas"></div>
+        <div id="sample-cards" class="stack"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row spread wrap">
+        <h3 class="tight">Tutte le immagini — depth e scala</h3>
+        <div class="row wrap filters" id="image-filters">
+          <input id="grid-filter" placeholder="filtra per nome…" autocomplete="off">
+          <select id="grid-status">
+            <option value="">tutti gli esiti</option>
+            <option value="problem">solo con problemi</option>
+            <option value="depth_review">depth da rivedere</option>
+            <option value="depth_reject">depth scartate</option>
+            <option value="scala_review">scala da rivedere</option>
+            <option value="scala_reject">scala senza risposta</option>
+            <option value="commented">già commentate</option>
+          </select>
+          <select id="grid-size">
+            <option value="220">miniature medie</option>
+            <option value="150">miniature piccole</option>
+            <option value="330">miniature grandi</option>
+          </select>
+          <span class="muted small" id="grid-count"></span>
+        </div>
+      </div>
+      <div id="image-grid" class="image-grid"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ FEEDBACK -->
+<section class="view" id="view-feedback">
+  <div class="card">
+    <div class="row spread wrap">
+      <h2 class="tight">Feedback raccolti</h2>
+      <div class="row wrap">
+        <select id="fb-filter-status">
+          <option value="">tutti gli stati</option>
+          <option value="open">aperti</option>
+          <option value="ack">presi in carico</option>
+          <option value="done">risolti</option>
+          <option value="wontfix">non si fa</option>
+        </select>
+        <select id="fb-filter-area"><option value="">tutte le aree</option></select>
+        <button id="fb-refresh" class="ghost small">Aggiorna</button>
+      </div>
+    </div>
+    <div id="fb-stats" class="fb-stats"></div>
+    <div id="fb-list" class="fb-list"></div>
+  </div>
+</section>
+
+<!-- ============================================================ ORCHESTRATOR -->
+<section class="view" id="view-orchestrator">
+  <div class="card">
+    <div class="row spread wrap">
+      <h2 class="tight">Orchestratore — storico per vendor e incroci</h2>
+      <div class="row">
+        <button id="orch-refresh" class="ghost small">Ricalcola</button>
+        <button id="orch-write" class="ghost small">Salva su file</button>
+      </div>
+    </div>
+    <p class="muted small">
+      Costruito da tutte le run e da tutti i feedback. Ogni numero porta il suo supporto:
+      un prior con supporto 2 è una curiosità, con supporto 40 è una regola.
+    </p>
+    <div id="orch-body"></div>
+  </div>
+</section>
+
+</main>
+
+<!-- ============================================================ image detail -->
+<div class="modal hidden" id="detail-modal">
+  <div class="modal-card wide">
+    <div class="row spread">
+      <h3 id="detail-title" class="tight"></h3>
+      <div class="row">
+        <button id="detail-prev" class="ghost small">‹ precedente</button>
+        <button id="detail-next" class="ghost small">successiva ›</button>
+        <button id="detail-close" class="ghost small">chiudi ✕</button>
+      </div>
+    </div>
+    <div class="detail-layout">
+      <div>
+        <div class="canvas-wrap" id="detail-canvas"></div>
+        <div class="row wrap overlay-toggles" id="detail-toggles"></div>
+        <div class="crops" id="detail-crops"></div>
+      </div>
+      <div class="stack" id="detail-areas"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ feedback drawer -->
+<div class="drawer hidden" id="fb-drawer">
+  <div class="drawer-head">
+    <div>
+      <strong id="fbd-title">Commento</strong>
+      <div class="muted small" id="fbd-target"></div>
+    </div>
+    <button id="fbd-close" class="ghost small">✕</button>
+  </div>
+  <div class="drawer-body">
+    <div class="fbd-block">
+      <div class="label">Cosa dice il programma</div>
+      <div id="fbd-prediction" class="pred"></div>
+    </div>
+
+    <div class="fbd-block">
+      <div class="label">Suggerimenti pronti</div>
+      <div id="fbd-chips" class="chips"></div>
+    </div>
+
+    <div class="fbd-block">
+      <div class="label">Commento</div>
+      <textarea id="fbd-comment" rows="3" placeholder="scrivi qui, oppure scegli un suggerimento sopra…"></textarea>
+    </div>
+
+    <div class="fbd-block row wrap">
+      <label class="field small-field">
+        <span>Verdetto</span>
+        <select id="fbd-verdict"></select>
+      </label>
+      <label class="field small-field">
+        <span>Gravità</span>
+        <select id="fbd-severity"></select>
+      </label>
+      <label class="field small-field">
+        <span>Vale per</span>
+        <select id="fbd-scope"></select>
+      </label>
+    </div>
+
+    <div class="fbd-block" id="fbd-correction-block">
+      <div class="label">Correzione manuale</div>
+      <div id="fbd-correction" class="correction"></div>
+    </div>
+  </div>
+  <div class="drawer-foot">
+    <span id="fbd-error" class="error"></span>
+    <button id="fbd-save" class="primary">Salva feedback</button>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

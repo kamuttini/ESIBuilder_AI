@@ -35,7 +35,7 @@ import time
 import types
 import zipfile
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -101,6 +101,32 @@ except Exception:  # pragma: no cover - optional runtime feature
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp", ".gif"}
 CAPTURE_INPUT_TOKENS = {"hdmi", "vga"}
+
+# Opt-in progress channel for the review tool (`--stage-events`). Off by default: with the
+# flag absent the pipeline prints exactly what it printed before.
+_STAGE_EVENTS_ENABLED = False
+
+
+def _emit_stage_event(stage: str, folder_name: str, **payload: object) -> None:
+    """Print one ``##STAGE {json}`` line per stage per folder, when enabled.
+
+    The review tool reads these while the folder is still running, so the user sees vendor /
+    probe / rect / depth / scala appear one after the other instead of waiting for the CSV,
+    which the pipeline only writes when every folder is done.
+    """
+    if not _STAGE_EVENTS_ENABLED:
+        return
+    event = {
+        "stage": stage,
+        "folder": folder_name,
+        "ts_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    event.update(payload)
+    try:
+        text = json.dumps(event, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001 - a progress line must never break a run
+        return
+    print(f"##STAGE {text}", flush=True)
 CAPTURE_RES_TOKEN_RE = re.compile(r"^(\d{3,5})[xX](\d{3,5})$")
 CAPTURE_RES_ANY_RE = re.compile(r"(\d{3,5})[xX](\d{3,5})")
 RECT_ECHO_RE = re.compile(r"^\s*(\d+)\|(\d+)\|(\d+)\|(\d+)\|\s*$")
@@ -6570,11 +6596,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Nome foglio Excel per encoding struct (ignorato per CSV).",
     )
     parser.add_argument("--log-interval", type=int, default=25)
+    parser.add_argument(
+        "--stage-events",
+        action="store_true",
+        help="Stampa una riga '##STAGE {json}' alla fine di ogni stadio di ogni cartella "
+             "(dedup, rotazione, vendor, probe, rect, orientamento, depth, scala, folder_done). "
+             "Serve al tool di revisione per mostrare i risultati mentre la cartella gira; "
+             "senza il flag l'output della pipeline e' identico a prima.",
+    )
     return parser
 
 
 def main() -> int:
     args = _build_parser().parse_args()
+
+    global _STAGE_EVENTS_ENABLED
+    _STAGE_EVENTS_ENABLED = bool(args.stage_events)
 
     if args.batch_size <= 0:
         raise ValueError("--batch-size deve essere > 0.")
@@ -7076,6 +7113,16 @@ def main() -> int:
         total_images_raw += len(raw_images)
         total_images_unique += len(all_images)
         total_duplicates_removed += duplicates_removed
+        _emit_stage_event(
+            "dedup",
+            folder.name,
+            folder_index=idx,
+            folders_total=len(folders),
+            folder_path=folder.as_posix(),
+            images_raw=len(raw_images),
+            images_unique=len(all_images),
+            duplicates_removed=duplicates_removed,
+        )
 
         rotation_deg_clockwise = 0
         rotation_source = "disabled"
@@ -7341,6 +7388,24 @@ def main() -> int:
                 if args.low_confidence_policy == "review":
                     vendor_source = "cnn_classifier"
                     vendor_decision_reason += " Mantengo output CNN e segnalo review."
+
+        _emit_stage_event(
+            "rotazione",
+            folder.name,
+            rotation_deg_clockwise=rotation_deg_clockwise,
+            rotation_source=rotation_source,
+            vote_ratio=rotation_vote_ratio,
+        )
+        _emit_stage_event(
+            "vendor",
+            folder.name,
+            vendor=vendor_pred,
+            confidence=vendor_conf,
+            margin=vendor_margin,
+            source=vendor_source,
+            threshold=float(args.vendor_min_confidence),
+            top3=[{"label": label, "prob": prob} for label, prob in vendor_top3],
+        )
 
         # #13 RECT_NAME_ECHO: routing vendor-specific prima del probe.
         pre_video_x = capture_x
@@ -7692,6 +7757,16 @@ def main() -> int:
                 probe_source = "cnn_classifier"
                 probe_decision_reason += " Mantengo output CNN e segnalo review."
 
+        _emit_stage_event(
+            "probe",
+            folder.name,
+            probe_id=probe_id,
+            confidence=probe_conf,
+            source=probe_source,
+            threshold=float(args.probe_min_confidence),
+            top3=[{"label": label, "prob": prob} for label, prob in probe_top3],
+        )
+
         line_04_probe_type = ""
         line_04_probe_type_source = "router_disabled" if args.disable_probe_type_router else "router_unavailable"
         line_04_probe_type_strategy = "not_computed"
@@ -7828,6 +7903,16 @@ def main() -> int:
         line_11_median_left = rect_left
         line_11_median_bottom = rect_bottom
         line_11_median_right = rect_right
+        _emit_stage_event(
+            "rect",
+            folder.name,
+            provisional=True,
+            line_11=line_11,
+            method="median_rect_fallback",
+            source=rect_source,
+            model_checkpoint=rect_model_checkpoint,
+            images_used=len(rect_boxes_abs),
+        )
 
         su_giu_images_predicted = 0
         su_giu_majority_label = ""
@@ -8355,6 +8440,18 @@ def main() -> int:
             target_image_height=int(out_video_y or 0),
         )
         lr_marker_source_counter[lr_marker_source] += 1
+        _emit_stage_event(
+            "orientamento",
+            folder.name,
+            su_giu_images=su_giu_images_predicted,
+            su_giu_majority=su_giu_majority_label,
+            su_giu_source=su_giu_source,
+            lr_marker_images=lr_marker_images_predicted,
+            lr_marker_majority=lr_marker_majority_label,
+            lr_marker_source=lr_marker_source,
+            line_16=line_16_rect_orientation,
+            line_16_source=line_16_source,
+        )
 
         lt_images_predicted = 0
         lt_majority_label = ""
@@ -8560,6 +8657,19 @@ def main() -> int:
             line_11_method = "median_rect_fallback"
             line_11_rect_red_winner_group = ""
 
+        _emit_stage_event(
+            "rect",
+            folder.name,
+            provisional=False,
+            line_11=line_11,
+            method=line_11_method,
+            source=rect_source,
+            model_checkpoint=rect_model_checkpoint,
+            median_fallback=line_11_median_text,
+            winner_group=line_11_rect_red_winner_group,
+            images_used=len(rect_boxes_abs),
+        )
+
         rect_red_payload_out = (
             dict(rect_red_payload)
             if isinstance(rect_red_payload, dict)
@@ -8629,6 +8739,22 @@ def main() -> int:
                 warnings.append(f"{folder.name}: rect_depth_autonomous {rect_depth_status}: {rect_depth_error}")
         else:
             rect_depth_status_counter[rect_depth_status] += 1
+        _emit_stage_event(
+            "depth",
+            folder.name,
+            status=rect_depth_status,
+            images_predicted=rect_depth_images_predicted,
+            accepted=rect_depth_accepted_count,
+            review=rect_depth_review_count,
+            reject=rect_depth_reject_count,
+            missing=rect_depth_missing_count,
+            acceptance_ratio=rect_depth_acceptance_ratio,
+            majority_mode=rect_depth_majority_mode,
+            unique_depths_json=rect_depth_unique_depths_json,
+            source=rect_depth_source,
+            output_dir=rect_depth_output_dir,
+            predictions_csv=rect_depth_predictions_csv,
+        )
 
         # ---- scala #18-#21 -------------------------------------------------------------
         # Runs after the depth because line #21 is *per depth*: #17 defines the groups and
@@ -8709,6 +8835,27 @@ def main() -> int:
                 warnings.append(f"{folder.name}: scala {scale_status}: {scale_error}")
         else:
             scale_status_counter[scale_status] += 1
+        _emit_stage_event(
+            "scala",
+            folder.name,
+            status=scale_status,
+            source=scale_source,
+            profile=scale_profile,
+            frames_studied=scale_frames_studied,
+            depths_total=scale_depths_total,
+            depths_accepted=scale_depths_accepted,
+            depths_review=scale_depths_review,
+            depths_reject=scale_depths_reject,
+            depths_interpolated=scale_depths_interpolated,
+            acceptance_ratio=scale_acceptance_ratio,
+            ruler_x=scale_ruler_x,
+            line_18=line_18_vect_depth,
+            line_21=line_21_scale_line,
+            review_reasons=scale_review_reasons,
+            output_dir=scale_output_dir,
+            per_image_csv=scale_per_image_csv,
+            per_depth_csv=scale_per_depth_csv,
+        )
 
         id_echo, id_echo_source, id_echo_support = echo_resolver.resolve(
             vendor=vendor_pred,
@@ -9002,6 +9149,18 @@ def main() -> int:
             review_reasons=",".join(review_reasons),
         )
         predictions.append(pred)
+        if _STAGE_EVENTS_ENABLED:
+            # The whole prediction, so the review tool has every line and every source without
+            # waiting for the CSV (written only when the last folder is done).
+            _emit_stage_event(
+                "folder_done",
+                folder.name,
+                folder_index=idx,
+                folders_total=len(folders),
+                status=status,
+                review_reasons=review_reasons,
+                prediction={k: str(v) for k, v in asdict(pred).items()},
+            )
 
         if args.log_interval > 0 and (idx % args.log_interval == 0 or idx == len(folders)):
             elapsed = time.time() - start_time

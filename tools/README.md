@@ -13,6 +13,7 @@ Questi script servono per dimostrare compatibilita tra output legacy e nuovo flu
 - `tools/ultrasound/`: dataset/training/inferenza vendor-probe-rect + pipeline head `.fss`
 - `tools/line16/`: pipeline riga `#16` (template rect + parametri)
 - `tools/orientation/`: pipeline orientamento simbolico e review GUI
+- `tools/review/`: tool di revisione snella (web) — run, correzioni, feedback verso Claude Code
 - `tools/review_html/`: script per generare pacchetti/gallerie HTML di revisione
 - `tools/old/`: script legacy/non raccomandati
 
@@ -997,3 +998,32 @@ Copre: caso normale, acquisizione ribaltata (zero in basso), depth senza righell
 trend) e l'innesto nella pipeline (il verso deve arrivare dal marker, non dalla rete).
 
 Dettagli e ritrovamenti aperti: `docs/scala_integrazione_pipeline_2026-08-08.md`.
+
+## 18) Revisione snella della pipeline (web) + feedback
+
+Tool per far girare la pipeline sulle cartelle scelte, guardare tutte le elaborazioni su ogni
+immagine, correggere a mano e mandare i commenti a Claude Code in forma utilizzabile. Non
+ricalcola niente: legge quello che la pipeline scrive.
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/review/app.py --port 8790
+```
+
+Tre schermate: storico run + scelta cartelle → stadi che si accendono cartella per cartella →
+revisione della cartella (immagine campione per vendor/sonda/rect, griglia con depth e scala su
+tutte le immagini, scheda per immagine con overlay e zoom). Ogni area ha 💬 con suggerimenti
+pronti e correzione manuale (rettangolo trascinato, punti cliccati, menu, numeri).
+
+I feedback finiscono in `feedback/inbox.jsonl` con contesto e provenienza compilati dal server.
+Lato Claude Code:
+
+```bash
+python3 tools/review/feedback_cli.py triage
+python3 tools/review/feedback_cli.py export --target scale_corrections --out /tmp/corr.csv
+python3 tools/review/orchestrator.py     # storico per vendor + suggerimenti di orchestrazione
+```
+
+Unica modifica alla pipeline: il flag opt-in `--stage-events` (righe `##STAGE {json}` a fine di
+ogni stadio). Senza il flag l'output e' identico a prima.
+
+Dettagli: `tools/review/README.md`, `docs/tool_revisione_snella_2026-08-08.md`.

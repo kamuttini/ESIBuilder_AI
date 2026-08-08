@@ -3497,6 +3497,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disattiva lo stadio scala (#18-#21).",
     )
     p.add_argument(
+        "--stage-events",
+        action="store_true",
+        help="Passa --stage-events alla pipeline: righe '##STAGE {json}' a fine di ogni stadio, "
+             "inoltrate su stdout insieme agli eventi ##EVENT di questo runner.",
+    )
+    p.add_argument(
         "--scale-max-frames",
         type=int,
         default=48,
@@ -3718,6 +3724,8 @@ def main() -> int:
         cmd.append("--disable-rect-depth-autonomous")
     if bool(args.disable_scale_stage):
         cmd.append("--disable-scale-stage")
+    if bool(args.stage_events):
+        cmd.append("--stage-events")
 
     _emit_event("pipeline_started", command=" ".join(cmd))
     stdout_lines: List[str] = []
