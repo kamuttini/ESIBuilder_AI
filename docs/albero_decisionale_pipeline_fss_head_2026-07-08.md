@@ -18,7 +18,8 @@ Cartella acquisizioni grezze
   │ 11. SU/GIU + LR marker + L/T sui crop rect
   │ 12. Riga #16 da envelope LR-marker (4 gruppi NF/LR/UD/LRUD)
   │ 13. RECT_DEPTH autonomo (subprocess, già agganciato)
-  │ 14. Riga #02 ID_ECHO (resolver storico)   #12 forzata a 4   #01 = 4.0
+  │ 14. Scala #18-#21 (subprocess, per depth) ──► review se non accettata
+  │ 15. Riga #02 ID_ECHO (resolver storico)   #12 forzata a 4   #01 = 4.0
   ▼
   CSV + preview txt + summary.json  (⚠ NESSUN file .fss viene scritto)
 ```
@@ -111,19 +112,38 @@ Policy trasversale bassa confidenza (`--low-confidence-policy`, default `ask_use
 - **Già agganciato** come subprocess: la pipeline scrive un `pipeline_context.json` (vendor, probe, rect #11, dimensioni video, rotazione) e lancia `tools/depth/predict_rect_depth_autonomous.py` per cartella.
 - **Decisione**: cartella ok se `acceptance_ratio >= 0.80` (`--rect-depth-min-accepted-ratio`), altrimenti review reason `rect_depth_autonomous_review`. Disattivabile con `--disable-rect-depth-autonomous`.
 
-## 14. Righe residue
+## 14. Scala #18–#21 (aggiunta 2026-08-08)
+
+- **Subprocess** verso `tools/scale/predict_scale_from_pipeline.py`, sul modello di rect_depth:
+  `pipeline_context.json` con le evidenze già calcolate, disattivabile con `--disable-scale-stage`.
+- Sta **dopo** la depth perché `#21` è per depth: `#17` definisce i gruppi e `#18`–`#22` portano
+  una voce ciascuna, nello stesso ordine.
+- **Non ricalcola niente**: verso dal `su_giu_pred` delle righe LR-marker (già il verdetto del
+  marker sopra il prior della rete), rect per immagine da `echo_rect_*_abs`, depth dallo stadio
+  RECT_DEPTH, vendor dal classificatore.
+- **Decisione**: cartella ok se le depth `accepted` sono ≥ `--scale-min-accepted-ratio` (0.80);
+  review reasons `scale_rotation_not_supported`, `scale_no_depth_groups`,
+  `scale_line21_incomplete`, `scale_depth_without_answer`, `missing_scale_predictions`, `scale_review`.
+- Dettagli, accortezze conservate e ritrovamenti da misurare:
+  `docs/scala_integrazione_pipeline_2026-08-08.md`.
+
+## 15. Righe residue
 
 - **#01 VERSION**: costante `--fss-version` = "4.0".
 - **#02 ID_ECHO** (`EchoIdResolver` :5175, uso :8387): resolver storico dal manifest di riferimento, chiavi `vendor+probe+video → vendor+probe → vendor+video → vendor`; support = quota del vincitore. Irrisolto → policy → review `missing_id_echo`.
 - **#12 GROUP_ORIENTATION**: **forzata a 4 (= symbol)**, source `forced_constant` (:8427). Il `GroupOrientationResolver` (:5578) è definito ma **mai usato** (dead code); il check di review su support #12 non può mai scattare.
-- **#05, #15, #17–#26: NON gestite** da questo script.
+- **#18–#21: gestite dallo stadio scala** (sezione 14).
+- **#05, #15, #17, #22–#26: NON gestite** da questo script.
 
-## 15. Output (:8661, :9260, :9571)
+## 16. Output (:8661, :9260, :9571)
 
 - `folder_fss_head_predictions.csv` — 1 riga per cartella, ~135 colonne (`line_XX` + `_source` + `_support`, confidenze, top-3 JSON, metriche rotazione/dedup, `status`, `review_reasons`).
 - `folder_fss_head_preview.txt` — blocco leggibile #01…#16 per cartella.
 - `summary.json` — soglie effettive, contatori per stadio, status counts, warnings.
-- CSV per-immagine: su_giu, lr_marker, lt, rect_depth; `rect_red_pipeline_by_folder.json`; encoding struct updates.
+- CSV per-immagine: su_giu, lr_marker, lt, rect_depth, `scale_per_image_predictions.csv`; `rect_red_pipeline_by_folder.json`; encoding struct updates.
+- Per cartella, lo stadio scala lascia `scale/NNNN_<cartella>_<hash>/` con `pipeline_context.json`,
+  `scale_per_image.csv`, `scale_per_depth.csv`, `scale_lines.json`, `summary.json`: è la cartella
+  da passare a `study_scale_folder.py --from-pipeline` per rivedere e correggere.
 - **⚠ Nessun file `.fss` viene scritto**: la pipeline predice i valori delle righe in forma tabellare; l'assemblaggio del file `.fss` è ancora uno step a valle non implementato. Anche il wrapper produce solo review HTML/JSON.
 
 ## Wrapper `run_pipeline_single_folder_safe.py` (:3512)
