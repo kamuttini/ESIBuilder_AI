@@ -11,14 +11,14 @@ qui: se un numero è in questa pagina, l'ha prodotto un modulo della pipeline.
 ## Avvio
 
 ```bash
-OldSoftwareEsiBuilder/.venv-mps/bin/python tools/review/app.py --port 8790
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/review/app.py --port 8795
 ```
 
-Poi apri <http://127.0.0.1:8790>. Opzioni utili:
+Poi apri <http://127.0.0.1:8795>. Opzioni utili:
 
 | opzione | a cosa serve |
 |---|---|
-| `--port` | porta (default 8790) |
+| `--port` | porta (default 8795) |
 | `--inbox` | file JSONL dei feedback (default `feedback/inbox.jsonl`) |
 | `--allow-root` | radice extra da cui servire immagini (ripetibile) |
 | `--python-bin` | Python con cui lanciare la pipeline (default: il venv `.venv-mps`, cercato anche nel checkout principale se lanci da un worktree) |

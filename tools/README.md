@@ -1006,7 +1006,7 @@ immagine, correggere a mano e mandare i commenti a Claude Code in forma utilizza
 ricalcola niente: legge quello che la pipeline scrive.
 
 ```bash
-OldSoftwareEsiBuilder/.venv-mps/bin/python tools/review/app.py --port 8790
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/review/app.py --port 8795
 ```
 
 Tre schermate: storico run + scelta cartelle → stadi che si accendono cartella per cartella →

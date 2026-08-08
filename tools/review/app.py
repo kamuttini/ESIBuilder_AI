@@ -11,7 +11,7 @@ writes, and appends feedback to ``feedback/inbox.jsonl``. It never re-implements
 if a number is on this page, some module in the pipeline produced it.
 
 Avvio:
-  OldSoftwareEsiBuilder/.venv-mps/bin/python tools/review/app.py --port 8790
+  OldSoftwareEsiBuilder/.venv-mps/bin/python tools/review/app.py --port 8795
 """
 
 from __future__ import annotations
@@ -575,7 +575,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8790)
+    parser.add_argument("--port", type=int, default=8795)
     parser.add_argument("--inbox", type=Path, default=None,
                         help="File JSONL dei feedback (default feedback/inbox.jsonl).")
     parser.add_argument("--allow-root", action="append", type=Path, default=[],
