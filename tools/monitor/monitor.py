@@ -12,6 +12,7 @@ aggiorna lo store e riscrive `artifacts/71_monitor/index.html`.
 from __future__ import annotations
 
 import argparse
+import errno
 import functools
 import http.server
 import socketserver
@@ -62,7 +63,18 @@ def cmd_serve(args: argparse.Namespace) -> int:
         return 1
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(store))
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("127.0.0.1", args.port), handler) as httpd:
+    try:
+        httpd = socketserver.TCPServer(("127.0.0.1", args.port), handler)
+    except OSError as error:
+        if error.errno != errno.EADDRINUSE:
+            raise
+        print(
+            f"porta {args.port} gia' occupata (spesso da una galleria di review lasciata aperta).\n"
+            f"Rilancia con --port <altra porta>, oppure apri direttamente {index}",
+            file=sys.stderr,
+        )
+        return 1
+    with httpd:
         url = f"http://127.0.0.1:{args.port}/index.html"
         print(f"monitor su {url}  (Ctrl+C per uscire)")
         if args.open:
