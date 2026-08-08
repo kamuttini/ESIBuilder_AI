@@ -2317,6 +2317,62 @@ HTML_PAGE = """<!doctype html>
       gap: 8px;
       margin-top: 8px;
     }
+    /* Scala: la tabella per depth e le righe .fss dello stadio #18-#21 */
+    .scale-scroll { overflow-x: auto; margin-top: 8px; }
+    .scale-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .scale-table th,
+    .scale-table td {
+      border-bottom: 1px solid var(--line);
+      padding: 5px 8px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    .scale-table thead th {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #64748b;
+      background: #f8fafc;
+    }
+    .scale-table tbody tr:last-child td { border-bottom: 0; }
+    .scale-state {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 1px 6px;
+      border-radius: 999px;
+    }
+    .scale-state.is-accepted { background: #dcfce7; color: #166534; }
+    .scale-state.is-review { background: #fef3c7; color: #92400e; }
+    .scale-state.is-reject { background: #fee2e2; color: #991b1b; }
+    .scale-state.is-other { background: #e2e8f0; color: #475569; }
+    .scale-fss {
+      margin-top: 8px;
+      display: grid;
+      gap: 4px;
+    }
+    .scale-fss div {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 8px;
+      align-items: baseline;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11.5px;
+    }
+    .scale-fss div b { color: #0f172a; }
+    .scale-fss div span {
+      overflow-x: auto;
+      white-space: pre;
+      color: #334155;
+    }
+    .scale-fss div span.is-empty { color: #94a3b8; font-style: italic; white-space: normal; }
     #predictionSummary { display: none; }
     .analysis-layout,
     .evidence-layout {
@@ -11416,9 +11472,119 @@ HTML_PAGE = """<!doctype html>
 
     function renderScaleEvidence(summary) {
       if (!scaleEvidenceEl) return;
+      const help = helpTipHtml(
+        "Scala: righe #18-#21",
+        [
+          "Lo stadio gira dopo la depth perché la riga #21 è per depth: la #17 definisce i gruppi e le #18-#22 portano una voce ciascuna.",
+          "Non ricalcola nulla: verso su/giù dal marker, rect per immagine e depth arrivano dagli stadi precedenti.",
+          "source=interpolated significa che quella depth non ha un righello proprio ed è stata riempita dal trend della cartella.",
+          "Per correggere una predizione si apre la pagina di studio sulla cartella dello stadio (comando in fondo al pannello).",
+        ],
+      );
+      const title = `<div class="evidence-title">Scala &mdash; righe #18-#21 ${help} <span class="tag tag-data">scale</span></div>`;
+      const ev = (summary && summary.scale_evidence && typeof summary.scale_evidence === "object")
+        ? summary.scale_evidence
+        : null;
+
+      if (!ev || !ev.available) {
+        scaleEvidenceEl.innerHTML = `
+          <div class="evidence-card">
+            ${title}
+            <div class="small">Nessun esito scala in questa run: lo stadio non è stato eseguito.</div>
+            <div class="small">Le run prodotte prima dell'introduzione dello stadio non lo hanno.</div>
+          </div>
+        `;
+        return;
+      }
+      if (ev.disabled) {
+        scaleEvidenceEl.innerHTML = `
+          <div class="evidence-card">
+            ${title}
+            <div class="small">Stadio disattivato per questa run (<code>--disable-scale-stage</code>).</div>
+          </div>
+        `;
+        return;
+      }
+
+      const stateClass = (value) => {
+        const v = String(value || "").trim().toLowerCase();
+        if (v === "accepted") return "is-accepted";
+        if (v === "review") return "is-review";
+        if (v === "reject") return "is-reject";
+        return "is-other";
+      };
+      const statusPill = `<span class="scale-state ${stateClass(ev.status === "ok" ? "accepted" : ev.status)}">${esc(cleanVal(ev.status) || "-")}</span>`;
+
+      const depths = Array.isArray(ev.depths) ? ev.depths : [];
+      const rowsHtml = depths.map((d) => {
+        const weak = String(d.weak_anchor || "") === "1";
+        return `
+          <tr>
+            <td>${esc(cleanVal(d.depth_index))}</td>
+            <td>${esc(cleanVal(d.depth_mm))}</td>
+            <td><span class="scale-state ${stateClass(d.status)}">${esc(cleanVal(d.status) || "-")}</span></td>
+            <td>${esc(cleanVal(d.source))}</td>
+            <td>${esc(cleanVal(d.mm_per_px))}</td>
+            <td>${esc(cleanVal(d.x))}</td>
+            <td>${esc(cleanVal(d.y_zero))} &rarr; ${esc(cleanVal(d.y_far))}</td>
+            <td>${esc(cleanVal(d.length_mm))}</td>
+            <td>${esc(cleanVal(d.direction) === "-1" ? "zero in basso" : "zero in alto")}</td>
+            <td>${esc(cleanVal(d.frames_agree))}/${esc(cleanVal(d.frames_usable))} di ${esc(cleanVal(d.frames_total))}${weak ? " &middot; debole" : ""}</td>
+          </tr>
+        `;
+      }).join("");
+
+      const tableHtml = depths.length
+        ? `
+          <div class="scale-scroll">
+            <table class="scale-table">
+              <thead>
+                <tr>
+                  <th>#</th><th>depth</th><th>stato</th><th>fonte</th><th>mm/px</th>
+                  <th>colonna x</th><th>zero &rarr; estremo</th><th>lunghezza</th>
+                  <th>verso</th><th>frame d'accordo</th>
+                </tr>
+              </thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>
+        `
+        : `<div class="small">Nessuna depth con una risposta di scala.</div>`;
+
+      const lines = (ev.lines && typeof ev.lines === "object") ? ev.lines : {};
+      const lineRow = (num) => {
+        const value = String(lines[num] || "");
+        return `<div><b>#${esc(num)}</b>${value
+          ? `<span>${esc(value)}</span>`
+          : `<span class="is-empty">non emessa</span>`}</div>`;
+      };
+
+      const cmd = String(ev.study_command || "");
       scaleEvidenceEl.innerHTML = `
         <div class="evidence-card">
-          <div class="evidence-title">Scala <span class="tag tag-data">scale</span></div>
+          ${title}
+          <div class="summary-grid">
+            <div class="kv"><div class="k">Stato stadio</div><div class="v">${statusPill}</div></div>
+            <div class="kv"><div class="k">Depth accettate</div><div class="v">${esc(cleanVal(ev.depths_accepted))} su ${esc(cleanVal(ev.depths_total))} (${esc(formatNum(ev.acceptance_ratio, 3))})</div></div>
+            <div class="kv"><div class="k">Da rivedere / senza risposta</div><div class="v">${esc(cleanVal(ev.depths_review))} / ${esc(cleanVal(ev.depths_reject))}</div></div>
+            <div class="kv"><div class="k">Riempite dal trend</div><div class="v">${esc(cleanVal(ev.depths_interpolated))}</div></div>
+            <div class="kv"><div class="k">Profilo vendor</div><div class="v">${esc(cleanVal(ev.profile) || "default")}</div></div>
+            <div class="kv"><div class="k">Colonna del righello</div><div class="v">${esc(cleanVal(ev.ruler_x) || "-")} px</div></div>
+            <div class="kv"><div class="k">Frame studiati</div><div class="v">${esc(cleanVal(ev.frames_studied))}</div></div>
+            <div class="kv"><div class="k">Metodo</div><div class="v">${esc(cleanVal(ev.source) || "-")}</div></div>
+          </div>
+          ${tableHtml}
+          <div class="scale-fss">
+            ${lineRow("18")}${lineRow("19")}${lineRow("20")}${lineRow("21")}
+          </div>
+          <div class="small" style="margin-top:8px;">
+            Una riga viene emessa solo se <b>tutte</b> le depth hanno una risposta: una #21 con un
+            buco sposterebbe l'accoppiamento con #17/#18 nel reader legacy.
+          </div>
+          ${cmd ? `
+            <div class="small" style="margin-top:8px;">Per rivedere e correggere questa cartella:</div>
+            <div class="scale-fss"><div><b>shell</b><span>${esc(cmd)}</span></div></div>
+          ` : ""}
         </div>
       `;
     }
@@ -15519,6 +15685,87 @@ def _refresh_lr_marker_evidence_from_csv(summary: Dict[str, Any], run_dir: Path)
     _recompute_line16_from_lr_marker_evidence(summary, evidence)
 
 
+def _refresh_scale_evidence_from_csv(summary: Dict[str, Any], run_dir: Path) -> None:
+    """Put the scale stage's answer into the summary, for the "Scala" evidence pane.
+
+    Everything at folder level already travels in ``pipeline_row`` (the stage's columns are in
+    the predictions CSV), so this only has to find the per-depth table the stage left on disk
+    and attach it. Reading it here rather than in the wrapper means runs produced before this
+    pane existed light up too, as long as their stage directory is still there.
+    """
+    if not isinstance(summary, dict):
+        return
+    row = _row_as_str_dict(summary)
+    pipeline_output = _pipeline_output_dir_for_summary(summary, run_dir)
+
+    stage_dir: Optional[Path] = None
+    txt = str(row.get("scale_output_dir", "") or "").strip()
+    if txt:
+        candidate = Path(txt).expanduser()
+        if candidate.is_dir():
+            stage_dir = candidate
+    if stage_dir is None:
+        found = sorted((pipeline_output / "scale").glob("*/scale_per_depth.csv"))
+        if found:
+            stage_dir = found[0].parent
+
+    source = str(row.get("scale_source", "") or "").strip()
+    lines = {
+        "18": str(row.get("line_18_vect_depth", "") or ""),
+        "19": str(row.get("line_19_pixel_ratio_x", "") or ""),
+        "20": str(row.get("line_20_pixel_ratio_y", "") or ""),
+        "21": str(row.get("line_21_scale_line", "") or ""),
+    }
+
+    def _int(key: str) -> int:
+        try:
+            return int(float(str(row.get(key, "") or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _float(key: str) -> float:
+        try:
+            return float(str(row.get(key, "") or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    depths: List[Dict[str, str]] = []
+    per_depth_csv = (stage_dir / "scale_per_depth.csv") if stage_dir else None
+    if per_depth_csv is not None and per_depth_csv.is_file():
+        try:
+            with per_depth_csv.open("r", encoding="utf-8", newline="") as handle:
+                depths = [{str(k): str(v) for k, v in r.items()} for r in csv.DictReader(handle)]
+        except Exception:  # noqa: BLE001 - the pane must never break the run view
+            depths = []
+
+    evidence: Dict[str, Any] = {
+        "available": bool(depths or any(lines.values()) or source),
+        "disabled": source == "disabled",
+        "status": str(row.get("scale_status", "") or ""),
+        "source": source,
+        "profile": str(row.get("scale_profile", "") or ""),
+        "ruler_x": str(row.get("scale_ruler_x", "") or ""),
+        "frames_studied": _int("scale_frames_studied"),
+        "depths_total": _int("scale_depths_total"),
+        "depths_accepted": _int("scale_depths_accepted"),
+        "depths_review": _int("scale_depths_review"),
+        "depths_reject": _int("scale_depths_reject"),
+        "depths_interpolated": _int("scale_depths_interpolated"),
+        "acceptance_ratio": _float("scale_acceptance_ratio"),
+        "lines": lines,
+        "depths": depths,
+        "stage_dir": stage_dir.as_posix() if stage_dir else "",
+        "per_image_csv": str(row.get("scale_per_image_csv", "") or ""),
+        "per_depth_csv": per_depth_csv.as_posix() if per_depth_csv else "",
+        # the review page is where a prediction gets corrected; the pane hands over the command
+        "study_command": (
+            "OldSoftwareEsiBuilder/.venv-mps/bin/python tools/scale/study_scale_folder.py "
+            f"--from-pipeline {stage_dir.as_posix()} --open" if stage_dir else ""
+        ),
+    }
+    summary["scale_evidence"] = evidence
+
+
 def _pipeline_output_dir_for_summary(summary: Dict[str, Any], run_dir: Path) -> Path:
     path_txt = str(summary.get("pipeline_output_dir", "") or "").strip() if isinstance(summary, dict) else ""
     if path_txt:
@@ -17455,6 +17702,7 @@ def create_app(data_root: Path, python_bin: str, models_metrics_csv: Optional[Pa
                 summary = {}
         _ensure_line13_template_crop(summary, run_dir)
         _refresh_lr_marker_evidence_from_csv(summary, run_dir)
+        _refresh_scale_evidence_from_csv(summary, run_dir)
         annotations_path = store.annotations_path(run_id)
         if annotations_path.exists():
             try:
