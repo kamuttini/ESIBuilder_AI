@@ -569,6 +569,146 @@ def _preferred_output_size(
     return 0, 0
 
 
+def _quantile(values: Sequence[float], q: float) -> Optional[float]:
+    clean = sorted(float(v) for v in values if v is not None)
+    if not clean:
+        return None
+    if len(clean) == 1:
+        return clean[0]
+    qq = _clamp(float(q), 0.0, 1.0)
+    pos = qq * float(len(clean) - 1)
+    lo = int(np.floor(pos))
+    hi = int(np.ceil(pos))
+    if lo == hi:
+        return clean[lo]
+    frac = pos - float(lo)
+    return clean[lo] * (1.0 - frac) + clean[hi] * frac
+
+
+def _norm_rect_iou(a: Any, b: Any) -> float:
+    ar = clamp_rect01(a)
+    br = clamp_rect01(b)
+    if ar is None or br is None:
+        return 0.0
+    ax1 = float(ar.x)
+    ay1 = float(ar.y)
+    ax2 = float(ar.x + ar.w)
+    ay2 = float(ar.y + ar.h)
+    bx1 = float(br.x)
+    by1 = float(br.y)
+    bx2 = float(br.x + br.w)
+    by2 = float(br.y + br.h)
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_w * inter_h
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter_area
+    if union <= 1e-8:
+        return 0.0
+    return float(inter_area / union)
+
+
+def _validate_line11_red_candidate(
+    *,
+    base_rect_norm: Mapping[str, Any],
+    red_rect_norm: Mapping[str, Any],
+    rects: Sequence[Any],
+    parsed_records: Sequence[Mapping[str, Any]],
+    top_segment: Any,
+) -> Dict[str, Any]:
+    base = clamp_rect01(base_rect_norm)
+    red = clamp_rect01(red_rect_norm)
+    widths = [float(r.w) for r in rects if r is not None and float(r.w) > 0.0]
+    median_w = _quantile(widths, 0.5)
+    q1_w = _quantile(widths, 0.25)
+    q3_w = _quantile(widths, 0.75)
+    iqr_w = (
+        float(q3_w - q1_w)
+        if q1_w is not None and q3_w is not None
+        else None
+    )
+    iqr_ratio = (
+        float(iqr_w / max(float(median_w), 1e-8))
+        if iqr_w is not None and median_w is not None
+        else None
+    )
+
+    top_id = str(getattr(top_segment, "image_id", "") or "").strip() if top_segment is not None else ""
+    source_rect = None
+    if top_id:
+        for item in parsed_records:
+            if str(item.get("image_id", "") or "") == top_id:
+                source_rect = clamp_rect01(item.get("pred_rect_norm"))
+                break
+
+    source_iou = _norm_rect_iou(source_rect, base) if source_rect is not None and base is not None else None
+    base_iou = _norm_rect_iou(base, red) if base is not None and red is not None else 0.0
+    red_vs_base = (
+        float(red.w / max(float(base.w), 1e-8))
+        if base is not None and red is not None
+        else None
+    )
+    red_vs_median = (
+        float(red.w / max(float(median_w), 1e-8))
+        if red is not None and median_w is not None
+        else None
+    )
+
+    min_source_iou = 0.70
+    max_stable_iqr_ratio = 0.035
+    min_width_ratio_on_stable = 0.90
+    min_base_iou_on_stable = 0.88
+    stable_rects = (
+        len(widths) >= 8
+        and iqr_ratio is not None
+        and iqr_ratio <= max_stable_iqr_ratio
+    )
+
+    accepted = True
+    reason = "ok"
+    if source_iou is not None and source_iou < min_source_iou:
+        accepted = False
+        reason = "top_segment_source_rect_outlier"
+    elif (
+        stable_rects
+        and red_vs_median is not None
+        and red_vs_base is not None
+        and (red_vs_median < min_width_ratio_on_stable or red_vs_base < min_width_ratio_on_stable)
+        and base_iou < min_base_iou_on_stable
+    ):
+        accepted = False
+        reason = "red_rect_shrinks_stable_per_image_median"
+
+    return {
+        "accepted": bool(accepted),
+        "reason": reason,
+        "top_segment_image_id": top_id,
+        "top_segment_source_iou_vs_base": source_iou,
+        "base_iou_vs_red": float(base_iou),
+        "base_width_norm": float(base.w) if base is not None else None,
+        "red_width_norm": float(red.w) if red is not None else None,
+        "red_width_vs_base": red_vs_base,
+        "per_image_width_median_norm": median_w,
+        "per_image_width_q1_norm": q1_w,
+        "per_image_width_q3_norm": q3_w,
+        "per_image_width_iqr_norm": iqr_w,
+        "per_image_width_iqr_ratio": iqr_ratio,
+        "red_width_vs_per_image_median": red_vs_median,
+        "per_image_rects_stable": bool(stable_rects),
+        "thresholds": {
+            "min_source_iou": min_source_iou,
+            "max_stable_iqr_ratio": max_stable_iqr_ratio,
+            "min_width_ratio_on_stable": min_width_ratio_on_stable,
+            "min_base_iou_on_stable": min_base_iou_on_stable,
+        },
+    }
+
+
 def compute_rect_red_pipeline(
     *,
     records: Sequence[Mapping[str, Any]],
@@ -830,6 +970,14 @@ def compute_rect_red_pipeline(
     if red_tlbr is not None:
         line11_red = f"{red_tlbr['top']}|{red_tlbr['left']}|{red_tlbr['bottom']}|{red_tlbr['right']}|"
 
+    red_validation = _validate_line11_red_candidate(
+        base_rect_norm=base_rect_norm_dict,
+        red_rect_norm=red_rect_norm_dict,
+        rects=rects,
+        parsed_records=parsed,
+        top_segment=computation.top_segment,
+    )
+
     out_records: List[Dict[str, Any]] = []
     for item in parsed:
         image_id = str(item.get("image_id", "") or "")
@@ -889,6 +1037,13 @@ def compute_rect_red_pipeline(
         "top_segment_su": _segment_ref_to_dict(top_su),
         "top_segment_giu": _segment_ref_to_dict(top_giu),
         "top_segment_global": _segment_ref_to_dict(top_global),
+        "line11_red_accepted": bool(red_validation.get("accepted", True)),
+        "line11_red_reject_reason": (
+            ""
+            if bool(red_validation.get("accepted", True))
+            else str(red_validation.get("reason", "") or "rect_red_rejected")
+        ),
+        "line11_red_validation": red_validation,
         "records_total": int(len(out_records)),
         "records_with_segment": int(records_with_segment),
         "records": out_records,

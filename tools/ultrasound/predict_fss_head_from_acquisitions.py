@@ -8673,7 +8673,8 @@ def main() -> int:
                 red_tlbr_obj = line11_red_obj.get("rect_tlbr", {})
                 if isinstance(red_tlbr_obj, dict):
                     red_tlbr = red_tlbr_obj
-            if red_text:
+            red_accepted = bool(rect_red_payload.get("line11_red_accepted", True))
+            if red_text and red_accepted:
                 line_11 = red_text
                 try:
                     rect_top = str(int(red_tlbr.get("top", 0)))
