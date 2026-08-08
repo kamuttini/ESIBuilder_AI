@@ -98,6 +98,11 @@ function cropUrl(path, box, zoom, pad) {
   return `/api/crop?${q.toString()}`;
 }
 
+function boxText(box) {
+  if (!box) return '—';
+  return `${box.top}|${box.left}|${box.bottom}|${box.right}`;
+}
+
 function kv(pairs) {
   const list = el('dl', { class: 'kv' });
   for (const [key, value] of pairs) {
@@ -638,6 +643,45 @@ function attachInteraction(container, img, image, interaction) {
   }
 }
 
+/* ---------------------------------------------------------------- overlay set */
+// One definition of "what can be drawn on a frame", shared by the sample and the detail view,
+// so a box added here appears in both with the same colour and the same toggle.
+const OVERLAY_KEYS = [
+  ['rect', '#11 rettangolo ecografico'],
+  ['rect-img', 'rect di questa immagine'],
+  ['name-echo', '#13 nome vendor'],
+  ['name-probe', '#14 nome sonda'],
+  ['depth', 'box depth'],
+  ['marker', 'marker L/R'],
+  ['scala', 'righello'],
+];
+
+function sampleOverlays(folder, image) {
+  return [
+    { kind: 'box', key: 'rect', box: folder.rect.box, cls: 'rect', label: '#11' },
+    { kind: 'box', key: 'rect-img', box: image.rect_per_image, cls: 'rect-img',
+      label: 'rect immagine' },
+    { kind: 'box', key: 'name-echo', box: (folder.line13 || {}).box, cls: 'name-echo',
+      label: '#13 vendor' },
+    { kind: 'box', key: 'name-probe', box: (folder.line14 || {}).box, cls: 'name-probe',
+      label: '#14 sonda' },
+  ];
+}
+
+function renderOverlayToggles(container, onChange) {
+  container.innerHTML = '';
+  OVERLAY_KEYS.forEach(([key, label]) => {
+    container.appendChild(el('span', {
+      class: `chip clickable ov-key-${key}` + (S.overlayOff.has(key) ? '' : ' selected'),
+      text: label,
+      onclick: () => {
+        if (S.overlayOff.has(key)) S.overlayOff.delete(key); else S.overlayOff.add(key);
+        onChange();
+      },
+    }));
+  });
+}
+
 /* ---------------------------------------------------------------- sample */
 function renderSample() {
   const images = S.study.images || [];
@@ -647,11 +691,8 @@ function renderSample() {
   $('#sample-label').textContent = `${S.sampleIndex + 1}/${images.length} — ${image.image_id}`;
 
   const folder = S.study.folder;
-  buildCanvas($('#sample-canvas'), image, [
-    { kind: 'box', key: 'rect', box: folder.rect.box, cls: 'rect', label: '#11 di cartella' },
-    { kind: 'box', key: 'rect-img', box: image.rect_per_image, cls: 'rect-img',
-      label: 'rect di questa immagine' },
-  ]);
+  buildCanvas($('#sample-canvas'), image, sampleOverlays(folder, image));
+  renderOverlayToggles($('#sample-toggles'), renderSample);
 
   const cards = $('#sample-cards');
   cards.innerHTML = '';
@@ -687,8 +728,12 @@ function renderSample() {
   ]));
   cards.appendChild(areaCard('line13', folder.line13, [
     ['#13', folder.line13.value],
+    ['box', boxText(folder.line13.box)],
     ['come', folder.line13.source],
     ['supporto', num(folder.line13.support)],
+    ['prima del taglio scuro', folder.line13.pre_dark_trim],
+    ['#14 nome sonda', (folder.line14 || {}).value],
+    ['box #14', boxText((folder.line14 || {}).box)],
   ]));
   cards.appendChild(areaCard('su_giu', folder.su_giu, [
     ['prevalente', folder.su_giu.majority],
@@ -804,6 +849,42 @@ function imageProblems(image) {
   return (image.checks || []).filter((c) => c.level === 'warn' || c.level === 'error');
 }
 
+/** One orientation fact as a fixed-width badge: symbol first, so it reads without reading. */
+function orientChip(data, kind) {
+  const empty = { text: '·', cls: 'empty', title: 'nessuna predizione' };
+  let spec = empty;
+  const value = data || {};
+  if (kind === 'su_giu') {
+    const label = String(value.label || '').toLowerCase();
+    if (label === 'su') spec = { text: '↑ su', cls: 'su' };
+    else if (label === 'giu') spec = { text: '↓ giù', cls: 'giu' };
+    if (spec !== empty) {
+      spec.title = `verso su/giù: ${label} · confidenza ${num(value.confidence)}`
+        + ` (su ${num(value.prob_su)} / giù ${num(value.prob_giu)})`;
+    }
+  } else if (kind === 'lr') {
+    const label = String(value.label || '');
+    if (label === 'lr_flipped') spec = { text: '↔ specchiata', cls: 'flip' };
+    else if (label === 'not_lr_flipped') spec = { text: '= diritta', cls: 'noflip' };
+    if (spec !== empty) {
+      spec.title = `marker L/R: ${value.label_it || label} · score ${num(value.score)}`
+        + ` · lato ${txt(value.detected_side)} · ${txt(value.status)}`
+        + (value.review_reason ? ` · ${value.review_reason}` : '');
+      if (String(value.status || '') !== 'ok') spec.cls += ' doubt';
+    }
+  } else if (kind === 'lt') {
+    const label = String(value.label || '').toUpperCase();
+    if (label === 'L') spec = { text: 'L long.', cls: 'lt-l' };
+    else if (label === 'T') spec = { text: 'T trasv.', cls: 'lt-t' };
+    if (spec !== empty) {
+      spec.title = `piano ${label} · confidenza ${num(value.confidence)}`
+        + ` (L ${num(value.prob_l)} / T ${num(value.prob_t)})`;
+      if (Number(value.confidence || 0) < 0.6) spec.cls += ' doubt';
+    }
+  }
+  return el('span', { class: `chip orient-chip ${spec.cls}`, title: spec.title, text: spec.text });
+}
+
 function statusClass(status) {
   const value = String(status || '').toLowerCase();
   if (value === 'accepted' || value === 'ok') return 'ok';
@@ -839,30 +920,27 @@ function renderGrid() {
     const depth = image.depth || {}, scala = image.scala || {};
     const problems = imageProblems(image);
     const fbCount = feedbackCountForImage(image.image_id);
-    const chips = el('div', { class: 'chips' }, [
-      el('span', {
-        class: `chip ${statusClass(depth.status)}`,
-        title: `depth ${txt(depth.status)} · ${txt(depth.mode)} · ${txt(depth.reason)}`,
-        text: `D ${depth.depth_mm !== null && depth.depth_mm !== undefined ? depth.depth_mm : '—'}`,
-      }),
-      el('span', {
-        class: `chip ${statusClass(scala.status)}`,
-        title: `scala ${txt(scala.status)} · mm/px ${txt(scala.mm_per_px)} · ${txt(scala.reason)}`,
-        text: `S ${scala.mm_per_px ? Number(scala.mm_per_px).toFixed(3) : '—'}`,
-      }),
-      (image.su_giu || {}).label ? el('span', {
-        class: 'chip', title: `su/giù conf ${num((image.su_giu || {}).confidence)}`,
-        text: image.su_giu.label,
-      }) : null,
-      (image.lt || {}).label ? el('span', {
-        class: 'chip', title: `L/T conf ${num((image.lt || {}).confidence)}`,
-        text: image.lt.label,
-      }) : null,
-      (image.lr_marker || {}).label ? el('span', {
-        class: `chip ${(image.lr_marker || {}).status === 'ok' ? '' : 'warn'}`,
-        title: `marker ${txt((image.lr_marker || {}).status)} score ${num((image.lr_marker || {}).score)}`,
-        text: image.lr_marker.label === 'lr_flipped' ? 'L/R ↔' : 'L/R =',
-      }) : null,
+    // Two rows, always in the same order and always the same width, so the eye can scan a
+    // column of thumbnails instead of reading each card: misure sopra, orientamento sotto.
+    const chips = el('div', { class: 'chip-rows' }, [
+      el('div', { class: 'chips' }, [
+        el('span', {
+          class: `chip ${statusClass(depth.status)}`,
+          title: `depth ${txt(depth.status)} · ${txt(depth.mode)} · ${txt(depth.reason)}`,
+          text: `D ${depth.depth_mm !== null && depth.depth_mm !== undefined
+            ? `${depth.depth_mm} mm` : '—'}`,
+        }),
+        el('span', {
+          class: `chip ${statusClass(scala.status)}`,
+          title: `scala ${txt(scala.status)} · mm/px ${txt(scala.mm_per_px)} · ${txt(scala.reason)}`,
+          text: `S ${scala.mm_per_px ? Number(scala.mm_per_px).toFixed(3) : '—'}`,
+        }),
+      ]),
+      el('div', { class: 'chips orient' }, [
+        orientChip(image.su_giu, 'su_giu'),
+        orientChip(image.lr_marker, 'lr'),
+        orientChip(image.lt, 'lt'),
+      ]),
     ]);
 
     const flags = [];
@@ -912,32 +990,17 @@ function renderDetail() {
   $('#detail-title').textContent =
     `${image.image_id} — ${S.detailIndex + 1}/${S.study.images.length}`;
 
-  const overlays = [
-    { kind: 'box', key: 'rect', box: folder.rect.box, cls: 'rect', label: '#11 cartella' },
-    { kind: 'box', key: 'rect-img', box: image.rect_per_image, cls: 'rect-img', label: 'rect immagine' },
+  const overlays = sampleOverlays(folder, image).concat([
     { kind: 'box', key: 'depth', box: depth.box, cls: 'depth',
       label: `depth ${txt(depth.depth_mm)}` },
     { kind: 'box', key: 'marker', box: (image.lr_marker || {}).box, cls: 'marker', label: 'marker' },
-  ];
+  ]);
   if (scala.x !== null && scala.x !== undefined) {
     overlays.push({ kind: 'segment', key: 'scala', x: Number(scala.x),
       y1: Number(scala.y_zero), y2: Number(scala.y_far) });
   }
   buildCanvas($('#detail-canvas'), image, overlays);
-
-  const toggles = $('#detail-toggles');
-  toggles.innerHTML = '';
-  [['rect', '#11 cartella'], ['rect-img', 'rect immagine'], ['depth', 'box depth'],
-    ['marker', 'marker L/R'], ['scala', 'righello']].forEach(([key, label]) => {
-    toggles.appendChild(el('span', {
-      class: `chip clickable ${S.overlayOff.has(key) ? '' : 'selected'}`,
-      text: label,
-      onclick: () => {
-        if (S.overlayOff.has(key)) S.overlayOff.delete(key); else S.overlayOff.add(key);
-        renderDetail();
-      },
-    }));
-  });
+  renderOverlayToggles($('#detail-toggles'), renderDetail);
 
   // Zoomed crops: how a depth label or a ruler is actually judged.
   const crops = $('#detail-crops');

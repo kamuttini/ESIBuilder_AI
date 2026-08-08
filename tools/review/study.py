@@ -64,6 +64,19 @@ def _parse_line11(text: str) -> Optional[Dict[str, int]]:
     return {"top": top, "left": left, "bottom": bottom, "right": right}
 
 
+def _box_from_columns(row: Dict[str, str], prefix: str) -> Optional[Dict[str, int]]:
+    """Box from the ``<prefix>_top/left/bottom/right`` columns of the folder CSV."""
+    values = {}
+    for side in ("top", "left", "bottom", "right"):
+        got = _i(row.get(f"{prefix}_{side}"), None)
+        if got is None:
+            return None
+        values[side] = got
+    if values["right"] <= values["left"] or values["bottom"] <= values["top"]:
+        return None
+    return values
+
+
 def _box_well_inside(outer: Dict[str, int], inner: Dict[str, float], inset: float = 0.10) -> bool:
     """True when ``inner`` sits in the middle of ``outer``, not hugging one of its borders.
 
@@ -173,6 +186,15 @@ class FolderStudy:
                 "source": row.get("line_13_source", ""),
                 "support": _f(row.get("line_13_support"), 0.0),
                 "route": row.get("line_13_model_route", ""),
+                # The box around the vendor name on screen: without it the #13 is a number soup.
+                "box": _box_from_columns(row, "line_13"),
+                "pre_dark_trim": row.get("line_13_pre_dark_trim_rect_name_echo", ""),
+            },
+            "line14": {
+                "value": row.get("line_14_rect_name_probe", ""),
+                "source": row.get("line_14_source", ""),
+                "support": _f(row.get("line_14_support"), 0.0),
+                "box": _box_from_columns(row, "line_14"),
             },
             "su_giu": {
                 "majority": row.get("su_giu_majority_label", ""),

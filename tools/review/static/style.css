@@ -91,7 +91,8 @@ main { padding: 18px; max-width: 1680px; margin: 0 auto; }
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 16px; margin-bottom: 16px;
 }
-.sticky-head { position: sticky; top: 52px; z-index: 20; }
+/* The review head is tall (sintesi + incoerenze): sticking it would cover half the frame. */
+.review-head { position: static; }
 .grid-2 { display: grid; grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr); gap: 16px; }
 @media (max-width: 1100px) { .grid-2 { grid-template-columns: 1fr; } }
 .row { display: flex; align-items: center; gap: 10px; }
@@ -208,8 +209,22 @@ textarea { width: 100%; resize: vertical; }
 .chk .areas { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 
 /* -------------------------------------------------------------- sample */
-.sample-layout { display: grid; grid-template-columns: minmax(320px, 1.4fr) minmax(280px, 1fr); gap: 16px; }
+.sample-layout {
+  display: grid;
+  grid-template-columns: minmax(360px, 1.6fr) minmax(300px, 1fr);
+  gap: 16px;
+  /* start, not stretch: otherwise the frame's box grows to the height of the cards column
+     and the image floats in a few thousand pixels of black. */
+  align-items: start;
+}
 @media (max-width: 1000px) { .sample-layout { grid-template-columns: 1fr; } }
+/* The frame stays put while the area cards scroll next to it. */
+.sample-media { position: sticky; top: 64px; }
+#sample-cards { max-height: calc(100vh - 120px); overflow-y: auto; padding-right: 4px; }
+@media (max-width: 1000px) {
+  .sample-media { position: static; }
+  #sample-cards { max-height: none; overflow: visible; }
+}
 .canvas-wrap {
   position: relative; background: #000; border-radius: 8px; overflow: hidden;
   border: 1px solid var(--line);
@@ -218,8 +233,18 @@ textarea { width: 100%; resize: vertical; }
 .ov { position: absolute; border: 2px solid var(--accent); pointer-events: none; }
 .ov.rect { border-color: #4c8dff; }
 .ov.rect-img { border-color: #35c88a; border-style: dashed; }
+.ov.name-echo { border-color: #ff8ad8; }
+.ov.name-probe { border-color: #7ee8e0; }
 .ov.depth { border-color: #e8b33c; }
 .ov.marker { border-color: #f2564d; }
+/* The toggle chips carry the overlay's colour, so the legend needs no legend. */
+.ov-key-rect.selected { background: #4c8dff; border-color: #4c8dff; color: #fff; }
+.ov-key-rect-img.selected { background: #35c88a; border-color: #35c88a; color: #06210f; }
+.ov-key-name-echo.selected { background: #ff8ad8; border-color: #ff8ad8; color: #2a0620; }
+.ov-key-name-probe.selected { background: #7ee8e0; border-color: #7ee8e0; color: #052423; }
+.ov-key-depth.selected { background: #e8b33c; border-color: #e8b33c; color: #241a02; }
+.ov-key-marker.selected { background: #f2564d; border-color: #f2564d; color: #fff; }
+.ov-key-scala.selected { background: #a06bff; border-color: #a06bff; color: #fff; }
 .ov-label {
   position: absolute; top: -1px; left: -1px; transform: translateY(-100%);
   font-size: 10px; padding: 1px 4px; background: rgba(0,0,0,.7); color: #fff;
@@ -265,7 +290,29 @@ textarea { width: 100%; resize: vertical; }
   padding: 5px 8px 2px; font-size: 11px; color: var(--muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.igc .chips { padding: 0 8px 8px; }
+.igc .chip-rows { padding: 0 8px 8px; display: flex; flex-direction: column; gap: 3px; }
+.chips.orient { gap: 3px; }
+/* Fixed order, fixed width, symbol first: a column of thumbnails becomes scannable. */
+.orient-chip {
+  flex: 1 1 0; min-width: 0; text-align: center; padding: 2px 4px;
+  font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.orient-chip.su { border-color: #4c8dff; color: #7fb0ff; }
+.orient-chip.giu { border-color: #ff9f43; color: #ffb56b; }
+.orient-chip.flip { border-color: #f2564d; color: #ff8c85; }
+.orient-chip.noflip { border-color: #35c88a; color: #6fdcae; }
+.orient-chip.lt-l { border-color: #a06bff; color: #c3a3ff; }
+.orient-chip.lt-t { border-color: #7ee8e0; color: #a6f0ea; }
+.orient-chip.empty { border-style: dashed; color: var(--muted); }
+.orient-chip.doubt { border-style: dotted; opacity: .8; }
+@media (prefers-color-scheme: light) {
+  .orient-chip.su { color: #1c56c9; }
+  .orient-chip.giu { color: #9a5b04; }
+  .orient-chip.flip { color: #c9342b; }
+  .orient-chip.noflip { color: #12784f; }
+  .orient-chip.lt-l { color: #5b31b8; }
+  .orient-chip.lt-t { color: #10746d; }
+}
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .chip {
   font-size: 11px; padding: 2px 7px; border-radius: 20px;
