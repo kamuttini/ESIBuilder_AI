@@ -3492,6 +3492,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Timeout globale subprocess RECT_DEPTH (0=nessun timeout globale).",
     )
     p.add_argument(
+        "--disable-scale-stage",
+        action="store_true",
+        help="Disattiva lo stadio scala (#18-#21).",
+    )
+    p.add_argument(
+        "--scale-max-frames",
+        type=int,
+        default=48,
+        help="Frame studiati al massimo dallo stadio scala (l'OCR e la parte costosa).",
+    )
+    p.add_argument(
+        "--scale-min-accepted-ratio",
+        type=float,
+        default=0.80,
+        help="Quota minima di depth accepted per considerare ok lo stadio scala.",
+    )
+    p.add_argument(
+        "--scale-subprocess-timeout-sec",
+        type=float,
+        default=900.0,
+        help="Timeout del subprocess dello stadio scala (0=nessun timeout).",
+    )
+    p.add_argument(
         "--no-generated-images",
         action="store_true",
         help="Non genera PNG di preview/overlay nelle evidenze; usa solo riferimenti agli originali.",
@@ -3677,6 +3700,12 @@ def main() -> int:
         str(float(args.rect_depth_min_accepted_ratio)),
         "--rect-depth-subprocess-timeout-sec",
         str(float(args.rect_depth_subprocess_timeout_sec)),
+        "--scale-max-frames",
+        str(int(args.scale_max_frames)),
+        "--scale-min-accepted-ratio",
+        str(float(args.scale_min_accepted_ratio)),
+        "--scale-subprocess-timeout-sec",
+        str(float(args.scale_subprocess_timeout_sec)),
     ]
     if args.lr_marker_manual_seeds_file is not None:
         cmd.extend([
@@ -3687,6 +3716,8 @@ def main() -> int:
         cmd.append("--disable-lt-rect-classifier")
     if bool(args.disable_rect_depth_autonomous):
         cmd.append("--disable-rect-depth-autonomous")
+    if bool(args.disable_scale_stage):
+        cmd.append("--disable-scale-stage")
 
     _emit_event("pipeline_started", command=" ".join(cmd))
     stdout_lines: List[str] = []

@@ -513,38 +513,103 @@ def _b64(img: np.ndarray, q: int = 72) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode("ascii") if ok else ""
 
 
+def evidence_from_pipeline(context: dict) -> Tuple[List[str], str, Dict[str, dict], Dict[str, dict], Dict[str, dict]]:
+    """``(paths, vendor, orient, marker, depth_info)`` from a pipeline stage context JSON.
+
+    The pipeline already computed all of this on these very frames, so reviewing its answers
+    means *reading* its evidence rather than producing a second, slightly different opinion
+    with the same nets. What comes back is shaped exactly like what the local loaders return,
+    so the six stages below do not know the difference.
+    """
+    paths: List[str] = []
+    orient: Dict[str, dict] = {}
+    marker: Dict[str, dict] = {}
+    depth_info: Dict[str, dict] = {}
+    for fr in context.get("frames") or []:
+        path = str(fr.get("image_path") or "")
+        if not path or not os.path.isfile(path):
+            continue
+        paths.append(path)
+        rect_ltrb = fr.get("rect_ltrb") or []
+        rect_tlbr = None
+        if len(rect_ltrb) >= 4:  # the study speaks (top,left,bottom,right)
+            left, top, right, bottom = (float(v) for v in rect_ltrb[:4])
+            rect_tlbr = [top, left, bottom, right]
+        orient[path] = {
+            "label": str(fr.get("sugiu") or ""),
+            "conf": fr.get("sugiu_conf"),
+            "rect": rect_tlbr,
+            "source": str(fr.get("sugiu_source") or "pipeline"),
+            "net_label": "",
+        }
+        marker[path] = {
+            "vertical": str(fr.get("sugiu") or ""),
+            "group": str(fr.get("orientation_group") or ""),
+            "corrected": "corrected" if "corretto" in str(fr.get("sugiu_source") or "") else "",
+            "source": str(fr.get("sugiu_source") or ""),
+            "score": fr.get("marker_score"),
+            "status": "", "template": "", "box": None,
+        }
+        depth_mm = fr.get("depth_mm")
+        if depth_mm is not None:
+            depth_info[os.path.realpath(path)] = {
+                "depth_mm": float(depth_mm),
+                "from_interface": bool(fr.get("depth_from_interface")),
+                "mode": str(fr.get("depth_mode") or ""),
+                "status": str(fr.get("depth_status") or ""),
+                "ocr_text": str(fr.get("depth_ocr_text") or ""),
+                "box": fr.get("depth_box"),
+                "score": None, "ranker": None, "reason": "",
+            }
+    return paths, str(context.get("vendor_predicted") or ""), orient, marker, depth_info
+
+
 def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
           with_depth: bool, python_bin: str, device: str,
-          corrections: str = "") -> Optional[dict]:
-    base = os.path.join(folder, "image_samples")
-    if not os.path.isdir(base):
-        base = folder
-    paths = sorted(glob.glob(os.path.join(base, pattern)))[:max_images]
+          corrections: str = "", pipeline_context: Optional[dict] = None) -> Optional[dict]:
+    from_pipeline = bool(pipeline_context)
+    if from_pipeline:
+        paths, ctx_vendor, orient, marker, depth_info = evidence_from_pipeline(pipeline_context or {})
+        paths = paths[:max_images]
+        vendor = vendor or ctx_vendor
+        vendor_src = "dalla pipeline"
+    else:
+        base = os.path.join(folder, "image_samples")
+        if not os.path.isdir(base):
+            base = folder
+        paths = sorted(glob.glob(os.path.join(base, pattern)))[:max_images]
     if not paths:
-        print(f"[error] nessuna immagine con pattern {pattern} in {base}")
+        if from_pipeline:
+            print("[error] il contesto della pipeline non contiene frame leggibili")
+        else:
+            print(f"[error] nessuna immagine con pattern {pattern} in {base}")
         return None
     corr_entry = load_folder_corrections(corrections, folder)
     corr = corr_entry.get("frames") or {}
     corr_x = _corr_anchor_x(corr)
-    vendor_src = "indicato a mano"
-    if not vendor:
-        vendor, vendor_src = predict_vendor(paths, device)
+    if not from_pipeline:
+        vendor_src = "indicato a mano"
+        if not vendor:
+            vendor, vendor_src = predict_vendor(paths, device)
     prof = profile_for(vendor)
     print(f"[info] {len(paths)} immagini, vendor='{vendor or 'default'}' ({vendor_src})")
 
     # ---- 1. orientation, from the marker, to decide which end carries the zero ----
     # The net runs first only because the marker detector takes it as its prior and its rect crop;
-    # the marker has the last word, and can overturn it.
-    models = load_orientation_models(device)
-    orient = predict_orientation(models, [Path(p) for p in paths]) if models else {}
-    marker = marker_orientation(load_marker_detector(), paths, vendor, orient)
+    # the marker has the last word, and can overturn it. When the evidence comes from the
+    # pipeline this has already happened there, on these same frames.
+    if not from_pipeline:
+        models = load_orientation_models(device)
+        orient = predict_orientation(models, [Path(p) for p in paths]) if models else {}
+        marker = marker_orientation(load_marker_detector(), paths, vendor, orient)
     for p, m in marker.items():
         if m.get("vertical") in ("su", "giu"):
             o = orient.setdefault(p, {})
-            o["net_label"] = o.get("label", "")
+            o["net_label"] = o.get("net_label", "") or o.get("label", "")
             o["label"] = m["vertical"]
-            o["source"] = "marker" + (" (ha corretto la rete)" if m.get("corrected") == "corrected"
-                                      else "")
+            o["source"] = o.get("source") if from_pipeline else (
+                "marker" + (" (ha corretto la rete)" if m.get("corrected") == "corrected" else "")
+            )
     if orient:
         groups: Dict[str, int] = {}
         for v in orient.values():
@@ -555,14 +620,17 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
         print("[1] orientamento non disponibile: il verso verra' dalle etichette")
 
     # ---- 2. depth from the interface, to be cross-checked against the ruler later ----
-    # median rect over the folder, in the left,top,right,bottom order the depth module expects
-    rects = [o["rect"] for o in orient.values() if o.get("rect")]
-    rect_echo = None
-    if rects:
-        med = [statistics.median([r[k] for r in rects]) for k in range(4)]
-        rect_echo = (med[1], med[0], med[3], med[2])  # (top,left,bottom,right) -> l,t,r,b
-    depth_info = (run_depth_module(folder, python_bin, paths, vendor=vendor, rect_echo=rect_echo)
-                  if with_depth else {})
+    if not from_pipeline:
+        # median rect over the folder, in the left,top,right,bottom order the depth module wants
+        rects = [o["rect"] for o in orient.values() if o.get("rect")]
+        rect_echo = None
+        if rects:
+            med = [statistics.median([r[k] for r in rects]) for k in range(4)]
+            rect_echo = (med[1], med[0], med[3], med[2])  # (top,left,bottom,right) -> l,t,r,b
+        depth_info = (run_depth_module(folder, python_bin, paths, vendor=vendor, rect_echo=rect_echo)
+                      if with_depth else {})
+    elif not with_depth:
+        depth_info = {}
 
     # ---- 3. the ruler's column: detected per frame, then agreed folder-wide ----
     first: List[dict] = []
@@ -926,6 +994,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--python-bin", default=sys.executable)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--high-recall", action="store_true")
+    ap.add_argument("--from-pipeline", type=Path, default=None,
+                    help="Cartella dello stadio scala della pipeline (quella con "
+                         "pipeline_context.json): la pagina mostra le predizioni della pipeline "
+                         "invece di ricalcolarle, e le tue correzioni valgono su quelle.")
     ap.add_argument("--out", type=Path, default=None,
                     help="Default: artifacts/50_scale_study/<cartella>.html")
     args = ap.parse_args(argv)
@@ -933,8 +1005,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.high_recall:
         os.environ["SCALE_HIGH_RECALL"] = "1"
 
+    pipeline_context = None
+    if args.from_pipeline is not None:
+        ctx_path = args.from_pipeline
+        if ctx_path.is_dir():
+            ctx_path = ctx_path / "pipeline_context.json"
+        if not ctx_path.is_file():
+            print(f"[error] contesto della pipeline non trovato: {ctx_path}")
+            return 2
+        pipeline_context = json.loads(ctx_path.read_text(encoding="utf-8"))
+        if not args.folder:
+            args.folder = str(pipeline_context.get("folder_path") or "")
+        print(f"[info] evidenze dalla pipeline: {ctx_path}")
+
     folder = args.folder
-    if args.pick or not folder:
+    if args.pick or (not folder and pipeline_context is None):
         folder = pick_folder()
         if not folder:
             print("[info] nessuna cartella scelta")
@@ -946,7 +1031,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.out = REPO / "artifacts" / "50_scale_study" / f"{safe or 'studio'}.html"
 
     data = study(args.folder, args.pattern, args.max_images, args.cap_width, args.vendor,
-                 not args.no_depth, args.python_bin, args.device, args.corrections)
+                 not args.no_depth, args.python_bin, args.device, args.corrections,
+                 pipeline_context=pipeline_context)
     if not data:
         return 2
     tpl = PAGE.read_text(encoding="utf-8")
