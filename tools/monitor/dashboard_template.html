@@ -1,0 +1,997 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESIBuilder AI - Monitor pipeline .fss</title>
+<style>
+:root {
+  color-scheme: light;
+  --plane:          #f9f9f7;
+  --surface-1:      #fcfcfb;
+  --surface-2:      #f2f1ed;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #898781;
+  --grid:           #e1e0d9;
+  --axis:           #c3c2b7;
+  --border:         rgba(11,11,11,0.10);
+  --series-1:       #2a78d6;
+  --series-1-soft:  #cde2fb;
+  --good:           #0ca30c;
+  --warning:        #fab219;
+  --serious:        #ec835a;
+  --critical:       #d03b3b;
+  --good-text:      #006300;
+  --shadow:         0 1px 2px rgba(11,11,11,.06), 0 8px 24px rgba(11,11,11,.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --plane:          #0d0d0d;
+    --surface-1:      #1a1a19;
+    --surface-2:      #232322;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --axis:           #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-1:       #3987e5;
+    --series-1-soft:  #184f95;
+    --good-text:      #0ca30c;
+    --shadow:         none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane:          #0d0d0d;
+  --surface-1:      #1a1a19;
+  --surface-2:      #232322;
+  --text-primary:   #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted:     #898781;
+  --grid:           #2c2c2a;
+  --axis:           #383835;
+  --border:         rgba(255,255,255,0.10);
+  --series-1:       #3987e5;
+  --series-1-soft:  #184f95;
+  --good-text:      #0ca30c;
+  --shadow:         none;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--plane);
+  color: var(--text-primary);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; }
+h1, h2, h3 { margin: 0; font-weight: 620; letter-spacing: -0.01em; }
+h1 { font-size: 19px; }
+h2 { font-size: 16px; }
+h3 { font-size: 13px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+
+/* ---------- layout ---------- */
+.app { display: grid; grid-template-columns: 268px minmax(0, 1fr); min-height: 100vh; }
+.nav {
+  background: var(--surface-1);
+  border-right: 1px solid var(--border);
+  padding: 18px 0 40px;
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+}
+.brand { padding: 0 18px 14px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+.brand small { display: block; color: var(--text-muted); font-size: 12px; margin-top: 3px; }
+.nav-group { padding: 14px 18px 6px; color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+.nav-item {
+  display: grid; grid-template-columns: 14px minmax(0,1fr) auto; gap: 9px; align-items: center;
+  width: 100%; text-align: left; padding: 7px 18px; border: 0; background: none;
+  color: var(--text-secondary); font: inherit; cursor: pointer; border-left: 2px solid transparent;
+}
+.nav-item:hover { background: var(--surface-2); color: var(--text-primary); }
+.nav-item.active { background: var(--surface-2); color: var(--text-primary); border-left-color: var(--series-1); font-weight: 560; }
+.nav-item .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav-item .kpi { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.dot { font-size: 11px; line-height: 1; }
+
+main { padding: 24px 30px 64px; max-width: 1240px; min-width: 0; }
+.topbar { display: flex; flex-wrap: wrap; gap: 14px; align-items: baseline; justify-content: space-between; margin-bottom: 20px; }
+.topbar .meta { color: var(--text-muted); font-size: 12px; }
+.controls { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.controls label { display: inline-flex; gap: 6px; align-items: center; color: var(--text-secondary); font-size: 13px; cursor: pointer; }
+button.ghost {
+  border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+  border-radius: 7px; padding: 5px 11px; font: inherit; font-size: 13px; cursor: pointer;
+}
+button.ghost:hover { color: var(--text-primary); }
+select { font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); }
+
+/* ---------- cards ---------- */
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; box-shadow: var(--shadow); min-width: 0; }
+.section { margin-bottom: 26px; min-width: 0; }
+.section > h3 { margin-bottom: 10px; }
+/* grid items default to min-width:auto: without this a long run name blows the page out */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.tiles > *, .facets > * { min-width: 0; }
+.tile .tile-label, .tile .tile-sub, .facet .facet-name { overflow-wrap: anywhere; }
+.tile .tile-label { color: var(--text-secondary); font-size: 12.5px; }
+.tile .tile-value { font-size: 30px; font-weight: 640; letter-spacing: -0.02em; margin: 6px 0 2px; }
+.tile .tile-sub { color: var(--text-muted); font-size: 12px; }
+
+/* ---------- pipeline flow ---------- */
+.flow { display: grid; gap: 8px; }
+.flow-row {
+  display: grid; grid-template-columns: 34px minmax(0,1fr) 166px 122px 128px; gap: 14px; align-items: center;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+  padding: 11px 14px; cursor: pointer; text-align: left; font: inherit; color: inherit; width: 100%;
+}
+.flow-row:hover { border-color: var(--axis); }
+.flow-row .idx { color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 13px; }
+.flow-row .title { font-weight: 560; }
+.flow-row .sub { color: var(--text-muted); font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.flow-row .value { font-size: 17px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.flow-row .value small { display: block; font-size: 11px; font-weight: 400; color: var(--text-muted); }
+.flow-row > * { min-width: 0; }
+
+.chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 2.5px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text-secondary); white-space: nowrap; }
+.chip.good     { color: var(--good-text); }
+.chip.warning  { color: var(--text-secondary); }
+.chip.serious  { color: var(--text-secondary); }
+.chip.critical { color: var(--critical); }
+.chip .dot.good { color: var(--good); } .chip .dot.warning { color: var(--warning); }
+.chip .dot.serious { color: var(--serious); } .chip .dot.critical { color: var(--critical); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.delta { font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--text-muted); white-space: nowrap; }
+.delta.up { color: var(--good-text); } .delta.down { color: var(--critical); }
+
+/* ---------- tables ---------- */
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--grid); }
+th { color: var(--text-secondary); font-weight: 600; font-size: 12px; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: var(--surface-2); }
+.table-wrap { overflow-x: auto; }
+.runs td.date, .runs td.kind { white-space: nowrap; }
+.runs td.steps { color: var(--text-secondary); font-variant-numeric: tabular-nums; min-width: 190px; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+
+/* ---------- charts ---------- */
+.chart-host { position: relative; }
+svg { display: block; max-width: 100%; overflow: visible; }
+.tooltip {
+  position: absolute; pointer-events: none; opacity: 0; transition: opacity .1s;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 10px; font-size: 12px; box-shadow: var(--shadow); white-space: nowrap; z-index: 5;
+}
+.tooltip b { font-weight: 600; }
+.tooltip .muted { color: var(--text-muted); }
+.facets { display: grid; grid-template-columns: repeat(auto-fill, minmax(212px, 1fr)); gap: 10px; }
+.facet { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 11px 12px; }
+.facet .facet-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.facet .facet-name { font-weight: 560; font-size: 13px; }
+.facet .facet-value { font-variant-numeric: tabular-nums; font-size: 13px; }
+
+.matrix th:first-child, .matrix td:first-child {
+  position: sticky; left: 0; background: var(--surface-1); z-index: 1; white-space: nowrap;
+  box-shadow: 1px 0 0 var(--grid);
+}
+.matrix tbody tr:hover td:first-child { background: var(--surface-2); }
+.matrix td.cell { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.matrix td.cell span.mark { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 7px; vertical-align: 1px; }
+.matrix td.empty { color: var(--text-muted); text-align: center; }
+
+.note { color: var(--text-secondary); font-size: 13px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 10px 13px; }
+.empty-state { color: var(--text-muted); font-size: 13px; padding: 24px; text-align: center; border: 1px dashed var(--axis); border-radius: 10px; }
+.prose { color: var(--text-secondary); max-width: 76ch; }
+.prose code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
+.kv { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 4px 16px; font-size: 13px; }
+.kv dt { color: var(--text-muted); }
+.kv dd { margin: 0; }
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; }
+  .nav { position: static; height: auto; }
+  .flow-row { grid-template-columns: 28px minmax(0,1fr) 110px; }
+  .flow-row .status-cell, .flow-row .spark-cell { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="nav">
+    <div class="brand">
+      <h1>Monitor pipeline .fss</h1>
+      <small>ESIBuilder AI</small>
+    </div>
+    <div id="nav-items"></div>
+  </aside>
+  <main id="view"></main>
+</div>
+
+<script id="payload" type="application/json">/*__DATA__*/</script>
+<script>
+"use strict";
+
+const RAW = JSON.parse(document.getElementById("payload").textContent);
+
+/* ------------------------------------------------------------------ *
+ * decode the column-encoded records
+ * ------------------------------------------------------------------ */
+const DICT = RAW.dict;
+const RECORDS = RAW.records.map(r => ({
+  step:    DICT.steps[r[0]],
+  run:     r[1],
+  metric:  DICT.metrics[r[2]],
+  vendor:  r[3] === -1 ? null : DICT.vendors[r[3]],
+  value:   r[4],
+  n:       r[5],
+  split:   DICT.splits[r[6]],
+  kind:    DICT.kinds[r[7]],
+  scope:   DICT.scopes[r[8]],
+}));
+const RUNS = RAW.runs;
+const STEPS = RAW.steps;
+const STEP_BY_ID = Object.fromEntries(STEPS.map(s => [s.id, s]));
+const META = RAW.metrics_meta;
+const STATUS = RAW.status_levels;
+const REASONS = RAW.reasons;
+
+const state = {
+  view: "overview",
+  stepId: null,
+  includeSmoke: false,
+  metricChoice: {},   // stepId -> metric
+};
+
+/* ------------------------------------------------------------------ *
+ * formatting
+ * ------------------------------------------------------------------ */
+function metaFor(metric) { return META[metric] || { label: metric, fmt: "num", higher_better: true }; }
+
+function fmtValue(metric, value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "-";
+  const fmt = metaFor(metric).fmt;
+  switch (fmt) {
+    case "pct01":  return (value * 100).toFixed(1) + "%";
+    case "pct100": return value.toFixed(1) + "%";
+    case "ratio":  return value.toFixed(4);
+    case "px":     return value.toFixed(1) + " px";
+    case "count":  return Math.round(value).toLocaleString("it-IT");
+    default:       return value.toFixed(2);
+  }
+}
+
+function fmtDelta(metric, delta) {
+  if (delta === null || delta === undefined || Number.isNaN(delta)) return "";
+  const fmt = metaFor(metric).fmt;
+  const sign = delta > 0 ? "+" : (delta < 0 ? "−" : "");
+  const abs = Math.abs(delta);
+  let body;
+  switch (fmt) {
+    case "pct01":  body = (abs * 100).toFixed(1) + " pt"; break;
+    case "pct100": body = abs.toFixed(1) + " pt"; break;
+    case "ratio":  body = abs.toFixed(4); break;
+    case "px":     body = abs.toFixed(1) + " px"; break;
+    case "count":  body = Math.round(abs).toLocaleString("it-IT"); break;
+    default:       body = abs.toFixed(2);
+  }
+  return sign + body;
+}
+
+/** direction-aware class: improvement is green, regression is red. */
+function deltaClass(metric, delta) {
+  const hb = metaFor(metric).higher_better;
+  if (delta === null || delta === undefined || hb === null || Math.abs(delta) < 1e-12) return "";
+  const better = hb ? delta > 0 : delta < 0;
+  return better ? "up" : "down";
+}
+
+function deltaArrow(metric, delta) {
+  if (delta === null || delta === undefined || Math.abs(delta) < 1e-12) return "";
+  return delta > 0 ? "↑ " : "↓ ";
+}
+
+/** good / warning / critical against the step target. */
+function statusAgainstTarget(metric, value, target) {
+  if (target === null || target === undefined || value === null) return null;
+  const hb = metaFor(metric).higher_better;
+  if (hb === null) return null;
+  const ratio = hb ? value / target : target / value;
+  if (ratio >= 1) return "good";
+  if (ratio >= 0.9) return "warning";
+  return "critical";
+}
+
+function el(tag, attrs, children) {
+  const node = document.createElement(tag);
+  if (attrs) for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined) continue;
+    if (k === "class") node.className = v;
+    else if (k === "html") node.innerHTML = v;
+    else if (k === "text") node.textContent = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v);
+  }
+  for (const child of [].concat(children || [])) {
+    if (child === null || child === undefined || child === false) continue;
+    node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+  }
+  return node;
+}
+
+function esc(text) {
+  return String(text).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ------------------------------------------------------------------ *
+ * queries
+ * ------------------------------------------------------------------ */
+function activeRecords() {
+  return state.includeSmoke ? RECORDS : RECORDS.filter(r => r.scope !== "smoke");
+}
+
+/** ordered series of {run, value, n} for one (step, metric, vendor). */
+function series(stepId, metric, vendor, records) {
+  const rows = (records || activeRecords()).filter(r =>
+    r.step === stepId && r.metric === metric && r.vendor === vendor && r.split === "test");
+  const byRun = new Map();
+  for (const row of rows) byRun.set(row.run, row);          // one point per run
+  return [...byRun.values()]
+    .sort((a, b) => a.run - b.run)
+    .map(row => ({ run: RUNS[row.run], value: row.value, n: row.n }));
+}
+
+function metricsForStep(stepId, records) {
+  const found = new Set();
+  for (const r of (records || activeRecords())) if (r.step === stepId && r.split === "test") found.add(r.metric);
+  const order = m => (m === STEP_BY_ID[stepId].primary_metric ? 0 : (metaFor(m).fmt === "count" ? 2 : 1));
+  return [...found].sort((a, b) => order(a) - order(b) || a.localeCompare(b));
+}
+
+function vendorsForStep(stepId, metric, records) {
+  const found = new Set();
+  for (const r of (records || activeRecords()))
+    if (r.step === stepId && r.metric === metric && r.vendor && r.split === "test") found.add(r.vendor);
+  return [...found].sort();
+}
+
+/** overall series; falls back to the mean across vendors when no aggregate exists. */
+function overallSeries(stepId, metric) {
+  const direct = series(stepId, metric, null);
+  if (direct.length) return { points: direct, derived: false };
+  const vendors = vendorsForStep(stepId, metric);
+  if (!vendors.length) return { points: [], derived: false };
+  const byRun = new Map();
+  for (const vendor of vendors) {
+    for (const point of series(stepId, metric, vendor)) {
+      const bucket = byRun.get(point.run.run_id) || { run: point.run, values: [] };
+      bucket.values.push(point.value);
+      byRun.set(point.run.run_id, bucket);
+    }
+  }
+  const points = [...byRun.values()]
+    .sort((a, b) => RUNS.indexOf(a.run) - RUNS.indexOf(b.run))
+    .map(b => ({ run: b.run, value: b.values.reduce((s, v) => s + v, 0) / b.values.length, n: b.values.length }));
+  return { points, derived: true };
+}
+
+function latestPoint(points) { return points.length ? points[points.length - 1] : null; }
+function previousPoint(points) { return points.length > 1 ? points[points.length - 2] : null; }
+
+function bestPoint(points, metric) {
+  if (!points.length) return null;
+  const hb = metaFor(metric).higher_better;
+  return points.reduce((best, p) => {
+    if (!best) return p;
+    if (hb === false) return p.value < best.value ? p : best;
+    return p.value > best.value ? p : best;
+  }, null);
+}
+
+/* ------------------------------------------------------------------ *
+ * charts
+ * ------------------------------------------------------------------ */
+const SVG_NS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v !== null && v !== undefined) node.setAttribute(k, v);
+  return node;
+}
+
+function niceTicks(min, max, count) {
+  if (min === max) { const pad = Math.abs(min) * 0.1 || 1; min -= pad; max += pad; }
+  const span = max - min;
+  const rawStep = span / Math.max(1, count);
+  const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= rawStep) || mag * 10;
+  const start = Math.floor(min / step) * step;
+  const ticks = [];
+  for (let v = start; v <= max + step * 0.5; v += step) ticks.push(Number(v.toFixed(10)));
+  return ticks;
+}
+
+/**
+ * Single-series trend over the run sequence. The x axis is ordinal (one slot per
+ * run in chronological order), which is what "step di raffinamento" means here:
+ * several runs often share a date.
+ */
+function trendChart(points, metric, opts) {
+  opts = opts || {};
+  const host = el("div", { class: "chart-host" });
+  if (!points.length) { host.appendChild(el("div", { class: "empty-state", text: "Nessun dato per questa metrica." })); return host; }
+
+  const W = 900, H = opts.height || 280;
+  const pad = { top: 16, right: 18, bottom: 46, left: 62 };
+  const innerW = W - pad.left - pad.right;
+  const innerH = H - pad.top - pad.bottom;
+
+  const values = points.map(p => p.value);
+  let lo = Math.min(...values), hi = Math.max(...values);
+  if (opts.target !== null && opts.target !== undefined) { lo = Math.min(lo, opts.target); hi = Math.max(hi, opts.target); }
+  const fmt = metaFor(metric).fmt;
+  if (fmt === "pct01") { lo = Math.min(lo, Math.max(0, lo)); hi = Math.min(1, Math.max(hi, hi)); }
+  const ticks = niceTicks(lo, hi, 4);
+  const yMin = Math.min(ticks[0], lo), yMax = Math.max(ticks[ticks.length - 1], hi);
+  const x = i => points.length === 1 ? pad.left + innerW / 2 : pad.left + (innerW * i) / (points.length - 1);
+  const y = v => pad.top + innerH - ((v - yMin) / (yMax - yMin || 1)) * innerH;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", height: H, role: "img" });
+
+  for (const tick of ticks) {
+    svg.appendChild(svgEl("line", { x1: pad.left, x2: W - pad.right, y1: y(tick), y2: y(tick), stroke: "var(--grid)", "stroke-width": 1 }));
+    const label = svgEl("text", { x: pad.left - 10, y: y(tick) + 4, "text-anchor": "end", fill: "var(--text-muted)", "font-size": 11 });
+    label.textContent = fmtValue(metric, tick);
+    svg.appendChild(label);
+  }
+  svg.appendChild(svgEl("line", { x1: pad.left, x2: W - pad.right, y1: pad.top + innerH, y2: pad.top + innerH, stroke: "var(--axis)", "stroke-width": 1 }));
+
+  if (opts.target !== null && opts.target !== undefined) {
+    svg.appendChild(svgEl("line", {
+      x1: pad.left, x2: W - pad.right, y1: y(opts.target), y2: y(opts.target),
+      stroke: "var(--text-muted)", "stroke-width": 1.5, "stroke-dasharray": "5 4",
+    }));
+    const tl = svgEl("text", { x: pad.left + 4, y: y(opts.target) - 6, "text-anchor": "start", fill: "var(--text-muted)", "font-size": 11 });
+    tl.textContent = "obiettivo " + fmtValue(metric, opts.target);
+    svg.appendChild(tl);
+  }
+
+  const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(2)},${y(p.value).toFixed(2)}`).join(" ");
+  svg.appendChild(svgEl("path", { d: path, fill: "none", stroke: "var(--series-1)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+
+  points.forEach((p, i) => {
+    svg.appendChild(svgEl("circle", { cx: x(i), cy: y(p.value), r: 4.5, fill: "var(--series-1)", stroke: "var(--surface-1)", "stroke-width": 2 }));
+  });
+
+  // x labels: first, last and a thinned selection in between
+  const maxLabels = 7;
+  const stride = Math.max(1, Math.ceil(points.length / maxLabels));
+  const lastIndex = points.length - 1;
+  points.forEach((p, i) => {
+    if (i !== lastIndex && (i % stride !== 0 || i > lastIndex - Math.ceil(stride / 2))) return;
+    const g = svgEl("text", { x: x(i), y: pad.top + innerH + 16, "text-anchor": "middle", fill: "var(--text-muted)", "font-size": 10.5 });
+    g.textContent = p.run.date;
+    svg.appendChild(g);
+    const g2 = svgEl("text", { x: x(i), y: pad.top + innerH + 30, "text-anchor": "middle", fill: "var(--text-muted)", "font-size": 10 });
+    const short = p.run.label.length > 22 ? p.run.label.slice(0, 21) + "…" : p.run.label;
+    g2.textContent = short;
+    svg.appendChild(g2);
+  });
+
+  // direct label on the last point
+  const last = points[points.length - 1];
+  const lastLabel = svgEl("text", {
+    x: Math.min(W - pad.right, x(points.length - 1) + 8), y: y(last.value) - 10,
+    "text-anchor": points.length === 1 ? "middle" : "end", fill: "var(--text-primary)", "font-size": 12, "font-weight": 600,
+  });
+  lastLabel.textContent = fmtValue(metric, last.value);
+  svg.appendChild(lastLabel);
+
+  const crosshair = svgEl("line", { y1: pad.top, y2: pad.top + innerH, stroke: "var(--axis)", "stroke-width": 1, opacity: 0 });
+  svg.appendChild(crosshair);
+  const hitLayer = svgEl("rect", { x: pad.left, y: pad.top, width: innerW, height: innerH, fill: "transparent" });
+  svg.appendChild(hitLayer);
+
+  const tip = el("div", { class: "tooltip" });
+  host.appendChild(svg);
+  host.appendChild(tip);
+
+  function nearest(evt) {
+    const box = svg.getBoundingClientRect();
+    const px = ((evt.clientX - box.left) / box.width) * W;
+    let best = 0, bestDist = Infinity;
+    points.forEach((p, i) => { const d = Math.abs(x(i) - px); if (d < bestDist) { bestDist = d; best = i; } });
+    return best;
+  }
+  hitLayer.addEventListener("mousemove", evt => {
+    const i = nearest(evt);
+    const p = points[i];
+    crosshair.setAttribute("x1", x(i)); crosshair.setAttribute("x2", x(i)); crosshair.setAttribute("opacity", 1);
+    const box = svg.getBoundingClientRect();
+    tip.innerHTML = `<b>${fmtValue(metric, p.value)}</b><br><span class="muted">${esc(p.run.date)} · ${esc(p.run.label)}</span>`
+      + (p.n ? `<br><span class="muted">n = ${p.n}</span>` : "");
+    tip.style.opacity = 1;
+    const left = (x(i) / W) * box.width;
+    tip.style.left = Math.max(0, Math.min(box.width - 200, left - 90)) + "px";
+    tip.style.top = Math.max(0, (y(p.value) / H) * box.height - 58) + "px";
+  });
+  hitLayer.addEventListener("mouseleave", () => { tip.style.opacity = 0; crosshair.setAttribute("opacity", 0); });
+  return host;
+}
+
+/** Tiny one-series sparkline used in facets and in the pipeline flow. */
+function sparkline(points, metric, width, height) {
+  width = width || 120; height = height || 30;
+  const svg = svgEl("svg", { viewBox: `0 0 ${width} ${height}`, width, height, "aria-hidden": "true" });
+  if (points.length === 0) return svg;
+  const values = points.map(p => p.value);
+  const lo = Math.min(...values), hi = Math.max(...values);
+  const x = i => points.length === 1 ? width / 2 : (width - 6) * i / (points.length - 1) + 3;
+  const y = v => height - 4 - ((v - lo) / ((hi - lo) || 1)) * (height - 8);
+  if (points.length > 1) {
+    svg.appendChild(svgEl("path", {
+      d: points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(" "),
+      fill: "none", stroke: "var(--series-1)", "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round",
+    }));
+  }
+  const lastIdx = points.length - 1;
+  svg.appendChild(svgEl("circle", { cx: x(lastIdx), cy: y(points[lastIdx].value), r: 3, fill: "var(--series-1)", stroke: "var(--surface-1)", "stroke-width": 2 }));
+  return svg;
+}
+
+/* ------------------------------------------------------------------ *
+ * shared pieces
+ * ------------------------------------------------------------------ */
+function statusChip(statusKey) {
+  const s = STATUS[statusKey] || { label: statusKey, tone: "warning", icon: "●" };
+  return el("span", { class: "chip " + s.tone }, [el("span", { class: "dot " + s.tone, text: s.icon }), s.label]);
+}
+
+function deltaSpan(metric, delta) {
+  if (delta === null || delta === undefined) return el("span", { class: "delta", text: "–" });
+  return el("span", { class: "delta " + deltaClass(metric, delta), text: deltaArrow(metric, delta) + fmtDelta(metric, delta) });
+}
+
+function tile(label, value, sub) {
+  return el("div", { class: "card tile" }, [
+    el("div", { class: "tile-label", text: label }),
+    el("div", { class: "tile-value" }, [value]),
+    sub ? el("div", { class: "tile-sub" }, [sub]) : null,
+  ]);
+}
+
+function stepPrimary(step) {
+  const metric = step.primary_metric;
+  if (!metric) return { metric: null, points: [], latest: null, prev: null };
+  const { points, derived } = overallSeries(step.id, metric);
+  return { metric, points, derived, latest: latestPoint(points), prev: previousPoint(points) };
+}
+
+/* ------------------------------------------------------------------ *
+ * views
+ * ------------------------------------------------------------------ */
+function viewOverview() {
+  const view = el("div");
+  const e2e = STEP_BY_ID["00_end_to_end"];
+  const e2ePrimary = stepPrimary(e2e);
+  const withData = STEPS.filter(s => stepPrimary(s).latest);
+  const vendors = new Set();
+  for (const r of activeRecords()) if (r.vendor) vendors.add(r.vendor);
+  const runsShown = new Set(activeRecords().map(r => r.run)).size;
+
+  view.appendChild(el("div", { class: "section tiles" }, [
+    tile("Cartelle ok end-to-end",
+      el("span", { text: e2ePrimary.latest ? fmtValue(e2ePrimary.metric, e2ePrimary.latest.value) : "-" }),
+      e2ePrimary.latest
+        ? el("span", {}, [`${e2ePrimary.latest.run.date} · ${e2ePrimary.latest.n || "?"} ${e2ePrimary.latest.n === 1 ? "cartella" : "cartelle"}`])
+        : "nessuna run pipeline"),
+    tile("Step con metriche", el("span", { text: `${withData.length} / ${STEPS.length}` }), el("span", { text: "spazi alimentati da dati reali" })),
+    tile("Vendor monitorati", el("span", { text: String(vendors.size) }), el("span", { text: "almeno una metrica per vendor" })),
+    tile("Run tracciate", el("span", { text: String(runsShown) }),
+      el("span", { text: state.includeSmoke ? "smoke incluse" : "smoke/tmp escluse" })),
+  ]));
+
+  const flow = el("div", { class: "flow" });
+  for (const step of STEPS) {
+    const primary = stepPrimary(step);
+    const latest = primary.latest, prev = primary.prev;
+    const delta = latest && prev ? latest.value - prev.value : null;
+    const st = latest ? statusAgainstTarget(primary.metric, latest.value, step.target) : null;
+    flow.appendChild(el("button", { class: "flow-row", onclick: () => go("step", step.id) }, [
+      el("div", { class: "idx", text: step.order === 0 ? "∑" : String(step.order).padStart(2, "0") }),
+      el("div", {}, [
+        el("div", { class: "title" }, [
+          step.title,
+          step.fss_lines.length ? el("span", { class: "chip", style: "margin-left:8px", text: "#" + step.fss_lines.join(" #") }) : null,
+        ]),
+        el("div", { class: "sub", text: primary.metric ? metaFor(primary.metric).label + (primary.derived ? " (media vendor)" : "") : "nessuna metrica ancora definita" }),
+      ]),
+      el("div", { class: "status-cell" }, [statusChip(step.status)]),
+      el("div", { class: "value" }, [
+        latest ? fmtValue(primary.metric, latest.value) : el("span", { style: "color:var(--text-muted);font-size:13px", text: "–" }),
+        latest && st ? el("small", {}, [
+          el("span", { class: "chip " + st, style: "border:0;background:none;padding:0" }, [
+            el("span", { class: "dot " + st, text: st === "good" ? "●" : (st === "warning" ? "◐" : "○") }),
+            st === "good" ? "obiettivo raggiunto" : (st === "warning" ? "vicino all'obiettivo" : "sotto obiettivo"),
+          ]),
+        ]) : (step.target !== null && step.target !== undefined && latest ? el("small", { text: "obiettivo " + fmtValue(primary.metric, step.target) }) : null),
+      ]),
+      el("div", { class: "spark-cell", style: "display:flex;align-items:center;gap:9px;justify-content:flex-end" }, [
+        deltaSpan(primary.metric, delta),
+        sparkline(primary.points, primary.metric, 78, 26),
+      ]),
+    ]));
+  }
+  view.appendChild(el("div", { class: "section" }, [el("h3", { text: "Step della pipeline" }), flow]));
+
+  view.appendChild(el("div", { class: "section" }, [
+    el("div", { class: "note" }, [
+      el("div", {}, ["Il valore di ogni step e l'ultima run disponibile della sua metrica principale; la freccia e il delta rispetto alla run precedente. ",
+        "Gli step senza rete (scansione, dedup, metadati video, resolver) sono misurati come quota di cartelle che li attraversano senza generare una review reason."]),
+    ]),
+  ]));
+
+  const warnings = RAW.report.warnings || [];
+  if (warnings.length) {
+    view.appendChild(el("div", { class: "section" }, [
+      el("h3", { text: "Avvisi della raccolta" }),
+      el("div", { class: "note" }, [
+        el("div", { style: "margin-bottom:6px" }, [`${warnings.length} avvisi: dati presenti negli artifacts ma non attribuiti a nessuno step.`]),
+        el("ul", { style: "margin:0;padding-left:18px" }, warnings.slice(0, 12).map(w => el("li", {}, [el("code", { text: w })]))),
+      ]),
+    ]));
+  }
+  return view;
+}
+
+function viewStep(stepId) {
+  const step = STEP_BY_ID[stepId];
+  const view = el("div");
+  const available = metricsForStep(stepId);
+  const chosen = state.metricChoice[stepId] && available.includes(state.metricChoice[stepId])
+    ? state.metricChoice[stepId]
+    : (available.includes(step.primary_metric) ? step.primary_metric : available[0]);
+
+  // --- header
+  view.appendChild(el("div", { class: "section card" }, [
+    el("div", { style: "display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between" }, [
+      el("h2", { text: (step.order === 0 ? "∑" : String(step.order).padStart(2, "0")) + " · " + step.title }),
+      el("div", { class: "chips" }, [
+        statusChip(step.status),
+        el("span", { class: "chip", text: "modulo: " + step.module }),
+        step.fss_lines.length ? el("span", { class: "chip", text: "righe .fss: #" + step.fss_lines.join(" #") }) : null,
+      ]),
+    ]),
+    el("p", { class: "prose", style: "margin:12px 0 10px" }, [step.summary]),
+    el("dl", { class: "kv" }, [
+      el("dt", { text: "Codice" }), el("dd", {}, [el("code", { text: step.code_ref })]),
+      el("dt", { text: "Review reasons" }),
+      el("dd", {}, [step.review_reasons.length ? el("code", { text: step.review_reasons.join(", ") }) : el("span", { style: "color:var(--text-muted)", text: "nessuna" })]),
+    ]),
+  ]));
+
+  if (!available.length) {
+    view.appendChild(el("div", { class: "empty-state" }, [
+      "Nessuna metrica raccolta per questo step. ",
+      step.id === "15_writer" ? "Il writer .fss non esiste ancora (Fase 2 della roadmap)." : "Lancia una run e rilancia la raccolta metriche.",
+    ]));
+    return view;
+  }
+
+  // --- metric picker
+  const picker = el("select", {
+    onchange: evt => { state.metricChoice[stepId] = evt.target.value; render(); },
+  }, available.map(m => el("option", { value: m, selected: m === chosen ? "selected" : null, text: metaFor(m).label })));
+
+  const { points, derived } = overallSeries(stepId, chosen);
+  const latest = latestPoint(points), prev = previousPoint(points), first = points[0] || null;
+  const best = bestPoint(points, chosen);
+  const target = chosen === step.primary_metric ? step.target : null;
+
+  view.appendChild(el("div", { class: "section tiles" }, [
+    tile("Ultimo valore", el("span", { text: latest ? fmtValue(chosen, latest.value) : "-" }),
+      latest ? el("span", {}, [`${latest.run.date} · ${latest.run.label}` + (latest.n ? ` · n = ${latest.n.toLocaleString("it-IT")}` : "")]) : null),
+    tile("Delta ultima run", latest && prev ? deltaSpan(chosen, latest.value - prev.value) : el("span", { text: "-" }),
+      prev ? el("span", {}, ["rispetto a " + prev.run.label]) : el("span", { text: "prima run tracciata" })),
+    tile("Delta dalla prima run", latest && first && first !== latest ? deltaSpan(chosen, latest.value - first.value) : el("span", { text: "-" }),
+      first ? el("span", {}, ["prima run: " + first.run.date]) : null),
+    tile("Migliore di sempre", el("span", { text: best ? fmtValue(chosen, best.value) : "-" }),
+      best ? el("span", {}, [best.run.label]) : null),
+  ]));
+
+  // --- trend
+  view.appendChild(el("div", { class: "section" }, [
+    el("div", { style: "display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:10px" }, [
+      el("h3", { text: "Andamento sulle run di raffinamento" }),
+      el("label", { style: "display:flex;gap:8px;align-items:center;color:var(--text-secondary);font-size:13px" }, ["Metrica", picker]),
+    ]),
+    el("div", { class: "card" }, [
+      trendChart(points, chosen, { target }),
+      derived ? el("div", { class: "note", style: "margin-top:12px" }, ["Nessun valore aggregato in questi run: la linea e la media dei valori per vendor."]) : null,
+    ]),
+  ]));
+
+  // --- per-vendor small multiples + table
+  const vendors = vendorsForStep(stepId, chosen);
+  if (vendors.length) {
+    const perVendor = vendors.map(v => {
+      const pts = series(stepId, chosen, v);
+      const l = latestPoint(pts), p = previousPoint(pts), f = pts[0];
+      return { vendor: v, points: pts, latest: l, prev: p, first: f };
+    });
+    const hb = metaFor(chosen).higher_better;
+    perVendor.sort((a, b) => {
+      if (!a.latest) return 1;
+      if (!b.latest) return -1;
+      return hb === false ? b.latest.value - a.latest.value : a.latest.value - b.latest.value;
+    });
+
+    const facets = el("div", { class: "facets" });
+    for (const row of perVendor) {
+      const delta = row.latest && row.prev ? row.latest.value - row.prev.value : null;
+      facets.appendChild(el("div", { class: "facet" }, [
+        el("div", { class: "facet-head" }, [
+          el("span", { class: "facet-name", text: row.vendor }),
+          el("span", { class: "facet-value", text: row.latest ? fmtValue(chosen, row.latest.value) : "-" }),
+        ]),
+        sparkline(row.points, chosen, 190, 38),
+        el("div", { style: "display:flex;justify-content:space-between;align-items:baseline;margin-top:2px" }, [
+          el("span", { class: "delta", style: "color:var(--text-muted)", text: row.points.length + (row.points.length === 1 ? " run" : " run") }),
+          deltaSpan(chosen, delta),
+        ]),
+      ]));
+    }
+    view.appendChild(el("div", { class: "section" }, [
+      el("h3", { text: "Per vendor · " + metaFor(chosen).label }),
+      facets,
+    ]));
+
+    const body = el("tbody");
+    for (const row of perVendor) {
+      const delta = row.latest && row.prev ? row.latest.value - row.prev.value : null;
+      const deltaFirst = row.latest && row.first && row.first !== row.latest ? row.latest.value - row.first.value : null;
+      const st = row.latest ? statusAgainstTarget(chosen, row.latest.value, target) : null;
+      body.appendChild(el("tr", {}, [
+        el("td", {}, [row.vendor, st ? el("span", { class: "chip " + st, style: "margin-left:8px;border:0;background:none;padding:0" }, [el("span", { class: "dot " + st, text: st === "good" ? "●" : (st === "warning" ? "◐" : "○") })]) : null]),
+        el("td", { class: "num", text: row.first ? fmtValue(chosen, row.first.value) : "-" }),
+        el("td", { class: "num", text: row.latest ? fmtValue(chosen, row.latest.value) : "-" }),
+        el("td", { class: "num" }, [deltaSpan(chosen, delta)]),
+        el("td", { class: "num" }, [deltaSpan(chosen, deltaFirst)]),
+        el("td", { class: "num", text: row.latest && row.latest.n ? row.latest.n.toLocaleString("it-IT") : "-" }),
+        el("td", { class: "mono", style: "color:var(--text-muted)", text: row.latest ? row.latest.run.label : "-" }),
+      ]));
+    }
+    view.appendChild(el("div", { class: "section" }, [
+      el("h3", { text: "Tabella per vendor" }),
+      el("div", { class: "card table-wrap" }, [
+        el("table", {}, [
+          el("thead", {}, [el("tr", {}, [
+            el("th", { text: "Vendor" }), el("th", { class: "num", text: "Prima run" }), el("th", { class: "num", text: "Ultima run" }),
+            el("th", { class: "num", text: "Δ run prec." }), el("th", { class: "num", text: "Δ dalla prima" }),
+            el("th", { class: "num", text: "n" }), el("th", { text: "Run" }),
+          ])]),
+          body,
+        ]),
+      ]),
+    ]));
+  }
+
+  // --- review reasons observed for this step
+  const stepReasons = REASONS.filter(r => r.step_id === stepId && r.vendor === null && (state.includeSmoke || r.scope !== "smoke"));
+  if (stepReasons.length) {
+    const lastDate = stepReasons.reduce((m, r) => (r.date > m ? r.date : m), "");
+    const lastRun = stepReasons.filter(r => r.date === lastDate).reduce((m, r) => (r.run_id > m ? r.run_id : m), "");
+    const rows = stepReasons.filter(r => r.run_id === lastRun).sort((a, b) => b.folders - a.folders);
+    view.appendChild(el("div", { class: "section" }, [
+      el("h3", { text: "Motivi di review su questo step · ultima run pipeline" }),
+      el("div", { class: "card table-wrap" }, [
+        el("table", {}, [
+          el("thead", {}, [el("tr", {}, [el("th", { text: "Motivo" }), el("th", { class: "num", text: "Cartelle" }), el("th", { class: "num", text: "Su totale" })])]),
+          el("tbody", {}, rows.map(r => el("tr", {}, [
+            el("td", {}, [el("code", { text: r.reason })]),
+            el("td", { class: "num", text: String(r.folders) }),
+            el("td", { class: "num", text: r.folders_total ? ((100 * r.folders) / r.folders_total).toFixed(1) + "%" : "-" }),
+          ]))),
+        ]),
+      ]),
+      el("div", { class: "note", style: "margin-top:10px" }, ["Run: ", el("code", { text: lastRun })]),
+    ]));
+  }
+
+  // --- runs table
+  const runRows = points.slice().reverse();
+  view.appendChild(el("div", { class: "section" }, [
+    el("h3", { text: "Run che hanno prodotto questa metrica" }),
+    el("div", { class: "card table-wrap" }, [
+      el("table", {}, [
+        el("thead", {}, [el("tr", {}, [
+          el("th", { text: "Data" }), el("th", { text: "Run" }), el("th", { text: "Tipo" }),
+          el("th", { class: "num", text: metaFor(chosen).label }), el("th", { class: "num", text: "n" }), el("th", { text: "Percorso" }),
+        ])]),
+        el("tbody", {}, runRows.map(p => el("tr", {}, [
+          el("td", { text: p.run.date }),
+          el("td", { text: p.run.label }),
+          el("td", {}, [el("span", { class: "chip", text: p.run.kind + (p.run.scope === "smoke" ? " · smoke" : "") })]),
+          el("td", { class: "num", text: fmtValue(chosen, p.value) }),
+          el("td", { class: "num", text: p.n ? p.n.toLocaleString("it-IT") : "-" }),
+          el("td", { class: "mono", style: "color:var(--text-muted)", text: p.run.run_path }),
+        ]))),
+      ]),
+    ]),
+  ]));
+  return view;
+}
+
+function viewVendors() {
+  const view = el("div");
+  const cols = STEPS.filter(s => s.primary_metric && vendorsForStep(s.id, s.primary_metric).length);
+  const vendors = [...new Set(cols.flatMap(s => vendorsForStep(s.id, s.primary_metric)))].sort();
+
+  view.appendChild(el("div", { class: "section" }, [
+    el("p", { class: "prose", style: "margin:0" }, [
+      "Ultimo valore della metrica principale di ogni step, per vendor. Il pallino segnala il confronto con l'obiettivo dello step; ",
+      "il numero e sempre scritto per esteso, il colore non porta informazione da solo. La tabella scorre in orizzontale.",
+    ]),
+  ]));
+
+  if (!vendors.length) { view.appendChild(el("div", { class: "empty-state", text: "Nessun dato per vendor." })); return view; }
+
+  const head = el("tr", {}, [el("th", { text: "Vendor" })].concat(cols.map(s =>
+    el("th", { class: "num" }, [
+      el("div", { text: (s.order === 0 ? "∑" : String(s.order).padStart(2, "0")) + " " + s.title }),
+      el("div", { style: "font-weight:400;color:var(--text-muted)", text: metaFor(s.primary_metric).label }),
+    ]))));
+
+  const body = el("tbody");
+  for (const vendor of vendors) {
+    const cells = [el("td", { text: vendor })];
+    for (const step of cols) {
+      const pts = series(step.id, step.primary_metric, vendor);
+      const last = latestPoint(pts);
+      if (!last) { cells.push(el("td", { class: "empty", text: "–" })); continue; }
+      const st = statusAgainstTarget(step.primary_metric, last.value, step.target);
+      const mark = st ? el("span", { class: "mark", style: `background:var(--${st === "good" ? "good" : st === "warning" ? "warning" : "critical"})`, title: st }) : null;
+      cells.push(el("td", { class: "cell", title: `${step.title} · ${last.run.label} · ${last.run.date}` }, [mark, fmtValue(step.primary_metric, last.value)]));
+    }
+    body.appendChild(el("tr", {}, cells));
+  }
+
+  view.appendChild(el("div", { class: "section card table-wrap matrix" }, [
+    el("table", {}, [el("thead", {}, [head]), body]),
+  ]));
+  view.appendChild(el("div", { class: "section" }, [el("div", { class: "note" }, [
+    "Legenda: ", el("span", { class: "chip good" }, [el("span", { class: "dot good", text: "●" }), "obiettivo raggiunto"]), " ",
+    el("span", { class: "chip warning" }, [el("span", { class: "dot warning", text: "◐" }), "entro il 10% dall'obiettivo"]), " ",
+    el("span", { class: "chip critical" }, [el("span", { class: "dot critical", text: "○" }), "sotto obiettivo"]), " ",
+    "– = nessuna misura per quella coppia vendor/step.",
+  ])]));
+  return view;
+}
+
+function viewRuns() {
+  const view = el("div");
+  const used = new Set(activeRecords().map(r => r.run));
+  const rows = RUNS.map((run, i) => ({ run, i })).filter(x => used.has(x.i)).reverse();
+  view.appendChild(el("div", { class: "section" }, [
+    el("p", { class: "prose", style: "margin:0" }, [
+      `${rows.length} run tracciate, dalla piu recente. Ogni riga elenca gli step della pipeline che quella run ha misurato.`,
+    ]),
+  ]));
+  view.appendChild(el("div", { class: "section card table-wrap" }, [
+    el("table", { class: "runs" }, [
+      el("thead", {}, [el("tr", {}, [
+        el("th", { text: "Data" }), el("th", { text: "Categoria" }), el("th", { text: "Run" }),
+        el("th", { text: "Tipo" }), el("th", { text: "Step misurati" }),
+      ])]),
+      el("tbody", {}, rows.map(({ run }) => el("tr", {}, [
+        el("td", { class: "date", text: run.date }),
+        el("td", { class: "mono", style: "color:var(--text-muted)", text: run.group }),
+        el("td", { text: run.label }),
+        el("td", { class: "kind" }, [
+          el("span", { class: "chip", text: run.kind }),
+          run.production ? el("span", { class: "chip good", style: "margin-left:5px" }, [el("span", { class: "dot good", text: "●" }), "produzione"]) : null,
+          run.scope === "smoke" ? el("span", { class: "chip", style: "margin-left:5px", text: "smoke" }) : null,
+        ]),
+        el("td", { class: "steps" }, [
+          run.steps.map(s => STEP_BY_ID[s] ? (STEP_BY_ID[s].order === 0 ? "∑" : String(STEP_BY_ID[s].order).padStart(2, "0")) : s).join(" "),
+        ]),
+      ]))),
+    ]),
+  ]));
+  return view;
+}
+
+/* ------------------------------------------------------------------ *
+ * shell
+ * ------------------------------------------------------------------ */
+function go(view, stepId) {
+  state.view = view;
+  state.stepId = stepId || null;
+  location.hash = view === "step" ? "step/" + stepId : view;
+  render();
+}
+
+function readHash() {
+  const hash = (location.hash || "").replace(/^#/, "");
+  if (hash.startsWith("step/")) {
+    const id = hash.slice(5);
+    if (STEP_BY_ID[id]) { state.view = "step"; state.stepId = id; return; }
+  }
+  if (["overview", "vendors", "runs"].includes(hash)) { state.view = hash; state.stepId = null; }
+}
+
+function renderNav() {
+  const host = document.getElementById("nav-items");
+  host.textContent = "";
+  const entries = [
+    { key: "overview", label: "Panoramica" },
+    { key: "vendors", label: "Confronto vendor" },
+    { key: "runs", label: "Storico run" },
+  ];
+  for (const entry of entries) {
+    host.appendChild(el("button", {
+      class: "nav-item" + (state.view === entry.key ? " active" : ""),
+      onclick: () => go(entry.key),
+    }, [el("span", { class: "dot", text: "" }), el("span", { class: "label", text: entry.label }), el("span", { class: "kpi", text: "" })]));
+  }
+  host.appendChild(el("div", { class: "nav-group", text: "Step della pipeline" }));
+  for (const step of STEPS) {
+    const primary = stepPrimary(step);
+    const tone = (STATUS[step.status] || {}).tone || "warning";
+    host.appendChild(el("button", {
+      class: "nav-item" + (state.view === "step" && state.stepId === step.id ? " active" : ""),
+      onclick: () => go("step", step.id),
+      title: step.title,
+    }, [
+      el("span", { class: "dot " + tone, style: `color:var(--${tone === "good" ? "good" : tone === "warning" ? "warning" : tone === "serious" ? "serious" : "critical"})`, text: "●" }),
+      el("span", { class: "label", text: (step.order === 0 ? "∑ " : String(step.order).padStart(2, "0") + " ") + step.title }),
+      el("span", { class: "kpi", text: primary.latest ? fmtValue(primary.metric, primary.latest.value) : "" }),
+    ]));
+  }
+}
+
+function renderTopbar() {
+  return el("div", { class: "topbar" }, [
+    el("div", {}, [
+      el("h2", { text: state.view === "step" ? STEP_BY_ID[state.stepId].title : ({ overview: "Panoramica", vendors: "Confronto vendor", runs: "Storico run" })[state.view] }),
+      el("div", { class: "meta", text: `Generato il ${RAW.generated_at} · ${RAW.report.records} misure da ${RAW.report.runs} run · ${RAW.artifacts_root}` }),
+    ]),
+    el("div", { class: "controls" }, [
+      el("label", {}, [
+        el("input", {
+          type: "checkbox", checked: state.includeSmoke ? "checked" : null,
+          onchange: evt => { state.includeSmoke = evt.target.checked; render(); },
+        }),
+        "includi run smoke/tmp",
+      ]),
+      el("button", {
+        class: "ghost", text: "tema",
+        onclick: () => {
+          const root = document.documentElement;
+          const now = root.getAttribute("data-theme");
+          const dark = now ? now === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+          root.setAttribute("data-theme", dark ? "light" : "dark");
+        },
+      }),
+    ]),
+  ]);
+}
+
+function render() {
+  renderNav();
+  const view = document.getElementById("view");
+  view.textContent = "";
+  view.appendChild(renderTopbar());
+  if (state.view === "step") view.appendChild(viewStep(state.stepId));
+  else if (state.view === "vendors") view.appendChild(viewVendors());
+  else if (state.view === "runs") view.appendChild(viewRuns());
+  else view.appendChild(viewOverview());
+}
+
+window.addEventListener("hashchange", () => { readHash(); render(); });
+readHash();
+render();
+</script>
+</body>
+</html>

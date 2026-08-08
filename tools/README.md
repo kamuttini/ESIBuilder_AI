@@ -15,6 +15,7 @@ Questi script servono per dimostrare compatibilita tra output legacy e nuovo flu
 - `tools/orientation/`: pipeline orientamento simbolico e review GUI
 - `tools/review/`: tool di revisione snella (web) — run, correzioni, feedback verso Claude Code
 - `tools/review_html/`: script per generare pacchetti/gallerie HTML di revisione
+- `tools/monitor/`: monitor dello stato del progetto (dashboard per step della pipeline `.fss`)
 - `tools/old/`: script legacy/non raccomandati
 
 ## 1) Confronto `.fss`
@@ -1027,3 +1028,22 @@ Unica modifica alla pipeline: il flag opt-in `--stage-events` (righe `##STAGE {j
 ogni stadio). Senza il flag l'output e' identico a prima.
 
 Dettagli: `tools/review/README.md`, `docs/tool_revisione_snella_2026-08-08.md`.
+
+## 19) Monitor stato progetto (dashboard pipeline `.fss`)
+
+Raccoglie automaticamente le metriche sparse in `artifacts/` e genera una dashboard
+HTML autocontenuta con uno spazio dedicato per ogni step della pipeline `.fss`,
+dettaglio per vendor e andamento sulle run di raffinamento.
+
+```bash
+python3 tools/monitor/monitor.py all
+```
+
+```bash
+python3 tools/monitor/monitor.py serve --open
+```
+
+Output: `artifacts/71_monitor/index.html` (piu' lo store `metrics.jsonl`,
+`runs.jsonl`, `review_reasons.jsonl`, `collect_report.json`).
+
+Dettagli, formati riconosciuti e come estenderlo: `tools/monitor/README.md`.

@@ -13,6 +13,7 @@ Automazione della configurazione ecografi per ESI: riconoscimento automatico da 
   - `tools/scale/` — blocco scala (#18-#21), stadio della pipeline
   - `tools/review/` — tool di revisione snella (web): run, correzioni, feedback, orchestratore
   - `tools/review_html/` — gallerie HTML di revisione
+  - `tools/monitor/` — monitor stato progetto: `python3 tools/monitor/monitor.py all` → dashboard per step della pipeline `.fss`, per vendor, con storico run
   - Vedi `tools/README.md` per i comandi completi di ogni blocco
 - `feedback/inbox.jsonl` — commenti e correzioni umane dal tool di revisione (versionato)
 - `artifacts/` — dataset, modelli, run, eval (~31GB, NON committati, naming `NN_categoria`)
