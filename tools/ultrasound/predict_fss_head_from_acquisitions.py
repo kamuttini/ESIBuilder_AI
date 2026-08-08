@@ -281,6 +281,26 @@ class FolderPrediction:
     rotation_ocr_debug_json: str
     status: str
     review_reasons: str
+    # Scale stage (#18-#21). These carry defaults so the dataclass stays constructible when
+    # the stage is disabled, and so adding a field never breaks the positional call.
+    line_18_vect_depth: str = ""
+    line_19_pixel_ratio_x: str = ""
+    line_20_pixel_ratio_y: str = ""
+    line_21_scale_line: str = ""
+    scale_status: str = ""
+    scale_source: str = ""
+    scale_profile: str = ""
+    scale_frames_studied: int = 0
+    scale_depths_total: int = 0
+    scale_depths_accepted: int = 0
+    scale_depths_review: int = 0
+    scale_depths_reject: int = 0
+    scale_depths_interpolated: int = 0
+    scale_acceptance_ratio: float = 0.0
+    scale_ruler_x: str = ""
+    scale_output_dir: str = ""
+    scale_per_image_csv: str = ""
+    scale_per_depth_csv: str = ""
 
 
 def _video_input_code_0hdmi_1vga(value: Optional[str]) -> Optional[int]:
@@ -1504,6 +1524,302 @@ def _run_rect_depth_autonomous_stage(
     else:
         out["status"] = "review"
         out["error"] = (
+            f"accepted_ratio={float(out['acceptance_ratio']):.3f} "
+            f"< min={float(min_accepted_ratio):.3f}"
+        )
+    return out, rows
+
+
+def _build_scale_frames_context(
+    *,
+    images: Sequence[Path],
+    su_giu_rows: Sequence[Dict[str, object]],
+    lr_marker_rows: Sequence[Dict[str, object]],
+    rect_depth_rows: Sequence[Dict[str, object]],
+    line_11_rect_echo: str,
+) -> List[Dict[str, object]]:
+    """Weave what the earlier stages already know about each frame, for the scale stage.
+
+    Nothing is recomputed here: the up/down comes from the LR-marker rows, whose
+    ``su_giu_pred`` is *already* the marker's verdict over the net's prior (the marker can
+    overturn it, and ``bundle_vertical_correction`` records when it did); the rect comes from
+    the same rows; the depth and its evidence come from the RECT_DEPTH stage. A frame with no
+    depth still travels, because it can still help agree the ruler's column folder-wide.
+
+    Everything is joined by image path, i.e. by identity of the file. The depth stage picks its
+    own frames and may well have looked at others; when it did, that frame simply carries no
+    depth instead of being paired with a different acquisition because two names looked alike.
+    """
+    sugiu_by_path: Dict[str, Dict[str, object]] = {}
+    for row in su_giu_rows:
+        path = str(row.get("image_path", "") or "")
+        if path:
+            sugiu_by_path[path] = row
+    marker_by_path: Dict[str, Dict[str, object]] = {}
+    for row in lr_marker_rows:
+        path = str(row.get("image_path", "") or "")
+        if path:
+            marker_by_path[path] = row
+    depth_by_path: Dict[str, Dict[str, object]] = {}
+    for row in rect_depth_rows:
+        path = str(row.get("image_path", "") or "")
+        if not path:
+            continue
+        # The depth stage emits one row per image; keep the strongest evidence if it ever
+        # emits more, ranked as the reference study ranks it: accepted over review, and a
+        # value read in the interface over one inferred from the scale.
+        mode = str(row.get("mode", "") or "").strip()
+        status = str(row.get("status", "") or "").strip().lower()
+        rank = ({"accepted": 2, "review": 1}.get(status, 0), 1 if mode == "direct_label" else 0)
+        previous = depth_by_path.get(path)
+        if previous is None or rank > previous.get("_rank", (0, 0)):
+            depth_by_path[path] = {**row, "_rank": rank}
+
+    line11 = _line11_to_rect_depth_arg(line_11_rect_echo)
+    folder_rect: Optional[List[float]] = None
+    if line11:
+        folder_rect = [float(v) for v in line11.split(",")]
+
+    frames: List[Dict[str, object]] = []
+    for path in images:
+        key = path.as_posix()
+        marker = marker_by_path.get(key, {})
+        sugiu_row = sugiu_by_path.get(key, {})
+        depth_row = depth_by_path.get(key, {})
+
+        # The marker's verdict when there is one, the net's label otherwise.
+        sugiu = str(marker.get("su_giu_pred", "") or sugiu_row.get("pred_label", "") or "")
+        if marker:
+            corrected = str(marker.get("bundle_vertical_correction", "") or "") == "corrected"
+            source = "marker (ha corretto la rete)" if corrected else "marker"
+            if not str(marker.get("bundle_vertical_source", "") or ""):
+                source = "rete"
+        else:
+            source = "rete" if sugiu else ""
+
+        rect_ltrb: Optional[List[float]] = None
+        try:
+            rect_ltrb = [
+                float(marker["echo_rect_left_abs"]), float(marker["echo_rect_top_abs"]),
+                float(marker["echo_rect_right_abs"]), float(marker["echo_rect_bottom_abs"]),
+            ]
+        except (KeyError, TypeError, ValueError):
+            rect_ltrb = None
+        if rect_ltrb is None:
+            try:  # the su/giu rows carry the crop the classifier actually used
+                rect_ltrb = [
+                    float(sugiu_row["crop_left"]), float(sugiu_row["crop_top"]),
+                    float(sugiu_row["crop_right"]), float(sugiu_row["crop_bottom"]),
+                ]
+            except (KeyError, TypeError, ValueError):
+                rect_ltrb = None
+        if rect_ltrb is None and folder_rect:
+            rect_ltrb = list(folder_rect)
+
+        depth_mm = None
+        try:
+            value = float(depth_row.get("depth_mm", "") or 0.0)
+            depth_mm = value if value > 0 else None
+        except (TypeError, ValueError):
+            depth_mm = None
+        depth_mode = str(depth_row.get("mode", "") or "")
+        depth_status = str(depth_row.get("status", "") or "")
+        # Only a depth actually printed in the interface is independent evidence: one the
+        # module inferred *from the scale* would be compared with itself.
+        from_interface = depth_mode == "direct_label"
+        if depth_status.strip().lower() == "reject":
+            depth_mm = None
+
+        frames.append(
+            {
+                "image_path": key,
+                "sugiu": sugiu,
+                "sugiu_conf": _safe_float_or_none(sugiu_row.get("confidence")) or 0.0,
+                "sugiu_source": source,
+                "marker_score": _safe_float_or_none(marker.get("match_score")),
+                "orientation_group": str(marker.get("orientation_group", "") or ""),
+                "rect_ltrb": rect_ltrb,
+                "depth_mm": depth_mm,
+                "depth_from_interface": bool(from_interface),
+                "depth_mode": depth_mode,
+                "depth_status": depth_status,
+                "depth_box": [
+                    _safe_float_or_none(depth_row.get(k)) for k in ("left", "top", "right", "bottom")
+                ] if depth_row else None,
+                "depth_ocr_text": str(depth_row.get("ocr_text", "") or ""),
+            }
+        )
+    return frames
+
+
+def _safe_float_or_none(value: object) -> Optional[float]:
+    try:
+        out = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return out if out == out else None
+
+
+def _run_scale_stage(
+    *,
+    folder: Path,
+    output_dir: Path,
+    folder_index: int,
+    python_bin: str,
+    vendor_pred: str,
+    vendor_conf: float,
+    probe_id: str,
+    line_11_rect_echo: str,
+    video_x: Optional[int],
+    video_y: Optional[int],
+    rotation_deg_clockwise: int,
+    frames: Sequence[Dict[str, object]],
+    max_frames: int,
+    subprocess_timeout_sec: float,
+    min_accepted_ratio: float,
+    corrections_path: Optional[Path] = None,
+) -> Tuple[Dict[str, object], List[Dict[str, object]]]:
+    """Run the scale study as a subprocess, the same way the depth stage is run.
+
+    A subprocess and not an import: the scale detector needs cv2 and Tesseract, and a folder
+    whose OCR wedges or whose cv2 build dies must cost one folder marked ``review``, not the
+    whole batch. The context JSON left on disk is also what makes the run reproducible by
+    hand and what the review page reads.
+    """
+    script = REPO_ROOT / "tools/scale/predict_scale_from_pipeline.py"
+    folder_slug = _safe_dir_name(folder.name, fallback=f"folder_{folder_index:04d}")
+    folder_hash = hashlib.sha1(folder.as_posix().encode("utf-8")).hexdigest()[:8]
+    stage_dir = output_dir / "scale" / f"{folder_index:04d}_{folder_slug}_{folder_hash}"
+    per_image_csv = stage_dir / "scale_per_image.csv"
+    per_depth_csv = stage_dir / "scale_per_depth.csv"
+    summary_path = stage_dir / "summary.json"
+    context_json = stage_dir / "pipeline_context.json"
+    log_path = stage_dir / "pipeline_subprocess.log"
+    out: Dict[str, object] = {
+        "status": "review",
+        "source": "not_run",
+        "output_dir": stage_dir.as_posix(),
+        "per_image_csv": per_image_csv.as_posix(),
+        "per_depth_csv": per_depth_csv.as_posix(),
+        "summary_json": summary_path.as_posix(),
+        "log_path": log_path.as_posix(),
+        "profile": "",
+        "frames_studied": 0,
+        "depths_total": 0,
+        "depths_accepted": 0,
+        "depths_review": 0,
+        "depths_reject": 0,
+        "depths_interpolated": 0,
+        "acceptance_ratio": 0.0,
+        "ruler_x": "",
+        "line_18_vect_depth": "",
+        "line_19_pixel_ratio_x": "",
+        "line_20_pixel_ratio_y": "",
+        "line_21_scale_line": "",
+        "review_reasons": [],
+        "error": "",
+    }
+    if not script.is_file():
+        out["source"] = "script_missing"
+        out["error"] = f"script non trovato: {script}"
+        return out, []
+
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    context = {
+        "folder_path": folder.as_posix(),
+        "vendor_predicted": vendor_pred,
+        "vendor_confidence": float(vendor_conf),
+        "predicted_probe_id": probe_id,
+        "line_11_rect_echo": line_11_rect_echo,
+        "video_x": int(video_x or 0),
+        "video_y": int(video_y or 0),
+        "rotation_deg_clockwise": int(rotation_deg_clockwise),
+        "pipeline_stage": "official_scale_line21",
+        "frames": list(frames),
+    }
+    context_json.write_text(json.dumps(context, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    cmd = [
+        python_bin,
+        script.as_posix(),
+        "--context-json",
+        context_json.as_posix(),
+        "--output-dir",
+        stage_dir.as_posix(),
+        "--max-frames",
+        str(int(max_frames)),
+    ]
+    if corrections_path is not None and corrections_path.is_file():
+        cmd.extend(["--corrections", corrections_path.as_posix()])
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=(float(subprocess_timeout_sec) if float(subprocess_timeout_sec) > 0 else None),
+        )
+        log_path.write_text(proc.stdout or "", encoding="utf-8")
+    except subprocess.TimeoutExpired as exc:
+        out["source"] = "scale_timeout"
+        out["error"] = f"timeout dopo {subprocess_timeout_sec:.1f}s"
+        log_path.write_text(str(exc.stdout or exc), encoding="utf-8")
+        return out, []
+    except Exception as exc:  # noqa: BLE001
+        out["source"] = "scale_exception"
+        out["error"] = str(exc)
+        log_path.write_text(str(exc), encoding="utf-8")
+        return out, []
+
+    if proc.returncode != 0:
+        out["source"] = "scale_failed"
+        out["error"] = f"returncode={proc.returncode}"
+        return out, []
+    if not summary_path.is_file():
+        out["source"] = "scale_no_summary"
+        out["error"] = f"summary non trovato: {summary_path}"
+        return out, []
+
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        out["source"] = "scale_read_error"
+        out["error"] = str(exc)
+        return out, []
+
+    for key in (
+        "status", "source", "profile", "frames_studied", "depths_total", "depths_accepted",
+        "depths_review", "depths_reject", "depths_interpolated", "acceptance_ratio",
+        "line_18_vect_depth", "line_19_pixel_ratio_x", "line_20_pixel_ratio_y",
+        "line_21_scale_line", "review_reasons",
+    ):
+        if key in summary:
+            out[key] = summary[key]
+    zone = summary.get("zone") or {}
+    out["ruler_x"] = "" if not isinstance(zone, dict) else str(zone.get("x", "") or "")
+
+    rows: List[Dict[str, object]] = []
+    if per_image_csv.is_file():
+        try:
+            with per_image_csv.open("r", encoding="utf-8", newline="") as handle:
+                for row in csv.DictReader(handle):
+                    clean = {str(k): ("" if v is None else str(v)) for k, v in row.items()}
+                    clean["folder_path"] = folder.as_posix()
+                    clean["folder_name"] = folder.name
+                    clean["folder_index"] = str(int(folder_index))
+                    clean["scale_run_dir"] = stage_dir.as_posix()
+                    rows.append(clean)
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = f"lettura per-immagine fallita: {exc}"
+
+    depths_total = int(out.get("depths_total", 0) or 0)
+    if depths_total <= 0:
+        out["status"] = "review"
+        if not out["error"]:
+            out["error"] = "nessuna depth con una risposta di scala"
+    elif float(out.get("acceptance_ratio", 0.0) or 0.0) < float(min_accepted_ratio):
+        out["status"] = "review"
+        out["error"] = out["error"] or (
             f"accepted_ratio={float(out['acceptance_ratio']):.3f} "
             f"< min={float(min_accepted_ratio):.3f}"
         )
@@ -6076,6 +6392,40 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.80,
         help="Quota minima accepted per considerare ok lo step RECT_DEPTH a livello cartella.",
     )
+    parser.add_argument(
+        "--disable-scale-stage",
+        action="store_true",
+        help="Disattiva lo stadio scala (#18-#21). Con questo flag la pipeline si comporta "
+             "esattamente come prima della sua introduzione.",
+    )
+    parser.add_argument(
+        "--scale-max-frames",
+        type=int,
+        default=48,
+        help="Frame studiati al massimo dallo stadio scala (l'OCR delle etichette e la parte "
+             "costosa). I frame sono scelti fra quelli per cui la depth ha dato un valore.",
+    )
+    parser.add_argument(
+        "--scale-subprocess-timeout-sec",
+        type=float,
+        default=900.0,
+        help="Timeout del subprocess dello stadio scala (0 = nessun timeout).",
+    )
+    parser.add_argument(
+        "--scale-min-accepted-ratio",
+        type=float,
+        default=0.80,
+        help="Quota minima di depth accepted per considerare ok lo stadio scala.",
+    )
+    parser.add_argument(
+        "--scale-corrections",
+        type=Path,
+        default=None,
+        help="JSON delle correzioni scala esportate dalla pagina di studio "
+             "(tools/scale/study_scale_folder.py). Da qui viene usata solo la colonna del "
+             "righello, che e un fatto di cartella; le correzioni per singolo frame restano "
+             "nella pagina di review.",
+    )
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--exclude-folder-regex", type=str, default=None)
     parser.add_argument("--max-folders", type=int, default=0, help="0=tutte")
@@ -6352,6 +6702,12 @@ def main() -> int:
             "campionamento uniforme dei frame per il rect (0=tutti, default produzione).",
             flush=True,
         )
+    if float(args.scale_subprocess_timeout_sec) < 0:
+        raise ValueError("--scale-subprocess-timeout-sec deve essere >= 0.")
+    if not (0.0 <= args.scale_min_accepted_ratio <= 1.0):
+        raise ValueError("--scale-min-accepted-ratio deve essere tra 0 e 1.")
+    if int(args.scale_max_frames) <= 0:
+        raise ValueError("--scale-max-frames deve essere >= 1.")
 
     dataset_root = args.dataset_root.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
@@ -6490,6 +6846,9 @@ def main() -> int:
     rect_depth_per_image_rows: List[Dict[str, object]] = []
     rect_depth_status_counter: Counter[str] = Counter()
     rect_depth_mode_counter: Counter[str] = Counter()
+    scale_per_image_rows: List[Dict[str, object]] = []
+    scale_status_counter: Counter[str] = Counter()
+    scale_source_counter: Counter[str] = Counter()
     lr_marker_templates_cache: Dict[str, Tuple[List[object], Dict[str, object]]] = {}
     lr_marker_template_roots = [p.expanduser().resolve() for p in args.lr_marker_template_roots]
     lr_marker_expanded_search_steps = (
@@ -8228,6 +8587,7 @@ def main() -> int:
         rect_depth_output_dir = ""
         rect_depth_predictions_csv = ""
         rect_depth_summary_json = ""
+        rect_depth_rows: List[Dict[str, object]] = []
         if not args.disable_rect_depth_autonomous:
             rect_depth_summary, rect_depth_rows = _run_rect_depth_autonomous_stage(
                 folder=folder,
@@ -8269,6 +8629,86 @@ def main() -> int:
                 warnings.append(f"{folder.name}: rect_depth_autonomous {rect_depth_status}: {rect_depth_error}")
         else:
             rect_depth_status_counter[rect_depth_status] += 1
+
+        # ---- scala #18-#21 -------------------------------------------------------------
+        # Runs after the depth because line #21 is *per depth*: #17 defines the groups and
+        # #18-#22 carry one entry each, in that order. It also consumes the up/down the
+        # marker already settled and the per-image rect, so nothing here is recomputed.
+        line_18_vect_depth = ""
+        line_19_pixel_ratio_x = ""
+        line_20_pixel_ratio_y = ""
+        line_21_scale_line = ""
+        scale_status = "ok" if args.disable_scale_stage else "review"
+        scale_source = "disabled" if args.disable_scale_stage else "not_run"
+        scale_profile = ""
+        scale_frames_studied = 0
+        scale_depths_total = 0
+        scale_depths_accepted = 0
+        scale_depths_review = 0
+        scale_depths_reject = 0
+        scale_depths_interpolated = 0
+        scale_acceptance_ratio = 0.0
+        scale_ruler_x = ""
+        scale_output_dir = ""
+        scale_per_image_csv = ""
+        scale_per_depth_csv = ""
+        scale_review_reasons: List[str] = []
+        if not args.disable_scale_stage:
+            scale_frames = _build_scale_frames_context(
+                images=all_images,
+                su_giu_rows=su_giu_rows,
+                lr_marker_rows=lr_marker_rows,
+                rect_depth_rows=rect_depth_rows,
+                line_11_rect_echo=line_11,
+            )
+            scale_summary, scale_rows = _run_scale_stage(
+                folder=folder,
+                output_dir=output_dir,
+                folder_index=idx,
+                python_bin=sys.executable,
+                vendor_pred=vendor_pred,
+                vendor_conf=float(vendor_conf),
+                probe_id=probe_id,
+                line_11_rect_echo=line_11,
+                video_x=out_video_x,
+                video_y=out_video_y,
+                rotation_deg_clockwise=int(rotation_deg_clockwise),
+                frames=scale_frames,
+                max_frames=int(args.scale_max_frames),
+                subprocess_timeout_sec=float(args.scale_subprocess_timeout_sec),
+                min_accepted_ratio=float(args.scale_min_accepted_ratio),
+                corrections_path=args.scale_corrections,
+            )
+            scale_per_image_rows.extend(scale_rows)
+            scale_status = str(scale_summary.get("status", "review") or "review")
+            scale_source = str(scale_summary.get("source", "") or "")
+            scale_profile = str(scale_summary.get("profile", "") or "")
+            scale_frames_studied = int(scale_summary.get("frames_studied", 0) or 0)
+            scale_depths_total = int(scale_summary.get("depths_total", 0) or 0)
+            scale_depths_accepted = int(scale_summary.get("depths_accepted", 0) or 0)
+            scale_depths_review = int(scale_summary.get("depths_review", 0) or 0)
+            scale_depths_reject = int(scale_summary.get("depths_reject", 0) or 0)
+            scale_depths_interpolated = int(scale_summary.get("depths_interpolated", 0) or 0)
+            scale_acceptance_ratio = float(scale_summary.get("acceptance_ratio", 0.0) or 0.0)
+            scale_ruler_x = str(scale_summary.get("ruler_x", "") or "")
+            scale_output_dir = str(scale_summary.get("output_dir", "") or "")
+            scale_per_image_csv = str(scale_summary.get("per_image_csv", "") or "")
+            scale_per_depth_csv = str(scale_summary.get("per_depth_csv", "") or "")
+            line_18_vect_depth = str(scale_summary.get("line_18_vect_depth", "") or "")
+            line_19_pixel_ratio_x = str(scale_summary.get("line_19_pixel_ratio_x", "") or "")
+            line_20_pixel_ratio_y = str(scale_summary.get("line_20_pixel_ratio_y", "") or "")
+            line_21_scale_line = str(scale_summary.get("line_21_scale_line", "") or "")
+            scale_review_reasons = [
+                str(r) for r in (scale_summary.get("review_reasons") or []) if str(r).strip()
+            ]
+            scale_status_counter[scale_status] += 1
+            if scale_source:
+                scale_source_counter[scale_source] += 1
+            scale_error = str(scale_summary.get("error", "") or "").strip()
+            if scale_error:
+                warnings.append(f"{folder.name}: scala {scale_status}: {scale_error}")
+        else:
+            scale_status_counter[scale_status] += 1
 
         id_echo, id_echo_source, id_echo_support = echo_resolver.resolve(
             vendor=vendor_pred,
@@ -8397,6 +8837,14 @@ def main() -> int:
                 review_reasons.append("missing_rect_depth_predictions")
             elif rect_depth_status != "ok":
                 review_reasons.append("rect_depth_autonomous_review")
+        if not args.disable_scale_stage:
+            # The stage's own reasons are kept verbatim (they say *why* the scale is unsure),
+            # and the folder is marked review whenever the scale is not ok.
+            review_reasons.extend(scale_review_reasons)
+            if scale_depths_total <= 0:
+                review_reasons.append("missing_scale_predictions")
+            elif scale_status != "ok" and "scale_review" not in review_reasons:
+                review_reasons.append("scale_review")
 
         status = "ok" if not review_reasons else "review"
         status_counter[status] += 1
@@ -8478,6 +8926,24 @@ def main() -> int:
             rect_depth_output_dir=rect_depth_output_dir,
             rect_depth_predictions_csv=rect_depth_predictions_csv,
             rect_depth_summary_json=rect_depth_summary_json,
+            line_18_vect_depth=line_18_vect_depth,
+            line_19_pixel_ratio_x=line_19_pixel_ratio_x,
+            line_20_pixel_ratio_y=line_20_pixel_ratio_y,
+            line_21_scale_line=line_21_scale_line,
+            scale_status=scale_status,
+            scale_source=scale_source,
+            scale_profile=scale_profile,
+            scale_frames_studied=scale_frames_studied,
+            scale_depths_total=scale_depths_total,
+            scale_depths_accepted=scale_depths_accepted,
+            scale_depths_review=scale_depths_review,
+            scale_depths_reject=scale_depths_reject,
+            scale_depths_interpolated=scale_depths_interpolated,
+            scale_acceptance_ratio=scale_acceptance_ratio,
+            scale_ruler_x=scale_ruler_x,
+            scale_output_dir=scale_output_dir,
+            scale_per_image_csv=scale_per_image_csv,
+            scale_per_depth_csv=scale_per_depth_csv,
             lt_images_predicted=lt_images_predicted,
             lt_majority_label=lt_majority_label,
             lt_majority_vote_ratio=lt_majority_vote_ratio,
@@ -8631,6 +9097,24 @@ def main() -> int:
                 "rect_depth_output_dir",
                 "rect_depth_predictions_csv",
                 "rect_depth_summary_json",
+                "line_18_vect_depth",
+                "line_19_pixel_ratio_x",
+                "line_20_pixel_ratio_y",
+                "line_21_scale_line",
+                "scale_status",
+                "scale_source",
+                "scale_profile",
+                "scale_frames_studied",
+                "scale_depths_total",
+                "scale_depths_accepted",
+                "scale_depths_review",
+                "scale_depths_reject",
+                "scale_depths_interpolated",
+                "scale_acceptance_ratio",
+                "scale_ruler_x",
+                "scale_output_dir",
+                "scale_per_image_csv",
+                "scale_per_depth_csv",
                 "lt_images_predicted",
                 "lt_majority_label",
                 "lt_majority_vote_ratio",
@@ -8765,6 +9249,24 @@ def main() -> int:
                     "rect_depth_output_dir": p.rect_depth_output_dir,
                     "rect_depth_predictions_csv": p.rect_depth_predictions_csv,
                     "rect_depth_summary_json": p.rect_depth_summary_json,
+                    "line_18_vect_depth": p.line_18_vect_depth,
+                    "line_19_pixel_ratio_x": p.line_19_pixel_ratio_x,
+                    "line_20_pixel_ratio_y": p.line_20_pixel_ratio_y,
+                    "line_21_scale_line": p.line_21_scale_line,
+                    "scale_status": p.scale_status,
+                    "scale_source": p.scale_source,
+                    "scale_profile": p.scale_profile,
+                    "scale_frames_studied": p.scale_frames_studied,
+                    "scale_depths_total": p.scale_depths_total,
+                    "scale_depths_accepted": p.scale_depths_accepted,
+                    "scale_depths_review": p.scale_depths_review,
+                    "scale_depths_reject": p.scale_depths_reject,
+                    "scale_depths_interpolated": p.scale_depths_interpolated,
+                    "scale_acceptance_ratio": f"{p.scale_acceptance_ratio:.6f}",
+                    "scale_ruler_x": p.scale_ruler_x,
+                    "scale_output_dir": p.scale_output_dir,
+                    "scale_per_image_csv": p.scale_per_image_csv,
+                    "scale_per_depth_csv": p.scale_per_depth_csv,
                     "lt_images_predicted": p.lt_images_predicted,
                     "lt_majority_label": p.lt_majority_label,
                     "lt_majority_vote_ratio": f"{p.lt_majority_vote_ratio:.6f}",
@@ -9145,6 +9647,21 @@ def main() -> int:
         for row in rect_depth_per_image_rows:
             writer.writerow(row)
 
+    scale_per_image_csv_path = output_dir / "scale_per_image_predictions.csv"
+    if scale_per_image_rows:
+        # The stage's own columns plus the folder identity: the union of the keys, so a new
+        # column added in the stage travels here without touching this list.
+        scale_fields = ["folder_path", "folder_name", "folder_index", "scale_run_dir"]
+        for row in scale_per_image_rows:
+            for key in row:
+                if key not in scale_fields:
+                    scale_fields.append(str(key))
+        with scale_per_image_csv_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=scale_fields, extrasaction="ignore")
+            writer.writeheader()
+            for row in scale_per_image_rows:
+                writer.writerow(row)
+
     preview_txt = output_dir / "folder_fss_head_preview.txt"
     lines: List[str] = []
     for p in predictions:
@@ -9220,6 +9737,22 @@ def main() -> int:
             f"mode={p.rect_depth_majority_mode or '-'} "
             f"depths={p.rect_depth_unique_depths_json or '[]'} "
             f"source={p.rect_depth_source or '-'}"
+        )
+        lines.append(f"#18 {p.line_18_vect_depth}")
+        lines.append(f"#19 {p.line_19_pixel_ratio_x}")
+        lines.append(f"#20 {p.line_20_pixel_ratio_y}")
+        lines.append(f"#21 {p.line_21_scale_line}")
+        lines.append(
+            "scala="
+            f"status={p.scale_status or '-'} "
+            f"accepted={p.scale_depths_accepted}/{p.scale_depths_total} "
+            f"review={p.scale_depths_review} reject={p.scale_depths_reject} "
+            f"interpolate={p.scale_depths_interpolated} "
+            f"ratio={p.scale_acceptance_ratio:.3f} "
+            f"frame={p.scale_frames_studied} "
+            f"profilo={p.scale_profile or '-'} "
+            f"righello_x={p.scale_ruler_x or '-'} "
+            f"source={p.scale_source or '-'}"
         )
         lines.append(
             "rotation_cw="
@@ -9456,6 +9989,19 @@ def main() -> int:
         "rect_depth_autonomous_predictions_count": len(rect_depth_per_image_rows),
         "rect_red_pipeline_json": rect_red_json.as_posix(),
         "rect_red_pipeline_folders": len(rect_red_by_folder),
+        "scale_stage_enabled": not bool(args.disable_scale_stage),
+        "scale_status_counts": dict(scale_status_counter),
+        "scale_source_counts": dict(scale_source_counter),
+        "scale_max_frames": int(args.scale_max_frames),
+        "scale_min_accepted_ratio": float(args.scale_min_accepted_ratio),
+        "scale_per_image_predictions_csv": scale_per_image_csv_path.as_posix(),
+        "scale_per_image_predictions_count": len(scale_per_image_rows),
+        "scale_depths_total": sum(p.scale_depths_total for p in predictions),
+        "scale_depths_accepted": sum(p.scale_depths_accepted for p in predictions),
+        "scale_depths_interpolated": sum(p.scale_depths_interpolated for p in predictions),
+        "scale_line21_complete_folders": sum(
+            1 for p in predictions if str(p.line_21_scale_line or "").strip()
+        ),
         "warnings_count": len(warnings),
         "warnings": warnings[:200],
         "output_csv": csv_path.as_posix(),

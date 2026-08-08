@@ -9,6 +9,7 @@ Questi script servono per dimostrare compatibilita tra output legacy e nuovo flu
 ## Struttura cartelle
 
 - `tools/fss/`: utilita' compatibilita' e audit `.fss`
+- `tools/scale/`: blocco scala (riga `#21`), detector a tacche + consenso + stadio di pipeline
 - `tools/ultrasound/`: dataset/training/inferenza vendor-probe-rect + pipeline head `.fss`
 - `tools/line16/`: pipeline riga `#16` (template rect + parametri)
 - `tools/orientation/`: pipeline orientamento simbolico e review GUI
@@ -942,3 +943,57 @@ OldSoftwareEsiBuilder/.venv-mps/bin/python tools/ultrasound/train_ultrasound_lt_
   --image-size 320 \
   --pretrained
 ```
+
+## 17) Scala nella pipeline ufficiale (righe `#18`-`#21`)
+
+Lo studio della scala gira come stadio della pipeline, subito dopo RECT_DEPTH (la riga `#21`
+e' per depth, e i gruppi di depth li definisce `#17`). Lo stadio **non ricalcola** vendor,
+verso su/giu', rect o depth: li riceve dagli stadi precedenti sugli stessi frame.
+
+Attivo per default nella pipeline. Per tornare al comportamento precedente:
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/ultrasound/predict_fss_head_from_acquisitions.py \
+  --dataset-root "Dataset L_T" \
+  --disable-scale-stage \
+  ... (resto dei parametri come al solito)
+```
+
+Parametri dedicati: `--scale-max-frames` (48), `--scale-min-accepted-ratio` (0.80),
+`--scale-subprocess-timeout-sec` (900), `--scale-corrections`.
+
+Per ogni cartella lo stadio lascia in `<output-dir>/scale/NNNN_<cartella>_<hash>/`:
+
+- `pipeline_context.json` — le evidenze passate (frame, verso, rect, depth)
+- `scale_per_image.csv` — colonna, zero, estremo, mm/px, passo, tacche, numeri, controprove
+- `scale_per_depth.csv` — la risposta consolidata per depth, con `source` e quanti frame hanno votato
+- `scale_lines.json` — le righe `#18`/`#19`/`#20`/`#21`
+- `summary.json` — contatori, zona del righello, review reasons
+
+### 17.1 Rivedere e correggere le predizioni della pipeline
+
+La pagina a sei stadi mostra le predizioni **della pipeline** invece di ricalcolarle:
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/scale/study_scale_folder.py \
+  --from-pipeline artifacts/10_active_pipeline/pipeline_fss_head/runs/<run>/scale/0001_<cartella>_<hash> \
+  --open
+```
+
+Le correzioni esportate dalla pagina rientrano nella pipeline con `--scale-corrections`: da li'
+viene usata **solo la colonna** del righello (e' un fatto di cartella), e il summary lo dichiara
+(`corrections_applied`). Le correzioni per singolo frame restano nella pagina, dove si vedono.
+
+### 17.2 Self-test senza SSD
+
+Righelli sintetici con verita' esatta: nessuna rete, nessun `.fss`, solo cv2 + Tesseract.
+Da lanciare dopo ogni modifica allo stadio o al detector.
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/scale/selftest_predict_scale_from_pipeline.py
+```
+
+Copre: caso normale, acquisizione ribaltata (zero in basso), depth senza righello (riempita dal
+trend) e l'innesto nella pipeline (il verso deve arrivare dal marker, non dalla rete).
+
+Dettagli e ritrovamenti aperti: `docs/scala_integrazione_pipeline_2026-08-08.md`.
