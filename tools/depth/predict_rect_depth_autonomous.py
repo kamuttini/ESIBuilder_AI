@@ -4248,7 +4248,11 @@ def _prediction_rows(rows: Sequence[Dict[str, object]]) -> List[Dict[str, object
 def predict(args: argparse.Namespace) -> Dict[str, object]:
     folder = args.folder.expanduser().resolve()
     image_dir = folder / "image_samples" if (folder / "image_samples").is_dir() else folder
-    images = iter_images(image_dir)
+    # Frames often live in sub-directories (L/, T/, "DEPTH TUTTE/"): scan recursively
+    # so RECT_DEPTH works when the pipeline passes the top acquisition folder.
+    images = iter_images(image_dir, recursive=True)
+    if not images:
+        images = iter_images(image_dir, recursive=False)
     if args.max_images and len(images) > args.max_images:
         images = images[: int(args.max_images)]
     if not images:

@@ -99,7 +99,9 @@ Policy trasversale bassa confidenza (`--low-confidence-policy`, default `ask_use
 ## 11. Stadi per-frame ausiliari
 
 - **SU/GIU** (:1218): classificatore sui crop rect, maggioranza + prob medie.
-- **LR marker** (:7659): metodo default `bundle` (template matching, `--lr-marker-min-match-score` 0.62, soglie di espansione ricerca, vendor esclusi: Biopsee).
+- **LR marker** (:8062, `_bundle_predict_lr_marker_on_su_giu_rows` :3863): metodo default `bundle` (template matching sui crop rect, **a valle dello SU/GIU**), `--lr-marker-min-match-score` 0.62, soglie di espansione ricerca, vendor esclusi: Biopsee. Usa il bundle `artifacts/41_orientation_marker_detector_bundle` (stesso di `predict_marker_envelopes_batch.py`). **Migliorie 2026-07-22** (vedi `docs/orientation_marker_processo_2026-07-09.md`): gate anti-nero, risoluzione ambiguità e banca template arricchita sono ereditati dal bundle; **multi-scala** e **template pinnati** via due nuovi argomenti:
+  - `--lr-marker-scales` (default `"1.0"` = storico; consigliato `"0.75,1.0,1.3,1.7,2.2"`): scale del template provate in selezione e per-immagine (il glifo cambia dimensione tra ecografi).
+  - `--lr-marker-pinned-templates <json>`: mappa cartella→template verificati dalla review umana; vincono per-immagine solo con doppia soglia (score `>=0.90` + margine `+0.03`), quindi mai regressivi. Default assente = storico.
 - **L/T** (:4224): classificatore sui crop rect, soglia `--lt-min-confidence` 0.55 → review reason `low_lt_conf`.
 
 ## 12. Riga #16 RECT_ORIENTATION (`_build_line16_rect_orientation_from_lr_marker_rows` :4100)

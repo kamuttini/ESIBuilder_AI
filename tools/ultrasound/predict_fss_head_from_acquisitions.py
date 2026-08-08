@@ -3879,6 +3879,8 @@ def _bundle_predict_lr_marker_on_su_giu_rows(
     expected_groups_by_image_path: Optional[Dict[str, str]] = None,
     expected_groups_by_image_index: Optional[Dict[str, str]] = None,
     template_policy: str = "bundle_historical_best",
+    scales: Sequence[float] = (1.0,),
+    pinned_templates: Optional[Sequence[str]] = None,
 ) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
     bundle_root = _ensure_orientation_marker_bundle_import(bundle_dir=bundle_dir, bundle_zip=bundle_zip)
     if bundle_root is None:
@@ -3960,6 +3962,8 @@ def _bundle_predict_lr_marker_on_su_giu_rows(
             library_root=effective_library_root,
             params=params,
             selection_images=max(1, int(selection_images)),
+            scales=tuple(float(s) for s in scales) or (1.0,),
+            pinned_templates=list(pinned_templates or []),
         )
     except Exception as exc:
         return [], {"available": True, "error": f"bundle_analysis_failed:{exc}", "bundle_root": bundle_root.as_posix()}
@@ -6307,6 +6311,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=18,
         help="Numero immagini usate dal bundle per scegliere il miglior template storico del vendor.",
     )
+    parser.add_argument(
+        "--lr-marker-scales",
+        type=str,
+        default="1.0",
+        help="Scale del template provate in selezione e per-immagine (la dimensione del marker "
+             "varia tra ecografi/frame). Es. '0.75,1.0,1.3,1.7,2.2'. Default '1.0' = comportamento storico.",
+    )
+    parser.add_argument(
+        "--lr-marker-pinned-templates",
+        type=Path,
+        default=None,
+        help="JSON: nome-cartella -> [vendor/marker_NNN.png, ...] template verificati dalla review umana. "
+             "Provati per-immagine accanto al template automatico; vincono solo con score alto e margine.",
+    )
     parser.add_argument("--lr-marker-max-config-depth", type=int, default=4)
     parser.add_argument("--lr-marker-min-match-score", type=float, default=LR_MARKER_RELIABLE_MATCH_SCORE)
     parser.add_argument("--lr-marker-full-crop-fallback-threshold", type=float, default=0.55)
@@ -6893,6 +6911,23 @@ def main() -> int:
         if _lr_marker_parse_float_steps is not None
         else tuple()
     )
+    lr_marker_scales = tuple(
+        float(s) for s in str(args.lr_marker_scales).split(",") if s.strip()
+    ) or (1.0,)
+    lr_marker_pinned_map: Dict[str, List[str]] = {}
+    if args.lr_marker_pinned_templates is not None:
+        pinned_path = args.lr_marker_pinned_templates.expanduser().resolve()
+        if pinned_path.is_file():
+            try:
+                raw_pinned = json.loads(pinned_path.read_text(encoding="utf-8"))
+                lr_marker_pinned_map = {
+                    str(k): [str(x) for x in v]
+                    for k, v in raw_pinned.items()
+                    if isinstance(v, list) and not str(k).startswith("_")
+                }
+                print(f"[lr-marker] pinned templates: {len(lr_marker_pinned_map)} folders", flush=True)
+            except Exception as exc:
+                print(f"[lr-marker] WARN cannot read pinned templates {pinned_path}: {exc}", flush=True)
     rect_red_by_folder: Dict[str, Dict[str, object]] = {}
     rect_vendor_map_path: Optional[Path] = None
     rect_vendor_map_loaded: Dict[str, str] = {}
@@ -8040,6 +8075,8 @@ def main() -> int:
                 target_image_width=int(out_video_x or 0),
                 target_image_height=int(out_video_y or 0),
                 template_policy="bundle_historical_best",
+                scales=lr_marker_scales,
+                pinned_templates=lr_marker_pinned_map.get(folder.name, []),
             )
             historical_bundle_meta = dict(bundle_meta)
             bundle_policy_effective = "bundle_historical_best"

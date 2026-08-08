@@ -43,6 +43,12 @@ DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR = REPO_ROOT / "artifacts/41_orientation_ma
 DEFAULT_ORIENTATION_MARKER_BUNDLE_LIBRARY_ROOT = (
     DEFAULT_ORIENTATION_MARKER_BUNDLE_DIR / "orientation_marker_detector" / "templates"
 )
+# Marker migliorato 2026-07: multi-scala attivo di default nel workbench (interattivo)
+# e mappa template pinnati dalle correzioni umane, se presente.
+DEFAULT_LR_MARKER_SCALES = "0.75,1.0,1.3,1.7,2.2"
+DEFAULT_LR_MARKER_PINNED_TEMPLATES = (
+    REPO_ROOT / "artifacts/44_orientation_rerun_after_corrections/pinned_templates.json"
+)
 
 
 def _safe_float(value: str, default: float = 0.0) -> float:
@@ -3452,6 +3458,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="JSON opzionale con template LR marker storici accettati/scartati per vendor.",
     )
     p.add_argument(
+        "--lr-marker-scales",
+        type=str,
+        default=DEFAULT_LR_MARKER_SCALES,
+        help="Scale del template marker provate in selezione e per-immagine (default multi-scala).",
+    )
+    p.add_argument(
+        "--lr-marker-pinned-templates",
+        type=Path,
+        default=DEFAULT_LR_MARKER_PINNED_TEMPLATES,
+        help="JSON cartella->template verificati dalla review (pin). Vuoto o inesistente = disattivato.",
+    )
+    p.add_argument(
         "--lt-min-confidence",
         type=float,
         default=0.55,
@@ -3713,6 +3731,12 @@ def main() -> int:
         "--scale-subprocess-timeout-sec",
         str(float(args.scale_subprocess_timeout_sec)),
     ]
+    if str(args.lr_marker_scales).strip():
+        cmd.extend(["--lr-marker-scales", str(args.lr_marker_scales).strip()])
+    if args.lr_marker_pinned_templates is not None:
+        pinned_path = args.lr_marker_pinned_templates.expanduser().resolve()
+        if pinned_path.is_file():
+            cmd.extend(["--lr-marker-pinned-templates", pinned_path.as_posix()])
     if args.lr_marker_manual_seeds_file is not None:
         cmd.extend([
             "--lr-marker-manual-seeds-file",

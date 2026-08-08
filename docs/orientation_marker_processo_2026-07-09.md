@@ -79,3 +79,79 @@ e può **cambiare dimensione** tra immagini della stessa cartella (matching mult
 - Quota marker dentro il box legacy del gruppo predetto.
 - Review rate (policy confidenza: mai forzare predizioni incerte).
 - Target di produzione da definire a valle della taratura soglie sul run completo.
+
+---
+
+## Aggiornamento 2026-07-22 — detector migliorato dalle correzioni umane + integrazione pipeline
+
+Sessione con Camilla: run completo su tutte le 272 cartelle di `SSD_esi1_n3`
+(runner `predict_marker_envelopes_batch.py` chained sugli output official-stages),
+review umana nella gallery, e conseguente miglioramento del detector con criterio
+**zero regressioni** (confronto per-cartella vecchio/nuovo — mai peggiorare ciò che
+già funzionava).
+
+### Miglioramenti al bundle detector (`detector.py`, condiviso da runner e pipeline)
+
+1. **Gate di plausibilità patch** (`_patch_is_plausible` in `_match_template_exact`):
+   l'NCC normalizzato può dare picchi spuri su zone nere/piatte (sfondo, aree di
+   esclusione azzerate). Un match è valido solo se la zona ha `std >= 5` e `max >= 40`;
+   altrimenti si passa al picco di correlazione successivo (fino a 6 tentativi).
+   Risolve i casi "template sempre nero" (Esaote 114/115/237/238, GE 13).
+2. **Matching multi-scala** (`_rescale_template`, param `scales` in `detect_marker`,
+   `select_best_template`, `analyze_images`): il glifo del marker cambia dimensione tra
+   ecografi/frame. Selezione a due passate (tutti i template a scala 1.0 → top-K anche
+   alle altre scale) + per-immagine sulla scala vincente. Scale di default
+   `0.75,1.0,1.3,1.7,2.2`. Risolve i GE dove il marker reale era ~36-63px contro
+   template da ~28px.
+3. **Risoluzione ambiguità** (in `detect_marker`): quando entrambe le metà falliscono
+   ma il match finale è forte (`>= expanded_threshold`), il quadrante si risolve dalla
+   posizione del marker invece di finire in review. Recupera i marker trovati fuori dal
+   rettangolo (cartelle 224, 124, 165).
+
+### Banca template arricchita dalla review
+
+- Nuovo tool `tools/orientation/harvest_marker_templates_from_review.py`: dai box
+  ridisegnati a mano nella gallery (CSV `review_marker_correzioni.csv`) ritaglia le
+  regioni verificate e le aggiunge alla banca del vendor, deduplicando (correlazione
+  >= 0.90) contro banca e harvest stesso. Aggiorna `review_decisions.json`
+  (lista `accepted` + `maintenance_log`), quindi `load_vendor_templates` le usa subito.
+- Sessione 2026-07-15: aggiunti **51 template** (19 Esaote, 22 GE, 4 BK, 3 Hitachi,
+  3 Philips) dai 112 box corretti dall'utente.
+- Attenzione: la dir GE su disco si chiama `Ge` — il matching path è case-insensitive.
+
+### Template pinnati dalla review (`--pinned-templates`)
+
+- Mappa `cartella -> [vendor/marker_NNN.png, ...]`
+  (`artifacts/44_orientation_rerun_after_corrections/pinned_templates.json`): i template
+  raccolti da UNA cartella vengono provati per-immagine su quella cartella accanto a
+  quello auto-selezionato. Vincono **solo con doppia soglia**: score assoluto `>= 0.90`
+  E superiore al match automatico di `+0.03` di margine. Così non possono mai peggiorare
+  un frame, e le cartelle senza pin si comportano esattamente come prima.
+- Distinguere il vendor: se la CNN vendor ha confidenza bassa (`< 0.35`) non sovrascrive
+  più il nome cartella quando questo risolve a un vendor con banca (fix 165.Mindray, che
+  la CNN dava "ExactVu" @0.14).
+
+### Risultato validato (31 cartelle annotate)
+
+- Box umani agganciati: da **71/112 a 97/112**, **zero regressioni** per-cartella.
+- Review rate medio sulle annotate: 36% → 3%.
+
+### Integrazione nella pipeline ufficiale (2026-07-22)
+
+Lo stage marker era **già** nella pipeline dopo lo SU/GIU
+(`_bundle_predict_lr_marker_on_su_giu_rows` in
+`tools/ultrasound/predict_fss_head_from_acquisitions.py`, importa lo stesso bundle).
+Gate anti-nero, risoluzione ambiguità e i 51 template raccolti erano già ereditati.
+Aggiunti i due miglioramenti mancanti tramite `analyze_images` (esteso con `scales` +
+`pinned_templates`, backward-compatible), esposti da due nuovi argomenti CLI:
+
+```bash
+--lr-marker-scales "0.75,1.0,1.3,1.7,2.2" \
+--lr-marker-pinned-templates artifacts/44_orientation_rerun_after_corrections/pinned_templates.json
+```
+
+Senza flag → comportamento storico invariato. Smoke test pipeline completa su cartella
+233: 63→93 immagini `ok`, i template pinnati 114/116/117/118 attivati, riga #16 più
+accurata. Nota: la mappa pin è specifica del volume n3 (chiavi = nomi cartella di quel
+dataset); su cartelle nuove i pin restano inerti — il beneficio dei pin è retroattivo,
+multi-scala e template raccolti sono invece migliorie generali.

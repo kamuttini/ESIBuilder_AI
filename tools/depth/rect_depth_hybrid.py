@@ -340,12 +340,22 @@ def find_config_dirs(root: Path) -> Iterable[Path]:
             dirnames[:] = []
 
 
-def iter_images(image_dir: Path) -> List[Path]:
+def iter_images(image_dir: Path, recursive: bool = False) -> List[Path]:
     if (image_dir / "image_samples").is_dir():
         image_dir = image_dir / "image_samples"
+    # Recursive scan is needed when the pipeline points RECT_DEPTH at a top folder
+    # whose frames live in sub-directories (e.g. L/, T/, "DEPTH TUTTE/"); the
+    # non-recursive default preserves the historical leaf-folder behaviour.
+    globber = image_dir.rglob if recursive else image_dir.glob
+    skip_dirs = {"proibite", "db_echo", "db_setup", "updateesiconfiguration", "__pycache__"}
     out: List[Path] = []
     for ext in IMAGE_EXTS:
-        out.extend(p for p in image_dir.glob(f"*{ext}") if p.is_file() and not p.name.startswith("._"))
+        for p in globber(f"*{ext}"):
+            if not p.is_file() or p.name.startswith("._"):
+                continue
+            if recursive and any(part.lower() in skip_dirs for part in p.relative_to(image_dir).parts[:-1]):
+                continue
+            out.append(p)
     def priority(p: Path) -> Tuple[int, str]:
         name = p.name.lower()
         if name.startswith("image_depth_"):

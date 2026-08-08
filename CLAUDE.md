@@ -38,7 +38,7 @@ Automazione della configurazione ecografi per ESI: riconoscimento automatico da 
 | Rect | Pronto produzione | mean IoU test 0.9174 |
 | Rect_depth | Modulo autonomo pronto, da integrare | checkpoint `docs/rect_depth_autonomous_checkpoint_2026-07-02.md` |
 | Scala | Workflow pronto, backlog GT da smaltire | coda P0=34, P1=49 |
-| Orientation | NON a livello produzione | trainer da riscrivere (rimosso) |
+| Orientation | Marker integrato in pipeline (dopo SU/GIU) | 97/112 box su review, zero regressioni; multi-scala + template pinnati/raccolti; trainer a rete ancora da rifare |
 | Piano L/T | Dataset tools pronti, rete da consolidare | priorità alta per il collega |
 | Pipeline fss_head | Integrata (vendor+probe+rect+depth+scala), smoke ok | manca validazione batch reale |
 

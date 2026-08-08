@@ -946,7 +946,192 @@ OldSoftwareEsiBuilder/.venv-mps/bin/python tools/ultrasound/train_ultrasound_lt_
   --pretrained
 ```
 
-## 17) Scala nella pipeline ufficiale (righe `#18`-`#21`)
+## 17) Studio orientamento marker su cartelle raw + review + banca template (2026-07)
+
+Pipeline a 3 script per lo studio marker/orientamento su un volume grezzo (es.
+`SSD_esi1_n3`), con banca template storica per vendor e detector migliorato dalle
+correzioni umane. Dettaglio completo in `docs/orientation_marker_processo_2026-07-09.md`.
+
+### 17.1 Stadi ufficiali (vendor/rect/SU-GIU) per cartella
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/orientation/official_stages_batch.py \
+  --dataset-root "/Volumes/SSD_esi1_n3/ACQUISITION ELABORATION" \
+  --output-dir artifacts/45_orientation_full_v2/run1/official_stages \
+  --device mps --max-images-per-folder 200 --resume --time-budget 0
+```
+
+Riusa le funzioni/modelli di `predict_fss_head_from_acquisitions.py` con checkpoint
+image-level (stop/resume). Produce `official_per_image.csv` (rect + su/giu),
+`official_folder.csv` (vendor, #11, #13). `--max-images-per-folder N` campiona a stride
+uniforme le immagini della risoluzione dominante (uniformi per cartella).
+
+### 17.2 Marker + envelope orientamento (chained sugli stadi ufficiali)
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/orientation/predict_marker_envelopes_batch.py \
+  --dataset-root "/Volumes/SSD_esi1_n3/ACQUISITION ELABORATION" \
+  --output-dir artifacts/45_orientation_full_v2/run1 \
+  --official-stages-dir artifacts/45_orientation_full_v2/run1/official_stages \
+  --bundle-dir artifacts/41_orientation_marker_detector_bundle \
+  --pinned-templates artifacts/44_orientation_rerun_after_corrections/pinned_templates.json \
+  --max-images-per-folder 200 --resume --time-budget 0
+```
+
+Template matching (bundle `orientation_marker_detector`) nella meta' predetta dallo
+SU/GIU, con multi-scala, gate anti-nero e risoluzione ambiguita'. `--pinned-templates`
+(mappa cartella->template verificati dalla review) vince per-immagine solo con doppia
+soglia (`--pinned-min-score` 0.90 + `--pinned-margin` 0.03) -> mai regressivo.
+Output: `per_image_predictions.csv`, `folder_envelopes.csv`, `folder_summary.csv`.
+
+### 17.3 Gallery HTML di review
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/orientation/build_marker_envelope_review_gallery.py \
+  --run-dir artifacts/45_orientation_full_v2/run1 \
+  --dataset-root-href "/Volumes/SSD_esi1_n3/ACQUISITION ELABORATION" \
+  --official-run-dir artifacts/45_orientation_full_v2/run1/official_stages
+```
+
+Genera `review_gallery/index.html` (indice con spunta "rivista" + review rate ricalcolato)
+e `folders/NNNN.html` (immagini ordinate per match score crescente, esclusione
+singola/di cartella con ricalcolo envelope, box corretto con Shift+trascina, "immagine
+grezza", commenti). Non copia immagini: referenzia gli originali via `file://`. Stato
+salvato in `localStorage`; export CSV correzioni (commenti + box + esclusioni + spunte).
+
+### 17.4 Harvest template dai box corretti a mano
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/orientation/harvest_marker_templates_from_review.py \
+  --corrections-csv ~/Downloads/review_marker_correzioni.csv \
+  --run-dir artifacts/45_orientation_full_v2/run1 \
+  --dataset-root "/Volumes/SSD_esi1_n3/ACQUISITION ELABORATION" \
+  --library-root artifacts/41_orientation_marker_detector_bundle/orientation_marker_detector/templates
+```
+
+Ritaglia i box ridisegnati dalla review, li aggiunge alla banca del vendor (dedup
+correlazione >= 0.90), aggiorna `review_decisions.json`. Ciclo di miglioramento:
+review -> export CSV -> harvest -> aggiorna mappa pinned -> rerun -> verifica no-regressioni.
+
+## 18) Blocco scala (riga 21 `SCALE_LINE`) - `tools/scale/`
+
+Modulo introdotto il 2026-07-29 che sostituisce l'approccio a regressione di
+`tools/fss/train_scale_*`. Strategia e risultati in
+`docs/scala_strategia_per_vendor_2026-07-29.md`.
+
+- `scale_common.py` - parsing `.fss` per il blocco scala (righe 11, 18, 19, 20, 21),
+  inferenza vendor, risoluzione dell'immagine per indice di depth. **`y1` della riga 21
+  e' il punto zero**, non il punto piu' in alto: nel 21.7% del corpus `y1 > y2`.
+- `audit_scale_gt.py` - audit e caratterizzazione per vendor della GT.
+- `detect_scale_ladder.py` - detector deterministico: tacche -> griglia -> OCR dei numeri
+  -> calibrazione `mm_per_px` + zero. `ScaleProfile` contiene i prior per vendor.
+- `eval_scale_detector.py` - metriche per vendor + gallery HTML di review.
+
+### Audit della GT
+
+```bash
+python3 tools/scale/audit_scale_gt.py \
+  --root /Volumes/SSD_esi1_n1 \
+  --output-dir artifacts/37_scale_gt_audit_20260729
+```
+
+Produce `scale_gt_rows.csv` (tutte le righe con `status` e `failures`),
+`scale_gt_rows_clean.csv` (solo le coerenti, input dell'eval),
+`scale_gt_profiles.{json,md}` (profili per vendor) e `summary.json`.
+
+### Eval del detector
+
+```bash
+# un solo vendor, con gallery di review
+python3 tools/scale/eval_scale_detector.py \
+  --gt artifacts/37_scale_gt_audit_20260729/scale_gt_rows_clean.csv \
+  --output-dir artifacts/38_scale_ladder_eval_20260729/bk \
+  --vendor BK --max-rows 90 --max-per-folder 2
+
+# tutti i vendor, una riga per cartella
+python3 tools/scale/eval_scale_detector.py \
+  --gt artifacts/37_scale_gt_audit_20260729/scale_gt_rows_clean.csv \
+  --output-dir artifacts/38_scale_ladder_eval_20260729/multivendor \
+  --max-rows 90 --max-per-folder 1
+```
+
+`--path-remap OLD=NEW` riscrive il prefisso dei path immagine quando il volume SSD e'
+montato altrove. `--no-gallery` salta il rendering delle preview (piu' veloce).
+
+Metriche riportate per vendor: `rel_err_mm_per_px` (<= 2%), `err_x_px` (<= 6),
+`err_y_zero_px` (<= 8), `direction_ok`, e `strict_ok` = tutte e quattro. Le versioni
+`*_on_accepted` sono quelle che contano per la policy "l'AI propone, l'utente conferma".
+
+### Consenso a livello di setup
+
+`consolidate_scale_setup.py` aggrega le predizioni di tutte le depth di un setup: voto di
+maggioranza sul verso, trend robusto (Theil-Sen) su `mm_per_px` / `x` / `y_zero`, e
+riempimento delle depth in cui il righello non e' stato trovato. E' il modo in cui il blocco
+va usato in produzione, perche' l'utente configura una cartella e non un frame.
+
+```bash
+python3 tools/scale/eval_scale_detector.py \
+  --gt artifacts/37_scale_gt_audit_20260729/scale_gt_rows_clean.csv \
+  --output-dir artifacts/38_scale_ladder_eval_20260729/bk_consensus \
+  --vendor BK --consensus --max-rows 95
+```
+
+In modalita' `--consensus` il campionamento passa da righe a **setup interi**
+(`--max-per-folder` viene ignorato, `--max-setups` limita il numero di setup). La colonna
+`source` in `predictions.csv` dice come e' stata ottenuta ogni riga: `detected`,
+`corrected` (riportata sul trend del setup), `interpolated` (dedotta dai vicini) o `none`.
+
+Attenzione: `mm_per_px` varia di un fattore ~4.6 dentro un setup, quindi non esiste un
+valore "di cartella" - l'invariante e' il trend, non il livello. Vedi i commenti in testa
+a `consolidate_scale_setup.py` per le tolleranze e per due approcci che sono stati provati
+e non funzionano (mediana globale del setup, mediana locale su `y_zero`).
+
+### Reti heatmap per vendor (sostituiscono la soglia nella detection)
+
+Il training gira **sul Mac** con MPS: vedi `docs/scala_training_reti_runbook.md` per i
+comandi completi. Target = heatmap 1-D sulla colonna del righello + heatmap sullo zero +
+`log(mm_per_px * altezza)` + verso. Non i 3 scalari `(x, y_top, y_bottom)` che avevano
+fallito nelle run `32_`/`34_`/`36_`: quel target era per meta' rumore e non supervisionava
+la localizzazione.
+
+```bash
+# dataset a supervisione densa, split leak-free per cartella
+python3 tools/scale/prepare_scale_heatmap_dataset.py \
+  --gt artifacts/37_scale_gt_audit_20260729/scale_gt_rows_clean.csv \
+  --output-dir artifacts/39_scale_heatmap_dataset_20260729
+
+# validazione della pipeline dati, non richiede torch
+python3 tools/scale/train_scale_heatmap.py --check-data \
+  --manifest artifacts/39_scale_heatmap_dataset_20260729/manifests/manifest_scale_heatmap_bk.csv
+
+# training (sul Mac)
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/scale/train_scale_heatmap.py \
+  --dataset-dir artifacts/39_scale_heatmap_dataset_20260729 \
+  --output-root artifacts/40_scale_heatmap_models_20260729 --all-eligible --epochs 40
+
+# eval della catena completa con la rete come prior
+python3 tools/scale/eval_scale_detector.py \
+  --gt artifacts/37_scale_gt_audit_20260729/scale_gt_rows_clean.csv \
+  --output-dir artifacts/41_scale_chain_eval/bk_con_rete \
+  --vendor BK --consensus --heatmap-models artifacts/40_scale_heatmap_models_20260729
+```
+
+`heatmap_codec.py` contiene encode/decode in numpy puro (testabile senza torch);
+`predict_scale_heatmap.py` l'inferenza e il registry vendor->modello con fallback
+`default`. Se i modelli mancano o torch non c'e', `--heatmap-models` avvisa e la pipeline
+gira classica.
+
+Il flag `--drop-fusion` di `prepare_scale_heatmap_dataset.py` produce la variante senza le
+acquisizioni fusion (389 righe su 5210). Serve per l'A/B descritto nel runbook: sulle
+fusion ci sono due righelli e il target ha un solo picco, ma l'etichetta resta esatta,
+quindi se escluderle convenga o no e' una misura, non una scelta di principio.
+
+`--eval-only <checkpoint> --manifest <csv> --eval-split test` valuta un modello gia'
+addestrato su un manifest qualunque. E' indispensabile per confrontare due run: senza di
+esso i due bracci finirebbero misurati su test set diversi e la differenza non direbbe
+nulla.
+
+## 19) Scala nella pipeline ufficiale (righe `#18`-`#21`)
 
 Lo studio della scala gira come stadio della pipeline, subito dopo RECT_DEPTH (la riga `#21`
 e' per depth, e i gruppi di depth li definisce `#17`). Lo stadio **non ricalcola** vendor,
@@ -972,7 +1157,7 @@ Per ogni cartella lo stadio lascia in `<output-dir>/scale/NNNN_<cartella>_<hash>
 - `scale_lines.json` — le righe `#18`/`#19`/`#20`/`#21`
 - `summary.json` — contatori, zona del righello, review reasons
 
-### 17.1 Rivedere e correggere le predizioni della pipeline
+### 19.1 Rivedere e correggere le predizioni della pipeline
 
 La pagina a sei stadi mostra le predizioni **della pipeline** invece di ricalcolarle:
 
@@ -986,7 +1171,7 @@ Le correzioni esportate dalla pagina rientrano nella pipeline con `--scale-corre
 viene usata **solo la colonna** del righello (e' un fatto di cartella), e il summary lo dichiara
 (`corrections_applied`). Le correzioni per singolo frame restano nella pagina, dove si vedono.
 
-### 17.2 Self-test senza SSD
+### 19.2 Self-test senza SSD
 
 Righelli sintetici con verita' esatta: nessuna rete, nessun `.fss`, solo cv2 + Tesseract.
 Da lanciare dopo ogni modifica allo stadio o al detector.
@@ -1000,7 +1185,7 @@ trend) e l'innesto nella pipeline (il verso deve arrivare dal marker, non dalla 
 
 Dettagli e ritrovamenti aperti: `docs/scala_integrazione_pipeline_2026-08-08.md`.
 
-## 18) Revisione snella della pipeline (web) + feedback
+## 20) Revisione snella della pipeline (web) + feedback
 
 Tool per far girare la pipeline sulle cartelle scelte, guardare tutte le elaborazioni su ogni
 immagine, correggere a mano e mandare i commenti a Claude Code in forma utilizzabile. Non
@@ -1029,7 +1214,7 @@ ogni stadio). Senza il flag l'output e' identico a prima.
 
 Dettagli: `tools/review/README.md`, `docs/tool_revisione_snella_2026-08-08.md`.
 
-## 19) Monitor stato progetto (dashboard pipeline `.fss`)
+## 21) Monitor stato progetto (dashboard pipeline `.fss`)
 
 Raccoglie automaticamente le metriche sparse in `artifacts/` e genera una dashboard
 HTML autocontenuta con uno spazio dedicato per ogni step della pipeline `.fss`,

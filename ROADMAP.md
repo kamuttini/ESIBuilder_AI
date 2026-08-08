@@ -19,15 +19,34 @@ Non ancora a livello produzione: orientation simbolico (trainer da riscrivere), 
 
 ## Fase 1 — Consolidamento orientation + scala (priorità scelta, ~2-4 settimane)
 
-Scala:
-- [ ] Smaltire coda correzioni GT P0 (34) e P1 (49) con i tool di review esistenti
-- [ ] Retraining modello scala su GT corretto, eval su set completo leak-free
-- [ ] Definire soglia di accettazione (es. % accepted per cartella) e criterio di uscita fase
+Scala — **ripartita il 2026-07-29 su basi nuove**, vedi `docs/scala_strategia_per_vendor_2026-07-29.md`:
+- [x] Audit completo della GT per vendor (`artifacts/37_scale_gt_audit_20260729/`): 5290 righe, **98.5% coerenti**
+- [x] Semantica della riga 21 chiarita: `length_mm` è la lunghezza del segmento (non la depth), `y1` è **lo zero** e nel 21.7% dei casi sta in basso
+- [x] Detector deterministico tacche + OCR (`tools/scale/detect_scale_ladder.py`) e harness di eval per vendor (`tools/scale/eval_scale_detector.py`)
+- [x] Prima eval BK + multivendor con gallery (`artifacts/38_scale_ladder_eval_20260729/`): verso corretto 27/27 sugli accepted BK, `mm_per_px` mediano allo 0.34%
+- [x] **Consenso a livello di setup** (`tools/scale/consolidate_scale_setup.py`): voto sul verso, trend robusto Theil-Sen su `mm_per_px`/`x`/`y_zero`, riempimento dei buchi. Chiude il bloccante della policy di confidenza — errore max su `mm_per_px` da **519% a 19.8%**, media da 40.9% a 1.79%, `strict_ok` sugli accepted da 33% a 62%, `err_y_zero` mediano da 28 px a 0.5 px
+- [ ] **Copertura del righello — unico collo di bottiglia rimasto**: 35 righe su 95 (BK) e 50 su 91 (Esaote) sono setup interi senza alcun agganciamento
+  - [x] Reti heatmap per vendor: dataset a supervisione densa (`artifacts/39_scale_heatmap_dataset_20260729`, 5210 righe, split leak-free, 6 vendor eleggibili), trainer (`tools/scale/train_scale_heatmap.py`), inferenza e aggancio al detector. Target: heatmap su colonna + zero, `log_span_mm`, verso — **non** i 3 scalari che avevano fallito
+  - [ ] **Da eseguire sul Mac (serve MPS)**: vedi `docs/scala_training_reti_runbook.md`
+  - [ ] Misurare la catena con e senza rete sullo stesso harness: il successo si vede nel crollo di `source = none`
+  - [ ] Alternativa/complemento economico: top-hat orizzontale e `min_ticks` per vendor (su BK FlexFocus Template grid le tacche visibili sono 3)
+- [ ] Estendere la misura del consenso oltre i 6-8 setup per vendor attuali
+- [ ] Ancora sull'unità `cm` nell'OCR — utile ma **non** risolve BK Profocus/FlexFocus, dove l'etichetta accanto allo zero non esiste
+- [ ] Layout multi-pannello (fusion/biplana): vincolare il righello al pannello del rect
+- [ ] Offset sistematico di `x` per vendor, da misurare dall'eval e mettere nel profilo
+- [ ] Criterio di uscita proposto: per vendor con ≥ 200 righe, `strict_ok` sugli accepted ≥ 95% e copertura accepted ≥ 70%
+- [ ] Verifica indipendente su `SSD_esi1_n3` (`ACQUISITION ELABORATION`), senza GT, con gallery
+- [x] ~~Smaltire coda correzioni GT P0 (34) e P1 (49)~~ — **derubricato**: l'audit mostra che la GT è al 98.5% coerente, il ritardo era nel modello
+- [ ] ~~Retraining regressori `32_`/`34_`/`36_`~~ — **abbandonato**: metà del loro target (`y_bottom`) è rumore di etichettatura umana
 
 Orientation:
-- [ ] Riscrivere il trainer del detector template orientamento (era stato rimosso)
+- [x] Run completo su 272 cartelle SSD_esi1_n3 + gallery di review (2026-07-15)
+- [x] Detector migliorato dalle correzioni umane: gate anti-nero, multi-scala, template pinnati, 51 template raccolti — 71→97/112 box, zero regressioni (2026-07-22, vedi `docs/orientation_marker_processo_2026-07-09.md`)
+- [x] Integrazione nella pipeline `fss_head` dopo lo SU/GIU (`--lr-marker-scales`, `--lr-marker-pinned-templates`) — smoke test ok (2026-07-22)
+- [ ] Vendor mancanti nella banca: Sonostar, ExactVu/Edap (2 cartelle su 272)
+- [ ] Casi immagini ruotate (es. 234.BK Florida): serve rotazione OSD, non applicata dai runner marker
+- [ ] Riscrivere il trainer del detector template orientamento (approccio a rete, alternativa al template-matching attuale)
 - [ ] Definire target IoU minimo di produzione e misurarlo su eval routed
-- [ ] Review dedicata con GUI `review_symbol_rects_gui.py` sui casi peggiori
 
 Criterio di chiusura fase: orientation e scala con metriche a livello degli altri blocchi e review rate accettabile.
 
