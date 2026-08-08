@@ -74,15 +74,18 @@ Tutto finisce in `feedback/inbox.jsonl`, una riga per voce, con il contesto comp
 
 La parte che nessun modulo può vedere da solo. Per ogni immagine il tool controlla:
 
-- il box della depth cade fuori dall'immagine, o dentro il rettangolo ecografico (sospetto);
+- il box della depth cade fuori dall'immagine, o in mezzo al settore lontano dai bordi
+  (l'etichetta sta nell'interfaccia, non dentro l'immagine ecografica);
 - depth e scala descrivono la stessa distanza? (`|y_far - y_zero| × mm_per_px` contro `depth_mm`);
-- il verso della scala concorda con il su/giù del marker;
+- il verso con cui la scala ha lavorato concorda con quello del classificatore su quel frame,
+  e lo zero non è stato spostato rispetto al verso ricevuto;
 - il rect di questa immagine si discosta dal `#11` di cartella (IoU);
 - la depth è un valore che nessun'altra immagine della cartella mostra;
 - la scala è `accepted` su evidenza debole (fuori banda, zona di cartella, calibrazione
   geometrica) — il modo di sbagliare che è tornato quattro volte su quattro;
 - le controprove che i moduli calcolano già (`zero_check`, `depth_check`), mostrate invece di
-  restare sepolte in un CSV.
+  restare sepolte in un CSV — "non verificabile" non viene segnalato, perché non è un difetto;
+- a livello cartella: la scala non ha prodotto nessuna `#21` benché la depth abbia risposto.
 
 Ogni incrocio nomina **le due aree che non si accordano**: è il seme dell'orchestratore.
 

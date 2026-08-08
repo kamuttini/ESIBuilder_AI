@@ -77,16 +77,16 @@ solo, e ognuno **nomina le due aree che non si accordano**:
 | controllo | cosa cattura |
 |---|---|
 | `depth_scala_mismatch` | `|y_far − y_zero| × mm_per_px` contro `depth_mm` oltre il 10% |
-| `depth_box_out_of_image` / `depth_box_inside_rect` | box letto fuori dall'immagine o dentro il settore |
-| `sugiu_scala_disagree` | il verso del righello contro quello del marker |
+| `depth_box_out_of_image` / `depth_box_inside_rect` | box letto fuori dall'immagine, o in mezzo al settore lontano dai bordi (l'etichetta sta nell'interfaccia) |
+| `sugiu_scala_disagree` / `scala_zero_moved` | il verso con cui la scala ha lavorato contro quello del classificatore su quel frame; e lo zero spostato rispetto al verso ricevuto |
 | `rect_per_image_far` | IoU del rect di immagine contro il `#11` di cartella |
 | `depth_outlier` | valore che nessun'altra immagine della cartella mostra |
 | `scala_weak_evidence` | `accepted` con righello fuori banda, zona di cartella, calibrazione geometrica |
-| `scala_zero_check` / `scala_depth_check` | le controprove che la scala già calcola, mostrate |
+| `scala_zero_check` / `scala_depth_check` | le controprove che la scala già calcola ("non verificabile" non è un problema: non si segnala) |
 
 `orchestrator.py` li aggrega su tutte le run insieme ai feedback, per vendor: prior di geometria
 (rect, colonna del righello, intervallo `mm_per_px`), strategia effettiva di ogni stadio, punti
-debloi per tag, e le **coppie di aree che litigano insieme**. Da qui:
+deboli per tag, e le **coppie di aree che litigano insieme**. Da qui:
 
 - un prior con supporto ≥8 e dispersione bassa diventa una proposta di banda di ricerca;
 - lo stesso tag su più vendor = problema di modulo; su un solo vendor = problema di profilo;
@@ -99,7 +99,10 @@ Ogni suggerimento porta il supporto: non decide niente da solo, propone e l'uman
 
 - Le correzioni non rientrano ancora **automaticamente** nella pipeline: l'export c'è, il
   riaggancio (`--scale-corrections`, `--lr-marker-manual-seeds-file`, retraining) resta manuale.
-- Il tool mostra il rect di ogni immagine solo se `step_checks.json` è completo (fine cartella).
+- Il tool mostra il rect di **ogni** immagine solo a cartella finita (serve `step_checks.json`);
+  durante la run si vede il `#11` di cartella su un frame campione.
+- `scala_no_answer` (depth trovate ma nessuna `#21`) è l'incrocio che è scattato subito sulle tre
+  cartelle di prova: è il collo di bottiglia vero, non un difetto del tool.
 - Il campionamento della depth su cartelle molto grandi va tarato: `depth_max_images=0` studia
   tutte le immagini e su 2000 frame costa.
 - Un pannello "diff fra due run sulla stessa cartella" sarebbe la verifica zero-regressioni
