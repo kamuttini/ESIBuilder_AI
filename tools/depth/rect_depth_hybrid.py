@@ -584,6 +584,10 @@ def _preprocess_ocr_image(im: Image.Image, max_side: int, variant: str) -> Image
     partly bright ultrasound background.
     """
     normalized = _normalize_for_ocr(im, max_side=max_side)
+    if variant == "invert":
+        # Interfacce con la riga selezionata: il testo e' scuro su barra chiara invece che
+        # chiaro su nero, e ogni passata tarata sul testo luminoso lo perde. Non serve cv2.
+        return ImageOps.invert(normalized.convert("L"))
     if variant == "base" or cv2 is None:
         return normalized
 
@@ -662,6 +666,16 @@ def _ocr_roi_boxes(
     add((0.615 * width, 0.94 * height, 0.74 * width, 0.987 * height))
     add((0.72 * width, 0.86 * height, width, height))
     add((0.80 * width, 0.90 * height, width, height))
+    # Compact tiles over the top interface strip. Several vendors (Esaote Nine) print
+    # `D <value> mm` there among other labels; a full-width crop comes back as a single
+    # fused line, so the strip is read in overlapping pieces instead.
+    strip_bottom = max(100.0, 0.13 * height)
+    tile_width = 440.0
+    step = 320.0
+    x = 0.0
+    while x < width:
+        add((x, 0, min(width, x + tile_width), strip_bottom))
+        x += step
     # Rare fallback for left-side scales.
     add((0, 0.86 * height, 0.32 * width, height))
     add((0, 0, 0.58 * width, 0.24 * height))
@@ -1217,11 +1231,23 @@ def collect_depth_tokens(
             except Exception:
                 pass
             for box in roi_boxes:
+                image_height = max(1, im.size[1])
+                band_height = box[3] - box[1]
                 psm_modes = ["6"]
-                if (box[3] - box[1]) <= max(230, int(0.22 * max(1, box[3]))):
+                if band_height <= max(230, int(0.22 * max(1, box[3]))):
                     psm_modes.append("7")
-                if box[1] >= 0.85 * max(1, im.size[1]) and (box[2] - box[0]) <= 460:
+                if box[1] >= 0.85 * image_height and (box[2] - box[0]) <= 460:
                     psm_modes.extend(["11", "13"])
+                elif band_height <= 0.30 * image_height and (
+                    box[1] <= 0.02 * image_height or box[3] >= 0.98 * image_height
+                ):
+                    # Sparse-token pass on the interface bands that hug the top or the
+                    # bottom edge. psm 6 reads such a band as a single line and glues the
+                    # depth label to its neighbours (Esaote Nine: "13-TELD162mm/M0FF/2"),
+                    # losing both the isolated `D` and the `mm` suffix. The compact tiles
+                    # added over the top strip give the same pass a crop tight enough to
+                    # keep the label's own box short.
+                    psm_modes.append("11")
                 for psm in psm_modes:
                     roi_words, _roi_scale = run_tesseract_tsv_region(
                         image_path,
