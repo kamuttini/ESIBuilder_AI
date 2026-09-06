@@ -748,3 +748,37 @@ img.depth-crop {
 .zoom-stage img { width: 100%; image-rendering: pixelated; }
 .editor-box.zoom-box { --box-color: #3fb950; cursor: move; }
 .editor-box.zoom-box .handle { width: 14px; height: 14px; }
+
+/* --- selettore di cartella: sfogliare invece di incollare il percorso ----------------- */
+.fullscreen.selettore { display: flex; flex-direction: column; gap: 10px; }
+.selettore-briciole { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.selettore-qui {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  color: var(--muted); overflow-wrap: anywhere;
+}
+.selettore-corpo {
+  display: grid; grid-template-columns: minmax(140px, 210px) minmax(0, 1fr); gap: 14px;
+  flex: 1; min-height: 0;
+}
+.selettore-lati { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+.selettore-radice {
+  display: flex; align-items: center; gap: 8px; text-align: left;
+  background: transparent; border: 1px solid transparent; color: var(--text);
+  font-weight: 400; padding: 5px 8px; border-radius: 6px; width: 100%;
+}
+.selettore-radice:hover { background: var(--panel-2); border-color: var(--line); }
+.selettore-elenco {
+  overflow-y: auto; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); padding: 4px;
+}
+/* Il nome ha la precedenza: con `1fr` puro la colonna dei conteggi si prendeva tutto lo
+   spazio e il nome della cartella spariva del tutto. */
+.selettore-riga {
+  display: grid; grid-template-columns: 14px minmax(80px, 1fr) auto; gap: 10px;
+  align-items: center; padding: 6px 9px; border-radius: 6px; cursor: pointer;
+}
+.selettore-riga .hint { white-space: nowrap; font-size: 11.5px; }
+.selettore-riga:hover { background: var(--panel-2); }
+.selettore-nome { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.selettore-icona { color: var(--muted); }
+.selettore-scelta { align-items: center; }

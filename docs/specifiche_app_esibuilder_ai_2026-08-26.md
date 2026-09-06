@@ -1551,3 +1551,26 @@ le altre; `depth_box_applications` tiene lo storico.
 si compila dallo step `depth_find`. Il collegamento non è ancora fatto perché `#17` è organizzata
 **per valore di depth** (un gruppo per ogni voce di `#18`, con due immagini per blocco) e va deciso
 quali due immagini per depth e con quale ordine.
+
+## 8-septendecies. La cartella si sceglie sfogliando
+
+Il percorso della cartella di acquisizioni si incollava a mano. Ora accanto al campo c'è
+`Sfoglia…`, che apre un selettore.
+
+Il browser non può dare il percorso vero di una cartella scelta con `<input type=file
+webkitdirectory>` — restituisce nomi relativi, e all'importer serve il percorso sul disco. Ma il
+server gira sulla stessa macchina dell'utente, quindi è lui a sfogliare: `GET /api/browse?path=…`
+restituisce le sottocartelle di un percorso, e senza `path` i punti di partenza.
+
+- **Punti di partenza**: home e Desktop/Documents/Downloads, i volumi montati (`/Volumes` su
+  macOS, le lettere di unità su Windows, `/media` e `/mnt` altrove) e le cartelle già usate negli
+  altri progetti, ciascuna insieme alla sua cartella madre — da lì si prende l'acquisizione
+  successiva, che di solito è quella accanto.
+- **Accanto a ogni cartella**: quante immagini contiene e quante sottocartelle ha. È quello che
+  serve per capire, senza aprirla, se è l'acquisizione giusta. Il conteggio è solo del livello
+  diretto: su un disco esterno con migliaia di file una conta ricorsiva costerebbe secondi per
+  ogni riga.
+- Il campo del percorso resta scrivibile e accetta Invio, per chi il percorso ce l'ha già.
+
+Niente di specifico per macOS: la stessa finestra funziona sul Windows dei colleghi, che è il
+motivo per cui non si è usato un selettore nativo di sistema.

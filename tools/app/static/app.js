@@ -292,7 +292,13 @@ function panelImport(panel) {
     type: 'text', value: value.folder || state.project.source.folder || '',
     placeholder: '/percorso/della/cartella/acquisizioni', style: 'width:520px',
   });
-  panel.append(el('div', {}, el('label', {}, 'Cartella acquisizioni'), input));
+  const sfoglia = el('button', { class: 'ghost' }, 'Sfoglia…');
+  sfoglia.addEventListener('click', () => apriSelettoreCartella({
+    start: input.value,
+    onPick: (percorso) => { input.value = percorso; },
+  }));
+  panel.append(el('div', {}, el('label', {}, 'Cartella acquisizioni'),
+    el('div', { class: 'row' }, input, sfoglia)));
 
   const status = el('span', { class: 'hint' }, 'la cartella grande su disco esterno richiede qualche minuto');
   const button = el('button', {});
@@ -2054,3 +2060,108 @@ async function panelGenerate(panel) {
 }
 
 boot().catch((error) => toast(error.message, true));
+
+
+/* --- scegliere la cartella sfogliando, invece di incollare il percorso ------------------
+
+   Il browser non puo' dare il percorso vero di una cartella scelta con `<input type=file>`:
+   restituisce nomi relativi, e all'importer serve il percorso sul disco. Ma il server gira
+   sulla stessa macchina, quindi e' lui a sfogliare, e la finestra qui sotto mostra il suo
+   elenco. Accanto a ogni cartella c'e' quante immagini contiene e quante sottocartelle ha:
+   e' quello che serve per capire, senza aprirla, se e' l'acquisizione giusta. */
+function apriSelettoreCartella({ start, onPick }) {
+  const velo = el('div', { class: 'fullscreen selettore' });
+  const briciole = el('div', { class: 'selettore-briciole' });
+  const elenco = el('div', { class: 'selettore-elenco' });
+  const scorciatoie = el('div', { class: 'selettore-lati' });
+  const stato = el('span', { class: 'hint' });
+  const campo = el('input', { type: 'text', style: 'flex:1;min-width:260px' });
+
+  let corrente = '';
+  const chiudi = () => velo.remove();
+
+  const scegli = () => {
+    const percorso = campo.value.trim();
+    if (!percorso) { toast('nessuna cartella scelta', true); return; }
+    onPick(percorso);
+    chiudi();
+  };
+
+  const vai = async (percorso) => {
+    stato.textContent = 'leggo…';
+    try {
+      const q = percorso ? `?path=${encodeURIComponent(percorso)}` : '';
+      const dati = await api(`/browse${q}`);
+      corrente = dati.path || '';
+      campo.value = corrente;
+      stato.textContent = corrente
+        ? `${dati.entries.length} sottocartelle · ${dati.images_here} immagini qui dentro`
+        : 'scegli da dove partire';
+
+      briciole.innerHTML = '';
+      if (dati.parent) {
+        const su = el('button', { class: 'ghost sq' }, '↑ cartella superiore');
+        su.addEventListener('click', () => vai(dati.parent));
+        briciole.append(su);
+      }
+      briciole.append(el('span', { class: 'selettore-qui' }, corrente || 'partenza'));
+
+      scorciatoie.innerHTML = '';
+      for (const radice of dati.roots || []) {
+        const voce = el('button', { class: 'selettore-radice' },
+          el('span', { class: 'selettore-icona' },
+            radice.kind === 'volume' ? '⧉' : radice.kind === 'recente' ? '↺' : '⌂'),
+          el('span', {}, radice.label));
+        voce.addEventListener('click', () => vai(radice.path));
+        scorciatoie.append(voce);
+      }
+
+      elenco.innerHTML = '';
+      if (!corrente) {
+        elenco.append(el('p', { class: 'hint' },
+          'parti da una delle voci a sinistra: la home, un disco esterno, o una cartella '
+          + 'gia\' usata in un altro progetto.'));
+        return;
+      }
+      if (!dati.entries.length) {
+        elenco.append(el('p', { class: 'hint' },
+          dati.images_here
+            ? `nessuna sottocartella: qui dentro ci sono ${dati.images_here} immagini, `
+              + 'e\' probabilmente questa la cartella da importare.'
+            : 'cartella vuota.'));
+        return;
+      }
+      for (const voce of dati.entries) {
+        const riga = el('div', { class: 'selettore-riga' },
+          el('span', { class: 'selettore-icona' }, '▸'),
+          el('span', { class: 'selettore-nome', title: voce.name }, voce.name),
+          el('span', { class: 'hint' },
+            voce.images < 0 ? 'non leggibile'
+              : `${voce.images} immagini${voce.folders ? ` · ${voce.folders} sottocartelle` : ''}`));
+        riga.addEventListener('click', () => vai(voce.path));
+        elenco.append(riga);
+      }
+    } catch (errore) {
+      stato.textContent = errore.message;
+      toast(errore.message, true);
+    }
+  };
+
+  const usa = el('button', {}, 'Usa questa cartella');
+  usa.addEventListener('click', scegli);
+  const annulla = el('button', { class: 'ghost' }, 'Annulla');
+  annulla.addEventListener('click', chiudi);
+
+  velo.append(
+    el('div', { class: 'fullscreen-bar' },
+      el('strong', {}, 'Scegli la cartella delle acquisizioni'), stato,
+      el('span', { style: 'flex:1' }), annulla),
+    briciole,
+    el('div', { class: 'selettore-corpo' }, scorciatoie, elenco),
+    el('div', { class: 'row selettore-scelta' }, campo, usa),
+  );
+  velo.addEventListener('keydown', (e) => { if (e.key === 'Escape') chiudi(); });
+  campo.addEventListener('keydown', (e) => { if (e.key === 'Enter') vai(campo.value.trim()); });
+  document.body.append(velo);
+  vai(start && start.trim() ? start.trim() : '');
+}

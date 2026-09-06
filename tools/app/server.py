@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -38,7 +39,7 @@ import constants  # noqa: E402
 from datetime import datetime  # noqa: E402
 
 from anagrafica import Anagrafica, default_path  # noqa: E402
-from importer import import_folder, resize_proposal, scan_folder  # noqa: E402
+from importer import IMAGE_SUFFIXES, import_folder, resize_proposal, scan_folder  # noqa: E402
 from inference import Engine, ModelPaths, sample_paths  # noqa: E402
 from rotation import estimate_rotation  # noqa: E402
 import marker_refine  # noqa: E402
@@ -750,6 +751,124 @@ def api_project_codes(project_id: str):
     project = _project(project_id)
     stale = project.update_codes(_payload().get("codes") or {})
     return jsonify({"stale": stale, "status": project.status_report()})
+
+
+# --- sfoglia le cartelle -----------------------------------------------------
+# Il percorso si incollava a mano. Il browser non puo' dare il percorso vero di una cartella
+# scelta con `<input type=file>` — restituisce nomi relativi — ma il server gira sulla stessa
+# macchina dell'utente, quindi e' lui a sfogliare il disco. Funziona uguale su Windows.
+
+
+def _radici() -> List[Dict]:
+    """Da dove si parte: casa, i volumi montati, e le cartelle dei progetti gia' importati."""
+    voci: List[Dict] = []
+    visti = set()
+
+    def aggiungi(percorso: Path, etichetta: str, tipo: str) -> None:
+        try:
+            if not percorso.is_dir():
+                return
+        except OSError:
+            return
+        chiave = percorso.as_posix()
+        if chiave in visti:
+            return
+        visti.add(chiave)
+        voci.append({"path": chiave, "label": etichetta, "kind": tipo})
+
+    aggiungi(Path.home(), "Home", "home")
+    for nome in ("Desktop", "Documents", "Downloads"):
+        aggiungi(Path.home() / nome, nome, "home")
+    if sys.platform == "darwin":
+        volumi = Path("/Volumes")
+        if volumi.is_dir():
+            for voce in sorted(volumi.iterdir()):
+                aggiungi(voce, voce.name, "volume")
+    elif sys.platform.startswith("win"):
+        for lettera in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+            aggiungi(Path(f"{lettera}:\\"), f"Disco {lettera}:", "volume")
+    else:
+        for base in (Path("/media"), Path("/mnt")):
+            if base.is_dir():
+                for voce in sorted(base.iterdir()):
+                    aggiungi(voce, voce.name, "volume")
+
+    for progetto in list_projects(_projects_root):
+        try:
+            dati = _project(progetto["project_id"])
+        except Exception:  # noqa: BLE001
+            continue
+        cartella = str((dati.source or {}).get("folder") or "")
+        if cartella:
+            # La cartella madre e' piu' utile della cartella stessa: da li' si sceglie
+            # l'acquisizione successiva, che di solito e' la sorella accanto.
+            aggiungi(Path(cartella).parent, Path(cartella).parent.name, "recente")
+            aggiungi(Path(cartella), Path(cartella).name, "recente")
+    return voci
+
+
+@app.get("/api/browse")
+def api_browse():
+    """Le sottocartelle di un percorso, con quante immagini contengono direttamente."""
+    grezzo = (request.args.get("path") or "").strip()
+    if not grezzo:
+        return jsonify({"roots": _radici(), "path": "", "parent": None, "entries": []})
+
+    cartella = Path(grezzo).expanduser()
+    try:
+        cartella = cartella.resolve()
+    except OSError as errore:
+        return jsonify({"error": str(errore)}), 400
+    if not cartella.is_dir():
+        return jsonify({"error": f"non e' una cartella: {cartella}"}), 404
+
+    voci: List[Dict] = []
+    immagini_qui = 0
+    try:
+        with os.scandir(cartella) as elenco:
+            for voce in elenco:
+                if voce.name.startswith("."):
+                    continue
+                try:
+                    if voce.is_dir(follow_symlinks=True):
+                        voci.append({"name": voce.name,
+                                     "path": (cartella / voce.name).as_posix()})
+                    elif Path(voce.name).suffix.lower() in IMAGE_SUFFIXES:
+                        immagini_qui += 1
+                except OSError:
+                    continue
+    except PermissionError:
+        return jsonify({"error": f"non ho i permessi per leggere {cartella}"}), 403
+
+    # Quante immagini ci sono dentro a ciascuna sottocartella: solo il livello diretto, che
+    # su un disco esterno con migliaia di file una conta ricorsiva costerebbe secondi.
+    for voce in voci:
+        conta = 0
+        figlie = 0
+        try:
+            with os.scandir(voce["path"]) as dentro:
+                for figlia in dentro:
+                    if figlia.name.startswith("."):
+                        continue
+                    if figlia.is_dir(follow_symlinks=False):
+                        figlie += 1
+                    elif Path(figlia.name).suffix.lower() in IMAGE_SUFFIXES:
+                        conta += 1
+        except OSError:
+            conta = -1
+        voce["images"] = conta
+        voce["folders"] = figlie
+    voci.sort(key=lambda v: v["name"].lower())
+
+    genitore = cartella.parent
+    return jsonify({
+        "path": cartella.as_posix(),
+        "parent": genitore.as_posix() if genitore != cartella else None,
+        "name": cartella.name or cartella.as_posix(),
+        "images_here": immagini_qui,
+        "entries": voci,
+        "roots": _radici(),
+    })
 
 
 @app.post("/api/projects/<project_id>/import")
