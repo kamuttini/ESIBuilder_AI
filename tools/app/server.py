@@ -149,7 +149,15 @@ def _box_nel_fotogramma(box: Dict, size: Sequence[int]) -> bool:
         return False
 
 
-def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int) -> None:
+def _campione_stadi(payload: Dict) -> int:
+    """Quante immagini per i tre moduli in coda all'import. `stages: false` li salta."""
+    if payload.get("stages") is False:
+        return 0
+    return int(payload.get("sample_stages") or 12)
+
+
+def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int,
+                         sample_stadi: int = 12) -> None:
     """Step 0: dedup, rotation, vendor, probe, rect and L/T, before the user sees anything."""
     try:
         project = _project(project_id)
@@ -342,8 +350,19 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         project.steps["import"]["status"] = "confirmed"
         project.save()
 
-        _job_update(job_id, status="done", stage="fatto",
-                    result={"import": imported, "analysis": analysis, "codes_filled": filled})
+        esito = {"import": imported, "analysis": analysis, "codes_filled": filled}
+        if sample_stadi and box:
+            # Un solo comando porta fino in fondo: i tre moduli girano di seguito, senza che
+            # l'utente debba premere «calcola» in ogni sezione. Il rettangolo appena trovato
+            # e' la loro precondizione; se manca ci si ferma qui, dicendolo.
+            _run_advanced_stages(job_id, project_id, sample_stadi, base_result=esito)
+            return
+        if sample_stadi and not box:
+            esito["stages_skipped"] = (
+                "senza rettangolo ecografico i moduli non possono girare: sistemalo nella "
+                "sezione «Rettangolo ecografico», poi ricalcola"
+            )
+        _job_update(job_id, status="done", stage="fatto", result=esito)
     except Exception as error:  # noqa: BLE001 - surfaced to the user as job error
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
@@ -365,7 +384,8 @@ def _require_folder(project: Project) -> Path:
 
 
 def _run_advanced_stages(
-    job_id: str, project_id: str, sample: int, marker_min_score: float = 0.55
+    job_id: str, project_id: str, sample: int, marker_min_score: float = 0.55,
+    base_result: Optional[Dict] = None,
 ) -> None:
     """Orientation marker, depth and scale: the three modules, run as the pipeline runs them."""
     try:
@@ -665,7 +685,8 @@ def _run_advanced_stages(
         project = _project(project_id)
         project.data.setdefault("analysis", {})["stages"] = results
         project.save()
-        _job_update(job_id, status="done", stage="fatto", result=results)
+        _job_update(job_id, status="done", stage="fatto",
+                    result={**(base_result or {}), "stages": results})
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
@@ -699,8 +720,10 @@ def api_analyze(project_id: str):
     folder = project.source.get("folder") or ""
     if not folder:
         return jsonify({"error": "importa prima una cartella"}), 400
-    sample = int(_payload().get("sample") or 24)
-    return jsonify({"job_id": _start_job(_run_import_analysis, project_id, folder, sample)})
+    payload = _payload()
+    sample = int(payload.get("sample") or 24)
+    return jsonify({"job_id": _start_job(_run_import_analysis, project_id, folder, sample,
+                                         _campione_stadi(payload))})
 
 
 @app.get("/api/jobs/<job_id>")
@@ -946,7 +969,8 @@ def api_project_import(project_id: str):
     if not Path(folder).expanduser().is_dir():
         return jsonify({"error": f"cartella non valida: {folder}"}), 400
     sample = int(payload.get("sample") or 24)
-    return jsonify({"job_id": _start_job(_run_import_analysis, project_id, folder, sample)})
+    return jsonify({"job_id": _start_job(_run_import_analysis, project_id, folder, sample,
+                                         _campione_stadi(payload))})
 
 
 @app.post("/api/projects/<project_id>/steps/<step_id>")

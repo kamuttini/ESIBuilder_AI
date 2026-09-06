@@ -1640,3 +1640,35 @@ geometria diversa non è recuperabile.
 mentre il nome della macchina — `bkSpecto` — è il logo in alto a sinistra. L'accordo fra le 24
 immagini è 0.9757, quindi la rete è coerente con sé stessa: la domanda è quale dei due testi ESI
 si aspetta di trovare in `#13`.
+
+## 8-novodecies. I moduli girano da soli, l'utente corregge
+
+L'import faceva dedup, rotazione e le reti — ecografo, sonda, rettangolo, piano L/T — e si
+fermava lì. Orientamento, depth e scala restavano da lanciare a mano, con un «Calcola con i
+moduli» nella loro sezione. Ma un wizard che chiede di premere calcola ad ogni tappa non sta
+proponendo niente: sta facendo compilare il modulo all'utente, un pezzo per volta.
+
+Ora l'import prosegue **da solo** nei tre moduli, dentro lo stesso job e con la stessa barra di
+avanzamento. La precondizione è il rettangolo ecografico, che l'import ha appena trovato: se
+manca, la catena si ferma lì e lo dichiara (`stages_skipped`) invece di fallire.
+
+Il comando nella sezione dei moduli resta, ma cambia mestiere: non è più «calcola», è **«rifai i
+tre moduli»** — quello che si usa dopo aver corretto qualcosa da cui dipendono, prima fra tutte il
+rettangolo. È il giro di raffinamento, non il primo calcolo. Chi vuole il vecchio comportamento
+passa `stages: false` all'import.
+
+Misura sulla cartella BK, progetto azzerato e rifatto con **un solo comando**:
+
+```
+   5s  riconoscimento ecografo
+  10s  orientamento: marker su tutte le 56 immagini
+  20s  orientamento: ritaglio del marker della cartella
+  70s  depth: lettura dalla scala ecografica
+ 175s  scala: righello e righe #18-#21
+ 180s  fatto
+```
+
+Alla fine ogni sezione ha la sua proposta: ecografo, rettangolo e orientamento `proposed`, i tre
+moduli `ok`, depth 12 accettate su 12, marker con tre gruppi su quattro. La scala risulta
+`blocked` perché le sue righe `#19-#21` non sono complete — che è un esito onesto da correggere,
+non un passo da lanciare.

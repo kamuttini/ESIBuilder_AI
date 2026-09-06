@@ -285,8 +285,9 @@ function panelImport(panel) {
   const analysis = state.project.analysis || {};
 
   panel.append(el('p', { class: 'hint' },
-    'un solo passaggio: dedup, rotazione, riconoscimento ecografo, sonda, rettangolo e piano L/T. ' +
-    'Finito questo, la pagina dei codici si apre gia\' compilata.'));
+    'un solo passaggio, fino in fondo: dedup, rotazione, ecografo, sonda, rettangolo, piano L/T, '
+    + 'e poi di seguito i tre moduli — orientamento, depth e scala. Non c\'e\' niente da lanciare '
+    + 'a mano dopo: quando finisce, ogni sezione ha gia\' la sua proposta da confermare o correggere.'));
 
   const input = el('input', {
     type: 'text', value: value.folder || state.project.source.folder || '',
@@ -1691,16 +1692,21 @@ function panelModuleStage(panel, step) {
   const stages = (state.project.analysis || {}).stages || {};
   const rect = (state.project.steps.rect || {}).value || {};
 
+  const giaFatti = Object.keys(stages).length > 0;
   panel.append(el('p', { class: 'hint' },
-    'marker di orientamento, depth e scala girano come i moduli della pipeline, in ' +
-    'sottoprocesso: stesso codice, stessi artefatti su disco.'));
+    'marker di orientamento, depth e scala girano come i moduli della pipeline, in '
+    + 'sottoprocesso: stesso codice, stessi artefatti su disco. '
+    + (giaFatti
+      ? 'Sono gia\' girati insieme all\'import: qui si rifanno dopo aver corretto qualcosa da '
+        + 'cui dipendono, prima fra tutte il rettangolo ecografico.'
+      : 'Girano da soli in coda all\'import; questo comando serve a rifarli.')));
 
   const status = el('span', { class: 'hint' },
     rect.rect_echo
       ? 'il marker gira su tutte le immagini uniche, depth e scala su un campione: richiede qualche minuto'
       : 'serve prima il rettangolo ecografico');
-  const run = el('button', {});
-  run.textContent = Object.keys(stages).length ? 'Ricalcola i tre moduli' : 'Calcola con i moduli';
+  const run = el('button', { class: giaFatti ? 'ghost' : '' });
+  run.textContent = giaFatti ? 'Rifai i tre moduli' : 'Calcola con i moduli';
   run.disabled = !rect.rect_echo;
   run.addEventListener('click', async () => {
     run.disabled = true;
