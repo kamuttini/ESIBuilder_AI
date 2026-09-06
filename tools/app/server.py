@@ -134,6 +134,21 @@ def _fill_codes_from_analysis(project: Project, analysis: Dict) -> Dict:
     return filled
 
 
+def _box_nel_fotogramma(box: Dict, size: Sequence[int]) -> bool:
+    """Un box misurato su un fotogramma di dimensioni diverse non e' recuperabile."""
+    try:
+        larghezza, altezza = int(size[0]), int(size[1])
+    except (TypeError, ValueError, IndexError):
+        return True  # senza la dimensione non si puo' dire: si tiene
+    if larghezza <= 0 or altezza <= 0:
+        return True
+    try:
+        return (0 <= int(box["left"]) < int(box["right"]) <= larghezza
+                and 0 <= int(box["top"]) < int(box["bottom"]) <= altezza)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int) -> None:
     """Step 0: dedup, rotation, vendor, probe, rect and L/T, before the user sees anything."""
     try:
@@ -284,7 +299,16 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         # --- ecografo (#13): il template col nome della macchina
         vendor_value = dict(project.step_value("vendor"))
         vendor_value["preview_image"] = anteprima
-        if line13.get("box") and not vendor_value.get("rect_name_echo"):
+        # Il box si teneva solo perche' c'era gia', e una rianalisi non lo toccava mai. Cosi'
+        # dopo una rotazione restava quello misurato sul fotogramma storto — su una cartella
+        # BK finiva a `left 1058` in un fotogramma largo 1024, cioe' fuori dall'immagine, e
+        # nella sezione ecografo non si vedeva piu' niente. Si conserva solo se l'utente l'ha
+        # messo a mano *e* sta ancora dentro al fotogramma.
+        fotogramma = imported.get("image_sample_size") or imported.get("native_size") or []
+        attuale = vendor_value.get("rect_name_echo")
+        a_mano = bool((project.steps.get("vendor") or {}).get("user_edited"))
+        fuori = bool(attuale) and not _box_nel_fotogramma(attuale, fotogramma)
+        if line13.get("box") and (not attuale or not a_mano or fuori):
             # The box is the proposal; TH stays 0 until the thresholds step computes it.
             vendor_value["rect_name_echo"] = {
                 **line13["box"],
@@ -293,6 +317,10 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
             }
             vendor_value["rect_name_echo_source"] = line13.get("source")
             vendor_value["rect_name_echo_agreement"] = line13.get("agreement_iou")
+            vendor_value["rect_name_echo_replaced"] = (
+                "il box corretto a mano cadeva fuori dal fotogramma: rifatto dalla rete"
+                if fuori and a_mano else ""
+            )
         vendor_value["rect_name_echo_reason"] = line13.get("reason")
         project.set_step(
             "vendor", vendor_value, status="proposed", source="model",

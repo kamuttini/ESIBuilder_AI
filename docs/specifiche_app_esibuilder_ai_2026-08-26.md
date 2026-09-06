@@ -1621,3 +1621,22 @@ coordinate immagine. Tutti spostati su `working_dir()`.
 
 I progetti senza rotazione non cambiano: lo specchio resta di symlink, e viene rifatto una volta
 sola perché il timbro ora include l'angolo.
+
+### Il template dell'ecografo non sopravvive a un cambio di fotogramma
+
+Dopo aver rifatto l'import della cartella BK, nella sezione ecografo il template `#13` non si
+vedeva più. Il box c'era, ma valeva `left 1058 → right 1114` in un fotogramma largo 1024: era
+quello misurato sul fotogramma **storto**, prima della rotazione, e cadeva fuori dall'immagine.
+
+La causa è una riga scritta per proteggere il lavoro dell'utente — `if line13.get("box") and not
+vendor_value.get("rect_name_echo")` — che però proteggeva anche una proposta della rete, e quindi
+nessuna rianalisi la rifaceva mai. Ora il box viene rifatto sempre, tranne quando l'utente l'ha
+corretto a mano; e anche in quel caso, se cade fuori dal fotogramma corrente viene sostituito e la
+sostituzione viene dichiarata in `rect_name_echo_replaced`, perché un box misurato su una
+geometria diversa non è recuperabile.
+
+**Da chiedere a Francesca** (punto aperto): sulla BK Specto la rete propone per `#13` il blocco
+`MEDKONSULT DEMO / E14CL4b (T) – Brachytherapy/Prostate…`, cioè l'intestazione con studio e sonda,
+mentre il nome della macchina — `bkSpecto` — è il logo in alto a sinistra. L'accordo fra le 24
+immagini è 0.9757, quindi la rete è coerente con sé stessa: la domanda è quale dei due testi ESI
+si aspetta di trovare in `#13`.
