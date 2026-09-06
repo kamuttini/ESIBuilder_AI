@@ -1574,3 +1574,50 @@ restituisce le sottocartelle di un percorso, e senza `path` i punti di partenza.
 
 Niente di specifico per macOS: la stessa finestra funziona sul Windows dei colleghi, che è il
 motivo per cui non si è usato un selettore nativo di sistema.
+
+## 8-octodecies. La rotazione va applicata, non solo misurata
+
+Su `204. BK Specto - E14CL4b` l'analisi diceva «vanno ruotate di 90 gradi» e poi faceva girare
+tutti i moduli sulle immagini dritte com'erano. Due difetti distinti.
+
+**La rotazione non arrivava nemmeno a `source`.** Veniva scritta in memoria in
+`project.source["rotation_applied"]`, ma poche righe dopo il progetto veniva **riletto da disco**
+e quelle modifiche sparivano: sul disco restava `rotation_applied: 0`, `rotation_source:
+"not_run"`, mentre `steps.import.value` diceva `90` con fonte `osd` e `reliable: true`. I moduli
+leggono da `source`, e ricevevano zero.
+
+**E anche con il numero giusto non sarebbe bastato.** L'angolo veniva soltanto *passato*: alle reti
+(vendor, sonda, rettangolo, piano L/T) non arriva affatto, e il modulo della scala si rifiuta di
+lavorare su un contesto ruotato — torna `rotation_not_supported`. Un numero nel contesto non
+raddrizza nessun pixel.
+
+La correzione ruota **i pixel, una volta sola**. Lo specchio di lavoro (`input_dedup`), che finora
+conteneva symlink alle immagini originali, quando c'è una rotazione contiene **copie già
+raddrizzate**; `Project.working_dir()` è da dove leggono tutti — reti, moduli, il visualizzatore,
+la conversione dei click. Il timbro `.built_from` include l'angolo, così cambiando rotazione lo
+specchio si rifà. Al contesto dei moduli si passa `rotation_deg_clockwise: 0`, che è la verità
+sulle immagini che ricevono: dirgli l'angolo vero significherebbe farglielo applicare due volte.
+
+I lati del fotogramma si scambiano — `native_size`, `image_sample_size` e `video_input_size` da
+1280×1024 a 1024×1280 — perché è il fotogramma raddrizzato quello che ESI vedrà, ed è in quelle
+coordinate che vanno scritte tutte le righe del `.fss`.
+
+**Verifica** sulla stessa cartella BK, import e stadi rifatti da capo:
+
+| | prima | dopo |
+|---|---|---|
+| `source.rotation_applied` | `0`, fonte `not_run` | `90`, fonte `osd` |
+| dimensioni | 1280×1024 | 1024×1280 |
+| immagini di lavoro | symlink agli originali | copie raddrizzate |
+| vendor | — | BK, 0.631 |
+| rettangolo | — | `138\|200\|1042\|887`, che racchiude il settore e lascia fuori interfaccia e righello |
+| depth | — | 12/12 accettate, 20-70 mm |
+| scala | `rotation_not_supported` | gira: profilo BK, `#18 = 25\|50\|60\|` |
+
+Nel passaggio sono venuti fuori cinque punti che leggevano ancora dalla cartella originale mentre
+i moduli misuravano sullo specchio: l'anteprima del rettangolo (che infatti falliva con *is not in
+the subpath of*), il ritaglio del marker, il refine da click e la conversione dei click in
+coordinate immagine. Tutti spostati su `working_dir()`.
+
+I progetti senza rotazione non cambiano: lo specchio resta di symlink, e viene rifatto una volta
+sola perché il timbro ora include l'angolo.

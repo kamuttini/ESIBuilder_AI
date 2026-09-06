@@ -466,40 +466,68 @@ class Project:
         except (json.JSONDecodeError, OSError):
             return []
 
-    def dedup_images(self) -> List[Path]:
-        """Absolute paths of the unique frames. Empty when the import has not run yet."""
-        folder = Path(self.source.get("folder") or "")
-        if not folder.is_dir():
-            return []
-        return [folder / name for name in self.dedup_names()]
+    def rotation(self) -> int:
+        """Quanti gradi in senso orario servono per raddrizzare le immagini."""
+        try:
+            return int(self.source.get("rotation_applied") or 0) % 360
+        except (TypeError, ValueError):
+            return 0
 
-    def dedup_link_dir(self) -> Optional[Path]:
-        """A mirror of the folder with only the unique frames, as symlinks.
+    def dedup_images(self) -> List[Path]:
+        """Absolute paths of the working frames. Empty when the import has not run yet."""
+        base = self.working_dir()
+        if base is None or not base.is_dir():
+            return []
+        return [base / name for name in self.dedup_names()]
+
+    def working_dir(self) -> Optional[Path]:
+        """Da dove leggono tutti: lo specchio se c'e', altrimenti la cartella originale."""
+        return self.dedup_link_dir() or (Path(self.source.get("folder") or "") or None)
+
+    def dedup_link_dir(self, progress=None) -> Optional[Path]:  # noqa: ANN001
+        """A mirror of the folder with only the unique frames.
 
         The depth and marker modules scan a folder themselves: they cannot be handed a list.
         Pointing them at this mirror is how they too see only the deduplicated images - the
         same trick `run_pipeline_single_folder_safe.py` uses with its `input_ref/`.
+
+        Quando la cartella va ruotata, lo specchio contiene **copie gia' ruotate** invece di
+        link. Misurare la rotazione e poi darla in pasto ai moduli come un numero non
+        funziona: le reti non la ricevono affatto, e il modulo della scala si rifiuta di
+        lavorare su un contesto ruotato (`rotation_not_supported`). Ruotare i pixel una volta
+        sola, qui, e' cio' che la rende vera per tutti - e le coordinate che finiscono nel
+        `.fss` sono quelle del fotogramma raddrizzato, che e' quello che ESI vedra'.
         """
         names = self.dedup_names()
         folder = Path(self.source.get("folder") or "")
         if not names or not folder.is_dir():
             return None
+        angolo = self.rotation()
         target = self.root / self.DEDUP_LINKS
         marker = target / ".built_from"
-        stamp = f"{folder}\n{len(names)}"
+        stamp = f"{folder}\n{len(names)}\nrot={angolo}"
         if marker.is_file() and marker.read_text(encoding="utf-8") == stamp:
             return target
 
         if target.exists():
             shutil.rmtree(target, ignore_errors=True)
-        for name in names:
-            link = target / name
-            link.parent.mkdir(parents=True, exist_ok=True)
+        for indice, name in enumerate(names, start=1):
+            destinazione = target / name
+            destinazione.parent.mkdir(parents=True, exist_ok=True)
             source = folder / name
             try:
-                link.symlink_to(source)
+                if angolo:
+                    from PIL import Image  # noqa: PLC0415
+
+                    with Image.open(source) as immagine:
+                        # `angle` e' la rotazione oraria che raddrizza: PIL ruota antiorario.
+                        immagine.rotate(-angolo, expand=True).save(destinazione)
+                else:
+                    destinazione.symlink_to(source)
             except OSError:
                 continue
+            if progress is not None and (indice % 25 == 0 or indice == len(names)):
+                progress(indice, len(names))
         marker.write_text(stamp, encoding="utf-8")
         return target
 

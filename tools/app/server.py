@@ -162,11 +162,35 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
 
         _job_update(job_id, stage="rotazione (OSD)", total=len(picked))
         rotation = estimate_rotation(picked)
-        imported["rotation_applied"] = rotation["angle"]
+        angolo = int(rotation["angle"] or 0) % 360
+        imported["rotation_applied"] = angolo
         imported["rotation_source"] = rotation["source"]
         imported["rotation_detail"] = rotation
-        project.source["rotation_applied"] = rotation["angle"]
+        # Va scritto **e salvato** ora: piu' sotto il progetto viene riletto da disco, e in
+        # memoria si perdeva. Da qui in poi lo specchio di lavoro contiene le immagini gia'
+        # raddrizzate, e tutto - reti comprese - legge da li'.
+        project.source["rotation_applied"] = angolo
         project.source["rotation_source"] = rotation["source"]
+        project.save()
+        if angolo:
+            _job_update(job_id, stage=f"raddrizzo le immagini di {angolo} gradi", done=0,
+                        total=len(project.dedup_names()))
+            project.dedup_link_dir(
+                progress=lambda fatte, quante: _job_update(job_id, done=fatte, total=quante)
+            )
+            larghezza, altezza = imported.get("native_size") or [0, 0]
+            if angolo in (90, 270):
+                # Il fotogramma raddrizzato ha i lati scambiati, e sono quelli che finiscono
+                # nel `.fss`: e' quello che ESI vedra'.
+                for chiave in ("native_size", "image_sample_size", "video_input_size"):
+                    valore = imported.get(chiave)
+                    if valore and len(valore) == 2:
+                        imported[chiave] = [valore[1], valore[0]]
+                project.source["native_size"] = [altezza, larghezza]
+            project.save()
+            project = _project(project_id)
+            images = project.dedup_images()
+            picked = sample_paths(images, sample)
 
         engine = _inference_engine()
         _job_update(job_id, stage="riconoscimento ecografo")
@@ -226,12 +250,20 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         project = _project(project_id)
         project.data["analysis"] = analysis
         project.steps["import"]["value"] = imported
+        project.source["rotation_applied"] = angolo
+        project.source["rotation_source"] = rotation["source"]
         project.save()
 
-        anteprima = (
-            str(Path(rect["boxes"][0]["path"]).relative_to(Path(folder)))
-            if rect.get("boxes") else None
-        )
+        # Il nome e' relativo allo specchio di lavoro, non alla cartella originale: da quando
+        # c'e' una rotazione le immagini analizzate stanno li'.
+        base_lavoro = project.working_dir() or Path(folder)
+        anteprima = None
+        if rect.get("boxes"):
+            scelta = Path(rect["boxes"][0]["path"])
+            try:
+                anteprima = str(scelta.relative_to(base_lavoro))
+            except ValueError:
+                anteprima = scelta.name
 
         # --- rettangolo ecografico (#11): la geometria da cui dipende tutto il resto
         rect_value = dict(project.step_value("rect"))
@@ -321,7 +353,11 @@ def _run_advanced_stages(
         probe_id = (analysis.get("probe") or {}).get("probe_id")
         imported = project.step_value("import")
         video_size = imported.get("image_sample_size") or [0, 0]
-        rotation = int(project.source.get("rotation_applied") or 0)
+        # Le immagini che i moduli ricevono sono gia' raddrizzate (lo specchio di lavoro le
+        # contiene ruotate), quindi il contesto deve dire zero. Dirgli l'angolo vero
+        # significherebbe farglielo applicare due volte, e il modulo della scala si rifiuta
+        # proprio di lavorare su un contesto ruotato.
+        rotation = 0
         # #11 carries the rectangle plus its margin: the modules must see the same box ESI will.
         final_rect = expand_rect(
             rect, project.step_value("rect").get("margin_percent"),
@@ -1175,7 +1211,8 @@ def api_orientation_refine(project_id: str):
     stage = _marker_stage_dir(project)
     payload = _payload()
     name = (payload.get("name") or "").strip()
-    folder = Path(project.source.get("folder") or "")
+    # Lo specchio di lavoro: e' li' che stanno le immagini su cui i moduli hanno misurato.
+    folder = project.working_dir() or Path("")
     rect = _final_rect(project)
     if stage is None or not folder.is_dir() or not name or rect is None:
         return jsonify({"error": "servono la run del marker, la cartella e il rettangolo"}), 400
@@ -1616,7 +1653,9 @@ def api_orientation_quick_fix(project_id: str):
     name = (payload.get("name") or "").strip()
     if not name:
         return jsonify({"error": "manca l'immagine"}), 400
-    click = _click_to_image(Path(project.source.get("folder") or ""), name, payload)
+    # Lo specchio di lavoro: e' l'immagine che l'utente ha davanti, ed e' la sua dimensione
+    # quella con cui va convertito il click.
+    click = _click_to_image(project.working_dir() or Path(""), name, payload)
     try:
         refined = _refine_click(project, name, click, int(payload.get("window") or 70))
     except ValueError as error:
@@ -2184,7 +2223,7 @@ def api_orientation_marker_override(project_id: str):
     if not all(side in box for side in ("top", "left", "bottom", "right")):
         # Il rettangolo arriva in pixel dello schermo, come il click: la conversione la fa
         # il server, che conosce la dimensione vera del file.
-        folder = Path(project.source.get("folder") or "")
+        folder = project.working_dir() or Path("")
         angoli = [
             _click_to_image(folder, name, {
                 "cx": payload.get(f"x{i}"), "cy": payload.get(f"y{i}"),
@@ -2356,7 +2395,8 @@ def api_orientation_crop(project_id: str):
     """
     project = _project(project_id)
     stage = _marker_stage_dir(project)
-    folder = Path(project.source.get("folder") or "")
+    # Lo specchio di lavoro: e' li' che stanno le immagini su cui i moduli hanno misurato.
+    folder = project.working_dir() or Path("")
     name = request.args.get("name") or ""
     if stage is None or not folder.is_dir() or not name:
         return jsonify({"error": "ritaglio non disponibile"}), 404
@@ -3933,7 +3973,7 @@ def _run_depth_only(job_id: str, project_id: str, sample: int) -> None:
             probe_model=str(project.codes.get("probe_model") or ""),
             rect=rect,
             video_size=imported.get("image_sample_size") or [0, 0],
-            rotation=int(project.source.get("rotation_applied") or 0),
+            rotation=0,  # lo specchio di lavoro le ha gia' raddrizzate
             max_images=quante,
             timeout=3600.0,
         )
@@ -4080,7 +4120,9 @@ def api_images(project_id: str):
 @app.get("/api/projects/<project_id>/image")
 def api_image(project_id: str):
     project = _project(project_id)
-    folder = Path(project.source.get("folder") or "")
+    # Lo specchio di lavoro, non la cartella originale: e' li' che stanno le immagini
+    # raddrizzate, ed e' su quelle che sono stati misurati i riquadri che ci disegniamo sopra.
+    folder = project.working_dir() or Path(project.source.get("folder") or "")
     name = request.args.get("name") or ""
     if not folder.is_dir() or not name:
         return jsonify({"error": "immagine non disponibile"}), 404
