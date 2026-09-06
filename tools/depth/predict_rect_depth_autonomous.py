@@ -1708,12 +1708,26 @@ def _add_scale_column_rows(
 
 
 def _load_ranker(path: Path) -> Tuple[Optional[object], List[str], str]:
+    """Load the tabular prior, saying out loud when it is not there.
+
+    Rule-only is a legitimate fallback, but a silent one hides an environment problem:
+    a checkout without `artifacts/`, a missing joblib, a model pickled by another
+    scikit-learn. The run then looks normal and is quietly weaker.
+    """
     if not path:
         return None, FEATURES, ""
     p = path.expanduser().resolve()
-    if not p.exists() or joblib is None:
+    if joblib is None:
+        print(f"[ranker] joblib assente: si procede solo a regole ({p})", file=sys.stderr)
         return None, FEATURES, ""
-    bundle = joblib.load(p)
+    if not p.exists():
+        print(f"[ranker] modello non trovato, si procede solo a regole: {p}", file=sys.stderr)
+        return None, FEATURES, ""
+    try:
+        bundle = joblib.load(p)
+    except Exception as error:  # noqa: BLE001
+        print(f"[ranker] modello illeggibile ({error}), si procede solo a regole: {p}", file=sys.stderr)
+        return None, FEATURES, ""
     return bundle.get("model"), list(bundle.get("features") or FEATURES), p.as_posix()
 
 
