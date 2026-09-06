@@ -123,6 +123,10 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--bundle-dir", type=Path, default=DEFAULT_BUNDLE_DIR)
     parser.add_argument("--library-root", type=Path, default=None)
+    parser.add_argument("--vendor", type=str, default="",
+                        help="Force the vendor instead of inferring it from the folder name. "
+                             "The app passes the vendor its classifier recognised, so the run "
+                             "does not depend on the dataset folder-naming convention.")
     parser.add_argument("--folder-regex", type=str, default="")
     parser.add_argument("--include-regex", type=str, default="")
     parser.add_argument("--max-folders", type=int, default=0)
@@ -208,7 +212,7 @@ def main() -> int:
     for index, folder in enumerate(folders, start=1):
         if out_of_time:
             break
-        vendor = omd.infer_vendor_from_text(folder.name)
+        vendor = (args.vendor or "").strip() or omd.infer_vendor_from_text(folder.name)
         folder_state = state.get(folder.name, {})
 
         chained = bool(args.official_stages_dir)
