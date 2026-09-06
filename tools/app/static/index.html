@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESIBuilder AI</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">ESIBuilder <span>AI</span></div>
+    <div class="project-bar">
+      <select id="project-select"><option value="">— progetto —</option></select>
+      <input id="new-project-name" type="text" placeholder="nome nuovo progetto">
+      <button id="new-project">Crea</button>
+    </div>
+    <div id="head-status" class="head-status"></div>
+  </header>
+
+  <main>
+    <nav id="steps"></nav>
+    <section id="panel">
+      <p class="empty">Crea o seleziona un progetto per iniziare.</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="/static/box_editor.js"></script>
+  <script src="/static/orientation_view.js"></script>
+    <script src="/static/depth_view.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

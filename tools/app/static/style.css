@@ -1,0 +1,750 @@
+:root {
+  --bg: #12151a;
+  --panel: #1a1f27;
+  --panel-2: #222834;
+  --line: #2e3644;
+  --text: #e6e9ef;
+  --muted: #98a2b3;
+  --accent: #4f9cf9;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --err: #f85149;
+  --proposed: #4f9cf9;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 10px 18px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { font-weight: 600; letter-spacing: .3px; }
+.brand span { color: var(--accent); }
+
+.project-bar { display: flex; gap: 8px; align-items: center; }
+.head-status { margin-left: auto; color: var(--muted); font-size: 13px; }
+
+main { display: flex; align-items: flex-start; }
+
+nav {
+  width: 260px;
+  min-height: calc(100vh - 53px);
+  border-right: 1px solid var(--line);
+  background: var(--panel);
+  padding: 10px 0;
+}
+
+.step {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 9px 14px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+.step:hover { background: var(--panel-2); }
+.step.active { background: var(--panel-2); border-left-color: var(--accent); }
+.step.skipped { opacity: .4; }
+.step .dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--muted); flex: 0 0 auto; margin-top: 6px;
+}
+.step .dot.confirmed, .step .dot.corrected, .step .dot.manual { background: var(--ok); }
+.step .dot.proposed { background: var(--proposed); }
+.step .dot.stale { background: var(--warn); }
+.step .dot.blocked { background: var(--err); }
+.step .meta { display: block; color: var(--muted); font-size: 12px; }
+
+section#panel { flex: 1; padding: 20px 26px; max-width: 1100px; }
+
+h2 { margin: 0 0 4px; font-size: 18px; }
+h3 { margin: 22px 0 8px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+p.hint { color: var(--muted); margin: 4px 0 16px; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+
+input, select, textarea, button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 9px;
+}
+input[type=checkbox] { width: auto; }
+textarea { width: 100%; min-height: 160px; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+button { cursor: pointer; background: var(--accent); border-color: var(--accent); color: #06101d; font-weight: 600; }
+button.ghost { background: transparent; color: var(--text); border-color: var(--line); font-weight: 400; }
+button:disabled { opacity: .5; cursor: default; }
+
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+
+table.lines { width: 100%; border-collapse: collapse; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+table.lines td { border-bottom: 1px solid var(--line); padding: 5px 8px; vertical-align: top; }
+table.lines td.n { color: var(--muted); width: 34px; text-align: right; }
+table.lines td.name { color: var(--muted); width: 190px; }
+table.lines td.val { word-break: break-all; }
+table.lines tr.empty td.val { color: var(--warn); }
+
+ul.problems { margin: 8px 0; padding-left: 18px; }
+ul.problems li { color: var(--warn); }
+.ok-badge { color: var(--ok); }
+.err-badge { color: var(--err); }
+
+.thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 10px; }
+.thumbs img { width: 100%; border-radius: 6px; border: 1px solid var(--line); display: block; }
+.thumbs figcaption { font-size: 11px; color: var(--muted); word-break: break-all; }
+
+pre.out {
+  background: #0d1117; border: 1px solid var(--line); border-radius: 6px;
+  padding: 10px; overflow-x: auto; font-size: 12.5px;
+}
+
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-top: 12px; }
+.kv { display: flex; gap: 8px; }
+.kv span:first-child { color: var(--muted); min-width: 190px; }
+
+.toast {
+  position: fixed; bottom: 18px; right: 18px; padding: 10px 14px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 420px;
+}
+.toast.show { opacity: 1; }
+.toast.error { border-color: var(--err); }
+
+
+/* --- editor dei box ---------------------------------------------------- */
+.editor { margin-top: 10px; }
+.editor-stage {
+  position: relative; display: inline-block; line-height: 0;
+  border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+  background: #000; touch-action: none;
+}
+.editor-stage img { display: block; max-width: 100%; user-select: none; }
+
+.editor-box {
+  position: absolute; border: 2px solid var(--box-color);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, .6) inset; cursor: move;
+}
+.editor-box.selected { box-shadow: 0 0 0 1px rgba(255, 255, 255, .5) inset; }
+.editor-box .handle {
+  position: absolute; width: 12px; height: 12px; background: var(--box-color);
+  border: 1px solid rgba(0, 0, 0, .5); border-radius: 2px;
+}
+.handle-nw { left: -7px; top: -7px; cursor: nwse-resize; }
+.handle-ne { right: -7px; top: -7px; cursor: nesw-resize; }
+.handle-sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.handle-se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+.handle-n { left: calc(50% - 6px); top: -7px; cursor: ns-resize; }
+.handle-s { left: calc(50% - 6px); bottom: -7px; cursor: ns-resize; }
+.handle-w { left: -7px; top: calc(50% - 6px); cursor: ew-resize; }
+.handle-e { right: -7px; top: calc(50% - 6px); cursor: ew-resize; }
+
+.editor-controls { margin-top: 14px; }
+.editor-legend { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 6px; }
+.editor-legend .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.slider-row { display: flex; align-items: center; gap: 10px; margin: 3px 0; }
+.slider-row label { width: 56px; margin: 0; text-transform: uppercase; font-size: 11px; }
+.slider-row input[type=range] { flex: 1; max-width: 420px; accent-color: var(--accent); }
+
+.fullscreen {
+  position: fixed; inset: 0; z-index: 50; background: rgba(8, 10, 14, .97);
+  padding: 14px 18px; overflow: auto;
+}
+.fullscreen-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.fullscreen .editor-stage { max-width: 100%; }
+
+.dirty {
+  display: inline-block; padding: 3px 9px; border-radius: 12px;
+  background: rgba(210, 153, 34, .18); color: var(--warn);
+  border: 1px solid rgba(210, 153, 34, .5); font-size: 12px;
+}
+
+.slider-row.margin-row { margin-top: 8px; }
+.slider-row.margin-row label { width: 128px; color: var(--accent); }
+.slider-row.margin-row input[type=range] { accent-color: #d29922; }
+
+.editor-box.readonly {
+  border-style: dashed; pointer-events: none; box-shadow: none;
+}
+.slider-row.margin-row .hint { width: 14px; }
+
+.editor-box.marker-box {
+  border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.7); pointer-events: none;
+}
+/* Niente `transform: scale()`: ingrandisce senza occupare spazio nel layout, e l'immagine
+   sbordava sulla didascalia. Box fisso uguale per tutti, cosi' il glifo 18x18 della banca e il
+   ritaglio (che arriva dal server gia' ingrandito) si guardano alla stessa scala. */
+.template-card {
+  border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--panel);
+  text-align: center; width: 148px; flex: 0 0 auto;
+}
+.template-card img {
+  display: block; width: 96px; height: 96px; margin: 0 auto 10px;
+  object-fit: contain; image-rendering: pixelated;
+  background: #000; border: 1px solid var(--line); border-radius: 4px;
+}
+.template-card .hint { line-height: 1.45; }
+.template-card strong { color: var(--text); }
+
+.editor-stage.picking { cursor: crosshair; outline: 2px solid var(--accent); outline-offset: 2px; }
+.editor-box.fix-box { border: 2px solid #ff4fd8; pointer-events: none; box-shadow: 0 0 0 1px rgba(0,0,0,.7); }
+
+.score-list {
+  max-height: 320px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); font-size: 12.5px;
+}
+.score-row {
+  display: flex; gap: 10px; align-items: baseline; padding: 5px 10px; cursor: pointer;
+  border-bottom: 1px solid rgba(46, 54, 68, .5);
+}
+.score-row:hover { background: var(--panel-2); }
+.score-row.current { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+.score-value { font-family: ui-monospace, Menlo, monospace; width: 48px; flex: 0 0 auto; text-align: right; }
+.score-group { width: 52px; flex: 0 0 auto; color: var(--muted); }
+.score-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.score-fixed {
+  flex: 0 0 auto; color: #ff4fd8; border: 1px solid #ff4fd8; border-radius: 10px;
+  padding: 0 6px; font-size: 11px;
+}
+
+.fix-bar {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  margin: 14px 0 8px; padding: 10px 12px;
+  border: 1px solid var(--accent); border-radius: 8px;
+  background: rgba(79, 156, 249, .08);
+}
+.editor-stage.picking::after {
+  content: 'clicca sul marker'; position: absolute; top: 8px; left: 8px; z-index: 3;
+  background: var(--accent); color: #06101d; font-weight: 600; font-size: 12px;
+  padding: 4px 10px; border-radius: 12px; pointer-events: none;
+}
+
+/* --- rielaborazione visibile sull'immagine ------------------------------ */
+.editor-stage.busy img { filter: brightness(.45) saturate(.6); }
+
+.busy-overlay {
+  position: absolute; inset: 0; z-index: 5;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; line-height: 1.4; text-align: center; pointer-events: none;
+}
+.busy-spinner {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 3px solid rgba(79, 156, 249, .25); border-top-color: var(--accent);
+  animation: busy-spin .8s linear infinite;
+}
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+.busy-label {
+  color: var(--text); font-size: 13px; font-weight: 600; max-width: 80%;
+  background: rgba(8, 10, 14, .72); padding: 6px 12px; border-radius: 8px;
+}
+.busy-steps { display: flex; gap: 5px; }
+.busy-seg {
+  width: 34px; height: 5px; border-radius: 3px; background: rgba(230, 233, 239, .18);
+}
+.busy-seg.done { background: var(--ok); }
+.busy-seg.doing { background: var(--accent); animation: busy-pulse 1s ease-in-out infinite; }
+@keyframes busy-pulse { 50% { opacity: .35; } }
+
+.click-pin {
+  position: absolute; z-index: 6; width: 18px; height: 18px; margin: -9px 0 0 -9px;
+  border: 2px solid var(--accent); border-radius: 50%; pointer-events: none;
+  box-shadow: 0 0 0 3px rgba(79, 156, 249, .25);
+  animation: busy-pulse 1.2s ease-in-out infinite;
+}
+
+.editor-box.flash { animation: box-flash .4s ease-in-out 4; }
+@keyframes box-flash { 50% { box-shadow: 0 0 0 4px rgba(63, 185, 80, .85); } }
+
+.score-row.busy { background: rgba(79, 156, 249, .16); }
+.score-row.busy .score-name::after { content: ' · in rielaborazione'; color: var(--accent); }
+
+.score-delta { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+
+/* La striscia della rielaborazione in background: sta sotto la barra della correzione,
+   perche' correggere non deve piu' aspettare che la cartella sia rifatta. */
+.bg-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.bg-bar.running { border-color: var(--accent); }
+.bg-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: 0 0 auto;
+}
+.bg-dot.spin {
+  background: var(--accent);
+  animation: bg-pulse 1s ease-in-out infinite;
+}
+@keyframes bg-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+.bg-track {
+  display: none;
+  flex: 1 1 160px;
+  min-width: 120px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+.bg-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.3s linear;
+}
+.fix-bar .serie {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Il rettangolo che l'utente disegna attorno al marker vero, e la diagnosi automatica
+   "questo marker non si muove". */
+.editor-stage.drawing { cursor: crosshair; }
+.editor-box.draw-box {
+  border: 2px dashed var(--accent);
+  background: rgba(79, 156, 249, 0.12);
+  pointer-events: none;
+}
+.fix-bar.wrong-bar { border-color: var(--warn); }
+.warn-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  background: rgba(210, 153, 34, 0.10);
+}
+.warn-mark {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--warn);
+  color: #101010;
+  font-weight: 700;
+  text-align: center;
+  line-height: 20px;
+}
+.warn-bar button { margin-left: auto; }
+
+/* I quattro marker che fissano i bordi di un envelope, disegnati sull'immagine. */
+.editor-box.limit-box {
+  border: 2px solid var(--box-color, #fff);
+  background: transparent;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.editor-box.limit-box.here { border-style: dashed; background: rgba(255, 255, 255, 0.12); }
+.limit-tag {
+  position: absolute;
+  left: 0;
+  top: -15px;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 3px;
+  white-space: nowrap;
+  color: #0b0b0b;
+  background: var(--box-color, #fff);
+  border-radius: 2px;
+}
+button.ghost.link {
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  text-align: left;
+}
+button.ghost.link:hover { text-decoration: underline; }
+
+/* --- sezione orientamento: impaginazione compatta --------------------------
+   Una barra sola per filtri/ordine/navigazione, una per le azioni, l'immagine
+   accanto all'elenco che scorre da solo, le analisi richiudibili in fondo. */
+.ov-status {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: 4px 0 8px;
+}
+.ov-help summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--accent);
+  list-style: none;
+}
+.ov-help summary::-webkit-details-marker { display: none; }
+.ov-help p { margin: 6px 0 0; max-width: 760px; }
+
+.ov-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.ov-chips { display: flex; gap: 5px; flex-wrap: wrap; }
+button.chip {
+  padding: 2px 8px;
+  font-size: 11.5px;
+  border-radius: 11px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+}
+button.chip.on {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: var(--accent);
+}
+button.chip:disabled { opacity: 0.35; }
+.ov-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.ov-nav button { padding: 3px 9px; font-size: 12px; }
+.ov-nav button.sq { padding: 3px 10px; font-weight: 700; }
+.ov-nav select {
+  padding: 3px 6px;
+  font-size: 12px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.ov-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px 14px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+  padding: 7px 9px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: rgba(79, 156, 249, 0.07);
+}
+.ov-actions .serie { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+
+.ov-body { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.ov-main { flex: 1 1 560px; min-width: 0; }
+.ov-side {
+  flex: 0 1 300px;
+  min-width: 230px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ov-side .template-card { width: auto; }
+/* l'altezza esatta la mette il JS (quella dell'immagine, meno il ritaglio): qui c'e' solo
+   il ripiego per il primo disegno, prima che l'immagine sia caricata */
+.ov-side .score-list { flex: 0 1 auto; min-height: 200px; max-height: 60vh; }
+.ov-under {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 6px 0 0;
+  font-size: 12.5px;
+}
+.ov-under-text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.ov-under .template-card { flex: 0 0 auto; width: 124px; padding: 7px; }
+.ov-under .template-card img { width: 64px; height: 64px; margin-bottom: 5px; }
+.ov-under .template-card .hint { font-size: 11px; line-height: 1.35; }
+.ov-legend { display: flex; gap: 12px; flex-wrap: wrap; }
+.ov-legend .editor-legend { margin: 0; font-size: 12px; }
+
+.ov-folds { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.ov-fold {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 0 12px;
+}
+.ov-fold > summary {
+  cursor: pointer;
+  padding: 9px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.ov-fold[open] > summary { border-bottom: 1px solid var(--line); }
+.ov-fold-tag {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: 11.5px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+.ov-fold-tag.warn { color: var(--warn); border-color: var(--warn); }
+/* le schede dentro una piega perdono cornice e titolo: li da' la piega stessa */
+.ov-fold .card {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 10px 0 12px;
+  margin: 0;
+}
+.ov-fold .card > h3:first-child { display: none; }
+
+/* I bordi degli envelope, vista compatta nella barra laterale: una riga per lato,
+   cliccabile, col dettaglio completo nel tooltip. */
+.ov-limits {
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+.ov-limits-head {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+}
+.ov-limits-group {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 9px 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.03);
+}
+button.lim-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 9px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font-size: 11.5px;
+  font-family: ui-monospace, Menlo, monospace;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+button.lim-row:hover { background: var(--panel-2); }
+button.lim-row.here { box-shadow: inset 3px 0 0 var(--accent); background: var(--panel-2); }
+button.lim-row.dubbio { background: rgba(210, 153, 34, 0.10); }
+button.lim-row.dubbio .lim-gain { color: var(--warn); font-weight: 700; }
+button.lim-row.fixed .lim-side { color: #ff4fd8; }
+.lim-side { width: 34px; flex: 0 0 auto; color: var(--muted); }
+.lim-val { width: 32px; flex: 0 0 auto; text-align: right; }
+.lim-gain { width: 32px; flex: 0 0 auto; text-align: right; color: var(--muted); }
+.lim-score { width: 30px; flex: 0 0 auto; text-align: right; }
+.lim-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-family: inherit;
+}
+
+/* I giri di raffinamento del rettangolo, uno per riga con il suo stato. */
+.chain-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+.chain-step:first-of-type { border-top: 0; }
+.chain-state {
+  flex: 0 0 auto;
+  min-width: 118px;
+  text-align: center;
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+.chain-step .row { margin-left: auto; }
+
+/* Lo studio disegnato sul frame: rettangoli e corde con la loro etichetta. */
+.editor-box.study-box { pointer-events: none; background: transparent; }
+.study-seg {
+  position: absolute;
+  height: 0;
+  border-top: 3px solid;
+  pointer-events: none;
+}
+.study-seg.dashed { border-top-style: dashed; }
+.study-tag {
+  position: absolute;
+  left: 0;
+  top: -15px;
+  font-size: 10px;
+  line-height: 14px;
+  padding: 0 4px;
+  white-space: nowrap;
+  color: #0b0b0b;
+  border-radius: 2px;
+}
+
+/* Assi di ribaltamento e loro intersezione, disegnati sul frame. */
+.study-axis { position: absolute; pointer-events: none; opacity: 0.85; }
+.study-axis.v { top: 0; bottom: 0; width: 1px; }
+.study-axis.h { left: 0; right: 0; height: 1px; }
+.study-axis .study-tag { top: 2px; left: 3px; }
+.study-axis.h .study-tag { top: -16px; left: 3px; }
+.study-cross {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.study-cross .study-tag { top: -15px; left: 12px; }
+
+/* Le maniglie della corda: agli estremi cambiano la larghezza, al centro la spostano. */
+/* Le maniglie della corda: si devono vedere sopra il grigio dell'ecografia e si devono
+   poter posizionare al pixel, quindi nucleo bianco, anello colorato e una tacca verticale
+   che prolunga il punto sopra e sotto. */
+.seg-handle {
+  position: absolute;
+  width: 13px;
+  height: 13px;
+  margin: -7px 0 0 -7px;
+  border: 2px solid var(--box-color, #fff);
+  border-radius: 3px;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.85), 0 0 6px rgba(0, 0, 0, 0.6);
+  cursor: grab;
+  z-index: 3;
+}
+.seg-handle.centro { border-radius: 50%; }
+.seg-handle:hover { transform: scale(1.15); }
+.seg-handle:active { cursor: grabbing; }
+.seg-handle.scelta {
+  background: var(--box-color, #fff);
+  box-shadow: 0 0 0 2px #ffffff, 0 0 8px rgba(0, 0, 0, 0.8);
+}
+.handle-tick {
+  position: absolute;
+  left: 50%;
+  top: -13px;
+  bottom: -13px;
+  width: 1px;
+  margin-left: -0.5px;
+  background: var(--box-color, #fff);
+  opacity: 0.9;
+}
+.seg-handle.centro .handle-tick { display: none; }
+.handle-coord {
+  position: absolute;
+  left: 16px;
+  top: -2px;
+  font-size: 10px;
+  line-height: 13px;
+  padding: 0 3px;
+  white-space: nowrap;
+  color: #0b0b0b;
+  background: var(--box-color, #fff);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.seg-handle.scelta .handle-coord { font-weight: 700; }
+
+/* Le proposte per il rettangolo: una riga per proposta, con il perche' sotto il nome. */
+.proposta {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 7px;
+  background: var(--panel);
+}
+.proposta.scelta { border-color: var(--warn); background: rgba(210, 153, 34, 0.07); }
+.proposta-testa { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.proposta-testa .chip { margin-left: auto; }
+.proposta .row { margin-top: 6px; }
+
+.proposta .slider-row { margin: 6px 0; }
+.proposta .slider-row label { width: 190px; text-transform: none; font-size: 12px; }
+.proposta .slider-row input[type=range] { max-width: 260px; }
+
+/* --- riepilogo della depth: una scheda per valore, col ritaglio ingrandito ------------- */
+.depth-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 12px; margin-top: 10px;
+}
+.depth-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 10px;
+}
+.depth-value { font-weight: 650; color: #3fb950; font-size: 15px; margin-bottom: 6px; }
+.depth-value .hint { font-weight: 400; }
+/* Il ritaglio arriva dal server gia' ingrandito 3x: `image-rendering: pixelated` evita che il
+   browser lo sfochi di nuovo, che e' proprio cio' che si vuole giudicare. */
+img.depth-crop {
+  display: block; width: 100%; border-radius: 5px; background: #000;
+  margin: 2px 0 7px; image-rendering: pixelated;
+}
+.depth-card button.ghost.sq2 { padding: 2px 9px; font-size: 12px; }
+.depth-strip {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px; margin-top: 9px; max-height: 420px; overflow-y: auto;
+  border-top: 1px solid var(--line); padding-top: 9px;
+}
+.depth-strip-item { cursor: pointer; }
+.depth-strip-item:hover img { outline: 2px solid var(--accent); }
+.depth-strip-item .hint {
+  font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.depth-card.aperta { grid-column: 1 / -1; }
+
+/* --- area ingrandita della depth: e' qui che si ritaglia sul numero ------------------- */
+.zoom-testa { margin-bottom: 6px; }
+.editor-stage.zoom-stage {
+  background: #000; border: 1px solid var(--line); border-radius: 8px;
+  overflow: hidden; margin-bottom: 10px;
+}
+/* Il ritaglio arriva dal server gia' ingrandito: `pixelated` evita che il browser lo sfochi
+   di nuovo, ed e' proprio il bordo dei pixel che si sta cercando di seguire. */
+.zoom-stage img { width: 100%; image-rendering: pixelated; }
+.editor-box.zoom-box { --box-color: #3fb950; cursor: move; }
+.editor-box.zoom-box .handle { width: 14px; height: 14px; }

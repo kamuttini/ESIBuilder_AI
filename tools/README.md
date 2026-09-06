@@ -13,6 +13,7 @@ Questi script servono per dimostrare compatibilita tra output legacy e nuovo flu
 - `tools/ultrasound/`: dataset/training/inferenza vendor-probe-rect + pipeline head `.fss`
 - `tools/line16/`: pipeline riga `#16` (template rect + parametri)
 - `tools/orientation/`: pipeline orientamento simbolico e review GUI
+- `tools/app/`: app di configurazione ESIBuilder AI (wizard locale + writer `.fss`)
 - `tools/review/`: tool di revisione snella (web) — run, correzioni, feedback verso Claude Code
 - `tools/review_html/`: script per generare pacchetti/gallerie HTML di revisione
 - `tools/monitor/`: monitor dello stato del progetto (dashboard per step della pipeline `.fss`)
