@@ -2009,3 +2009,38 @@ tre punti che avevano lo stesso schema — anteprima, ritaglio del marker, ritag
 
 Verifica: 12 anteprime su 12 per ciascuno dei tre progetti (378, 136 e 56 fotogrammi), e il
 ritaglio del marker risponde 200.
+
+## 8-sexvicies. Dodici immagini su trentasei, e perché
+
+Sul Philips Affiniti 70 (`prova 3`, 36 immagini) la sezione depth ne mostrava dodici e basta.
+Non è un difetto: è una conseguenza, ma non era detta da nessuna parte.
+
+Il modulo gira su un campione perché generare i candidati costa minuti. Dove la depth è **scritta
+nell'interfaccia**, il campione basta: da lì si propaga il riquadro e la cartella si copre in mezzo
+secondo per immagine. Dove invece la depth è **letta dalla scala** — ed è il caso di questo
+Philips, tutte e dodici le righe sono `mode: scale` — il numero cambia posto ad ogni fotogramma e
+un riquadro non si può propagare. È la stessa regola che vale per la propagazione: giusta, ma
+lasciava la sezione a dodici immagini senza spiegazione.
+
+Ora la sezione lo dice in testa — «12 immagini su 36 hanno una depth — qui la depth viene letta
+dalla scala…» — e nel caso non propagabile offre l'unica strada che resta: *Cerca la depth su tutte
+le 36*, cioè il modulo su ogni immagine.
+
+**E la conferma.** `POST /depth/confirm` marca lo step confermato **senza toccarne il valore**:
+`POST /steps/<id>` sostituirebbe il valore, e lì dentro vivono la rilettura su tutta la cartella e
+le correzioni — confermare non deve cancellare niente. Da quel momento quelle depth valgono come
+confermate e lo studio della scala le usa come dato certo, che è il collegamento fra le due
+sezioni.
+
+**Attenzione ai valori, però.** Su questa cartella tre depth su dodici non tornano col nome del
+file, e il motivo è l'OCR che perde il punto decimale:
+
+| file | atteso | letto | OCR |
+|---|---|---|---|
+| `LR_35` | 35 mm | **350 mm** | `35cm` |
+| `LR_30` | 30 mm | **300 mm** | `30cm` |
+| `LRUD_30` | 30 mm | **300 mm** | `30cm` |
+| `LRUD_35` | 35 mm | 35 mm | `3.5 cm` |
+
+Lo stesso valore viene letto `3.5 cm` su un fotogramma e `35cm` su un altro. Trenta centimetri su
+una L12-3 non esistono: vanno corretti prima di confermare.

@@ -341,6 +341,48 @@ async function createDepthViewer(projectId, sampleSize) {
      spazio alle cifre che crescono. */
   const riquadro = el('div', {});
   const totaleCartella = data.images_total || rows.length;
+
+  /* --- quante immagini hanno una depth, perche' le altre no, e la conferma ------------ */
+  const coperturaBox = el('div', { class: 'depth-copertura' });
+  const renderCopertura = () => {
+    const c = data.coverage || {};
+    coperturaBox.innerHTML = '';
+    coperturaBox.className = 'depth-copertura'
+      + (data.confirmed ? ' confermata' : (c.with_depth < c.total ? ' parziale' : ''));
+    coperturaBox.append(el('strong', {},
+      `${c.with_depth} immagini su ${c.total} hanno una depth`));
+    if (c.reason) coperturaBox.append(el('span', { class: 'hint' }, ` — ${c.reason}.`));
+    const riga = el('div', { class: 'row', style: 'margin-top:6px' });
+    if (c.with_depth < c.total && !c.can_propagate) {
+      const tutte = el('button', { class: 'ghost' }, `Cerca la depth su tutte le ${c.total}`);
+      const stato = el('span', { class: 'hint' }, 'il modulo gira su ogni immagine: qualche minuto');
+      tutte.addEventListener('click', async () => {
+        tutte.disabled = true;
+        try {
+          const { job_id } = await api(`/projects/${projectId}/depth/run`, { body: { sample: 0 } });
+          await pollJob(job_id, stato);
+          toast('depth cercata su tutte le immagini');
+          await rileggiTutto();
+        } catch (errore) { toast(errore.message, true); stato.textContent = errore.message; }
+        finally { tutte.disabled = false; }
+      });
+      riga.append(tutte, stato);
+    }
+    riga.append(confermaInDueTempi(
+      data.confirmed ? 'Togli la conferma' : 'Conferma la depth e passa alla scala',
+      data.confirmed
+        ? 'la depth torna a essere una proposta.'
+        : 'queste depth valgono come confermate: lo studio della scala le usera\' come dato certo.',
+      async () => {
+        try {
+          await api(`/projects/${projectId}/depth/confirm`,
+            { body: data.confirmed ? { reset: true } : {} });
+          toast(data.confirmed ? 'conferma tolta' : 'depth confermata');
+          await rileggiTutto();
+        } catch (errore) { toast(errore.message, true); }
+      }));
+    coperturaBox.append(riga);
+  };
   const avanzamento = el('span', { class: 'hint' });
   /* L'ambito: il modulo gira su un campione, ma la label sta nell'interfaccia di ogni
      fotogramma. Rileggere un numero dentro a un riquadro gia' noto costa poco, quindi la
@@ -374,8 +416,11 @@ async function createDepthViewer(projectId, sampleSize) {
     names = (fresca.rows || []).map((r) => r.name);
     index = Math.max(0, names.indexOf(corrente));
     modello = fresca.box_template || null;
+    data.coverage = fresca.coverage; data.confirmed = fresca.confirmed;
+    data.images_total = fresca.images_total;
     conteggi = { by_mode: fresca.by_mode || {}, by_status: fresca.by_status || {} };
     rifaiChips();
+    renderCopertura();
     mostra();
   };
   const renderRiquadro = () => {
@@ -626,6 +671,7 @@ async function createDepthViewer(projectId, sampleSize) {
       `depth calcolata su ${rows.length} immagini delle ${data.images_total} della cartella. `
       + 'Il riquadro sull\'immagine e\' il posto da cui il numero e\' stato preso, colorato '
       + 'secondo il metodo.'),
+    coperturaBox,
     chips,
     el('div', { class: 'row' }, campoCerca,
       el('span', { class: 'hint' }, 'filtra le immagini per nome: serve per applicare un '
@@ -637,6 +683,7 @@ async function createDepthViewer(projectId, sampleSize) {
   );
 
   riepilogo.style.display = 'none';
+  renderCopertura();
   const daTastiera = (event) => {
     if (vista !== 'singola' || !root.isConnected) return;
     const dove = event.target;

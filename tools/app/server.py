@@ -4214,9 +4214,57 @@ def api_depth(project_id: str):
             },
             "values_mm": valori,
             "images_total": len(project.dedup_images()),
+            "coverage": _copertura_depth(project, righe),
+            "confirmed": str((project.steps.get("depth_scale") or {}).get("status") or "")
+                         in ("confirmed", "corrected"),
             "stage_dir": str(stage),
         }
     )
+
+
+def _copertura_depth(project: Project, righe: Sequence[Dict]) -> Dict:
+    """Quante immagini hanno una depth, e **perche'** le altre no.
+
+    Il modulo gira su un campione perche' generare i candidati costa minuti. Dove la depth e'
+    scritta nell'interfaccia il campione basta: da li' si propaga il riquadro e si copre tutta
+    la cartella in mezzo secondo per immagine. Dove invece la depth viene letta *dalla scala*,
+    il numero cambia posto ad ogni fotogramma e un riquadro non si puo' propagare: l'unico modo
+    di coprire tutte le immagini e' far girare il modulo su tutte.
+
+    Senza questa spiegazione la sezione mostra dodici immagini su trentasei e basta.
+    """
+    totale = len(project.dedup_images())
+    con_depth = sum(1 for r in righe if r.get("depth_mm") is not None)
+    modi = [r.get("mode") for r in righe if r.get("mode")]
+    prevalente = max(set(modi), key=modi.count) if modi else ""
+    propagabile = prevalente in DEPTH_BOX_MODES
+    if con_depth >= totale:
+        motivo = ""
+    elif propagabile:
+        motivo = ("il modulo gira su un campione; il riquadro si propaga al resto della "
+                  "cartella in mezzo secondo per immagine")
+    else:
+        motivo = ("qui la depth viene letta dalla scala, non da un'etichetta: il numero cambia "
+                  "posto ad ogni fotogramma, quindi un riquadro non si puo' propagare. Per "
+                  "coprire tutte le immagini bisogna far girare il modulo su tutte")
+    return {"with_depth": con_depth, "total": totale, "mode": prevalente,
+            "can_propagate": propagabile, "reason": motivo}
+
+
+@app.post("/api/projects/<project_id>/depth/confirm")
+def api_depth_confirm(project_id: str):
+    """Conferma la depth cosi' com'e', senza toccarne il valore.
+
+    `POST /steps/<id>` sostituirebbe il valore dello step, e li' dentro vivono anche la
+    rilettura su tutta la cartella e le correzioni: confermare non deve cancellare niente.
+    Da qui in poi queste depth valgono come confermate, e lo studio della scala le usa.
+    """
+    _project(project_id)
+    annulla = bool(_payload().get("reset"))
+    valore = _write_step(project_id, "depth_scale", lambda _p, v: v,
+                         status="proposed" if annulla else "confirmed",
+                         source="model" if annulla else "user")
+    return jsonify({"confirmed": not annulla, "values": len(valore.get("depths") or [])})
 
 
 # --- il riquadro della depth letta dall'interfaccia ------------------------
