@@ -1698,6 +1698,14 @@ function panelModuleStage(panel, step) {
   if (step.id === 'scale_study') {
     const host = el('div', {});
     panel.append(host);
+    if (typeof createScaleViewer !== 'function') {
+      // Succede con una `index.html` vecchia in cache, senza lo script della sezione: senza
+      // questo controllo il pannello si fermava qui, muto.
+      host.append(el('p', { class: 'hint' },
+        'la vista della scala non e\' stata caricata: ricarica la pagina '
+        + '(cmd+shift+R) e riprova.'));
+      return;
+    }
     createScaleViewer(state.projectId)
       .then((node) => host.append(node))
       .catch((error) => {

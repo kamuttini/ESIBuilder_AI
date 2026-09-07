@@ -1804,3 +1804,15 @@ immagine. Aggiunta la riga, la sezione disegna colonna, tacche, numeri ed estrem
 Nell'occasione: un progetto analizzato prima che lo studio esistesse non ha i suoi dati, e la
 pagina restava vuota anche a ragione. Ora in quel caso mostra un comando — *Studia il righello di
 questa cartella* — che lo fa partire da lì, senza dover rifare tutti e tre i moduli.
+
+### E l'immagine non si vedeva: `index.html` in cache
+
+Aggiungere una sezione vuol dire aggiungere uno script a `index.html`. Il browser però teneva la
+pagina in cache, e con lei la vecchia lista degli script: `scale_view.js` non veniva mai scaricato,
+`createScaleViewer` non esisteva, e il pannello si fermava sulla `ReferenceError` **senza dire
+niente** — restava l'intestazione dello step e nessuna immagine.
+
+Due correzioni. Il server manda `Cache-Control: no-store` per `/` e per `/static/`: qui la pagina
+si ricarica di continuo mentre si lavora, la cache non fa guadagnare nulla e nasconde le
+modifiche. E il pannello, se la funzione della sezione non c'è, lo dice e suggerisce di
+ricaricare, invece di fermarsi muto.

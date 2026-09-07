@@ -917,6 +917,20 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.after_request
+def _niente_cache(risposta):  # noqa: ANN001
+    """La pagina e gli script non si mettono in cache.
+
+    Il browser teneva `index.html` e con lui la lista degli script: aggiungendone uno nuovo
+    (`scale_view.js`) la pagina restava senza, la funzione della sezione non esisteva e il
+    pannello si fermava senza dire niente. Qui l'app la si ricarica di continuo mentre si
+    lavora: la cache non fa guadagnare nulla e nasconde le modifiche.
+    """
+    if request.path == "/" or request.path.startswith("/static/"):
+        risposta.headers["Cache-Control"] = "no-store, must-revalidate"
+    return risposta
+
+
 # -- metadati --------------------------------------------------------------
 @app.get("/api/meta")
 def api_meta():
