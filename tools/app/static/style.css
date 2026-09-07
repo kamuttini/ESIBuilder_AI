@@ -830,15 +830,19 @@ img.depth-crop {
 .scala-zoom img { display: block; width: 100%; image-rendering: pixelated; }
 .scala-zoom-piano { position: absolute; inset: 0; cursor: ns-resize; }
 .scala-mira {
-  position: absolute; width: 60px; height: 0; border-top: 2px solid;
+  position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid;
   transform: translateY(-1px);
 }
-.scala-mira::before, .scala-mira::after {
-  content: ''; position: absolute; top: -5px; width: 2px; height: 10px;
-  background: currentColor; opacity: .8;
+/* Colonna e tacche anche nella finestra ingrandita, uguali a quelle sull'immagine intera:
+   e' il confronto fra le due che dice se la correzione e' a posto. */
+.scala-zoom-colonna {
+  position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px dashed #40d0ff;
+  transform: translateX(-1px);
 }
-.scala-mira::before { left: 0; }
-.scala-mira::after { right: 0; }
+.scala-zoom-tacca {
+  position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid #40d0ff;
+  opacity: .55;
+}
 .scala-stato { color: var(--accent); }
 .scala-numero-campo {
   width: 52px; padding: 0 2px; font-size: 11px; background: #000; color: #40d0ff;

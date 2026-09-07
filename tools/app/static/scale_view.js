@@ -113,23 +113,49 @@ async function createScaleViewer(projectId) {
     }
   };
 
-  /* --- le due finestre ingrandite: e' li' che si prende il pixel giusto -------------- */
+  /* --- le due finestre ingrandite: e' li' che si prende il pixel giusto --------------
+
+     La finestra deve corrispondere **esattamente** all'overlay sull'immagine intera, o
+     guardandola non si sa se la correzione e' giusta. Due cose la rompevano: il ritaglio
+     arriva ingrandito 4x ma poi il CSS lo porta alla larghezza della scatola, quindi la
+     scala vera non e' 4 ma `larghezza / finestra`; e la finestra va ritagliata sui bordi
+     dell'immagine con la stessa regola del server — spostandola, non stringendola —
+     altrimenti client e server parlano di due ritagli diversi. */
+  const LARGA_ZOOM = 150;
+  const ALTA_ZOOM = 44;
   const zoom = {};
+
+  const finestraZoom = (f, y) => {
+    const larghezza = Math.min(LARGA_ZOOM, f.w || LARGA_ZOOM);
+    const altezza = Math.min(ALTA_ZOOM, f.h || ALTA_ZOOM);
+    let x0 = Math.round(f.x - larghezza / 3);
+    let y0 = Math.round(y - altezza / 2);
+    x0 = Math.max(0, Math.min(x0, (f.w || larghezza) - larghezza));
+    y0 = Math.max(0, Math.min(y0, (f.h || altezza) - altezza));
+    return [x0, y0, x0 + larghezza, y0 + altezza];
+  };
+  const scalaZoom = (chiave) => {
+    const z = zoom[chiave];
+    if (!z || !z.finestra) return 1;
+    return (z.img.clientWidth || 1) / (z.finestra[2] - z.finestra[0]);
+  };
+
   const creaZoom = (chiave, etichetta, colore) => {
     const scatola = el('div', { class: 'scala-zoom' });
     const img = el('img', { alt: '' });
-    const mira = el('div', { class: 'scala-mira', style: `border-top-color:${colore}` });
+    const titolo = el('div', { class: 'scala-zoom-titolo' }, etichetta);
     const piano = el('div', { class: 'scala-zoom-piano' });
-    piano.append(mira);
-    scatola.append(el('div', { class: 'scala-zoom-titolo' }, etichetta), img, piano);
+    scatola.append(titolo, img, piano);
     piano.addEventListener('pointerdown', (e) => trascina(e, chiave, () => ({
-      x: INGRANDIMENTO_SCALA, y: INGRANDIMENTO_SCALA,
+      x: scalaZoom(chiave), y: scalaZoom(chiave),
     })));
-    zoom[chiave] = { scatola, img, mira, finestra: null };
+    zoom[chiave] = { scatola, img, piano, titolo, colore, etichetta, finestra: null };
+    if (window.ResizeObserver) new ResizeObserver(() => aggiornaZoom()).observe(img);
+    img.addEventListener('load', () => aggiornaZoom());
     return scatola;
   };
-  const zoomZero = creaZoom('y_zero', 'zero, ingrandito 4×', '#3fb950');
-  const zoomFondo = creaZoom('y_far', 'fondo, ingrandito 4×', '#d29922');
+  const zoomZero = creaZoom('y_zero', 'zero', '#3fb950');
+  const zoomFondo = creaZoom('y_far', 'fondo', '#d29922');
 
   const aggiornaZoom = () => {
     const f = corrente();
@@ -138,17 +164,30 @@ async function createScaleViewer(projectId) {
       const y = f[chiave];
       z.scatola.style.display = (y == null || f.x == null) ? 'none' : '';
       if (y == null || f.x == null) continue;
-      const x0 = Math.max(0, Math.round(f.x - 46));
-      const y0 = Math.max(0, Math.round(y - 22));
-      const nuova = [x0, y0, x0 + 150, y0 + 44];
+      const nuova = finestraZoom(f, y);
       if (!z.finestra || z.finestra.join() !== nuova.join()) {
         z.finestra = nuova;
         z.img.src = `/api/projects/${projectId}/depth/crop`
           + `?name=${encodeURIComponent(f.name)}&zoom=${INGRANDIMENTO_SCALA}&raw=1`
           + `&x0=${nuova[0]}&y0=${nuova[1]}&x1=${nuova[2]}&y1=${nuova[3]}`;
       }
-      z.mira.style.top = `${(y - z.finestra[1]) * INGRANDIMENTO_SCALA}px`;
-      z.mira.style.left = `${(f.x - z.finestra[0]) * INGRANDIMENTO_SCALA - 30}px`;
+      const s = scalaZoom(chiave);
+      z.titolo.textContent = `${z.etichetta}: y=${Math.round(y)} · colonna x=${Math.round(f.x)}`;
+      // Gli stessi disegni dell'immagine intera, alla scala vera della finestra: e' il
+      // confronto fra i due che dice se la correzione e' a posto.
+      z.piano.innerHTML = '';
+      const colonna = el('div', { class: 'scala-zoom-colonna' });
+      colonna.style.left = `${(f.x - z.finestra[0]) * s}px`;
+      z.piano.append(colonna);
+      for (const t of f.ticks || []) {
+        if (t < z.finestra[1] || t > z.finestra[3]) continue;
+        const tacca = el('div', { class: 'scala-zoom-tacca' });
+        tacca.style.top = `${(t - z.finestra[1]) * s}px`;
+        z.piano.append(tacca);
+      }
+      const mira = el('div', { class: 'scala-mira', style: `border-top-color:${z.colore}` });
+      mira.style.top = `${(y - z.finestra[1]) * s}px`;
+      z.piano.append(mira);
     }
   };
 

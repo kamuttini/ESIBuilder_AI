@@ -1949,3 +1949,23 @@ un comando e un giro.
 Un dettaglio che rendeva il confronto senza senso: la run rifaceva lo studio su
 `len(correzioni) + 14` fotogrammi, quindi ogni giro ne guardava di più e i nuovi arrivati
 sembravano comparsi dal nulla. Ora il numero di fotogrammi resta quello del giro precedente.
+
+### Le finestre ingrandite non corrispondevano all'immagine intera
+
+Il ritaglio arriva dal server ingrandito 4×, ma il CSS lo porta poi alla larghezza della scatola.
+La mira invece veniva posizionata assumendo 4 px per pixel nativo: su una scatola larga 361 px per
+150 px di finestra la scala vera è **2,407**, quindi la mira finiva al 66% oltre il punto giusto —
+e lo stesso errore rallentava il trascinamento dentro la finestra. Guardando le due viste non si
+poteva sapere se la correzione fosse a posto, che è l'unica ragione per cui le finestre esistono.
+
+Corretto: la scala si misura, `larghezza mostrata / larghezza della finestra`, e si ricalcola
+quando la scatola cambia dimensione. La finestra viene inoltre ritagliata sui bordi dell'immagine
+**spostandola** e non stringendola, con la stessa regola del server: altrimenti vicino a un bordo
+i due parlerebbero di ritagli diversi — lo stesso difetto già trovato nella sezione depth.
+
+E per rendere la corrispondenza verificabile a occhio, dentro la finestra si disegnano ora **le
+stesse cose** dell'immagine intera: la colonna tratteggiata, le tacche che ci cadono dentro, e la
+mira dell'estremo. Il titolo porta le coordinate esatte — «zero: y=784 · colonna x=867».
+
+Verifica: ricostruendo le coordinate dai pixel disegnati si torna a `y=784` e `x=867`, cioè
+esattamente i valori del titolo e dell'overlay.
