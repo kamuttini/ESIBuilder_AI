@@ -3715,6 +3715,116 @@ def _write_scale_corrections(project: Project) -> Path:
     return percorso
 
 
+def _righello_noto(frame: Dict, correzioni: Dict) -> bool:
+    """Un fotogramma su cui il righello si sa: accettato dal modulo, o corretto a mano."""
+    if not frame.get("x") or frame.get("y_zero") is None:
+        return False
+    return bool(frame.get("status") == "accepted" or correzioni.get(frame.get("name")))
+
+
+def _suggerisci_righelli(frames: Sequence[Dict], correzioni: Dict) -> Dict[str, Dict]:
+    """Dove il righello non si trova, proporlo a partire da dove si sa.
+
+    Si usano solo le grandezze che i fotogrammi noti misurano bene, e la depth non e' fra
+    queste: su questa cartella `E_depth_interface` dice 20 mm su fotogrammi che il nome
+    chiama 40 e 80, mentre il righello misurato dal modulo li da' a 39.9 e 79.8 mm — cioe'
+    la lettura del righello e' giusta e quella della depth no. Un modello che si appoggiasse
+    alla depth propagherebbe l'errore.
+
+    Le grandezze buone sono geometriche e di cartella: la macchina disegna il righello sempre
+    nello stesso posto e sempre lungo lo stesso, e le tacche hanno sempre lo stesso passo.
+      * colonna e zero: mediana dei noti;
+      * lunghezza della barra in pixel: mediana dei noti (qui 511-550 px, molto stabile);
+      * passo in pixel: mediana dei noti, da cui `mm_per_px = passo_mm / passo_px`.
+    Lo scarto fra i noti viene riportato: e' la misura di quanto fidarsi della proposta.
+    """
+    noti = [f for f in frames if _righello_noto(f, correzioni)]
+    if not noti:
+        return {}
+
+    def mediana(valori: Sequence[float]) -> Optional[float]:
+        puliti = [float(v) for v in valori if v not in (None, "")]
+        return statistics.median(puliti) if puliti else None
+
+    x_cartella = mediana([f["x"] for f in noti])
+    colonne = [float(f["x"]) for f in noti]
+    scarto_x = max(colonne) - min(colonne)
+
+    versi = [str(f.get("B_zero_end") or "") for f in noti if f.get("B_zero_end")]
+    verso = max(set(versi), key=versi.count) if versi else "bottom"
+    stessi = [f for f in noti if str(f.get("B_zero_end") or "") == verso] or noti
+    y_zero_cartella = mediana([f["y_zero"] for f in stessi])
+
+    lunghezze = [abs(float(f["y_far"]) - float(f["y_zero"]))
+                 for f in stessi if f.get("y_far") is not None]
+    lunghezza = mediana(lunghezze)
+    scarto_lunghezza = (max(lunghezze) - min(lunghezze)) if lunghezze else 0.0
+
+    passo_px = mediana([f["pitch"] for f in noti if f.get("pitch")])
+    passo_mm = mediana([f["D_step_mm"] for f in noti if f.get("D_step_mm")]) or 10.0
+
+    if x_cartella is None or y_zero_cartella is None or not lunghezza:
+        return {}
+
+    direzione = 1 if verso == "top" else -1
+    motivo = (f"colonna e zero dalla mediana di {len(noti)} fotogrammi noti; "
+              f"barra lunga {lunghezza:.0f} px (scarto {scarto_lunghezza:.0f} px)")
+    if scarto_x > 12.0:
+        motivo += "; colonne note discordi, la colonna e' meno affidabile"
+    if passo_px:
+        motivo += f"; passo {passo_px:.0f} px = {passo_mm:g} mm"
+
+    proposte: Dict[str, Dict] = {}
+    for frame in frames:
+        if _righello_noto(frame, correzioni) or frame.get("x"):
+            continue
+        y_far = y_zero_cartella + direzione * lunghezza
+        altezza = float(frame.get("h") or 0)
+        if altezza and not (0 <= y_far <= altezza):
+            continue
+        tacche: List[float] = []
+        if passo_px:
+            quante = int(lunghezza / passo_px)
+            tacche = [round(y_zero_cartella + direzione * k * passo_px, 1)
+                      for k in range(quante + 1)]
+        proposte[str(frame.get("name"))] = {
+            "x": round(x_cartella, 1),
+            "y_zero": round(y_zero_cartella, 1),
+            "y_far": round(y_far, 1),
+            "zero_end": verso,
+            "ticks": tacche,
+            "mm_per_px": round(passo_mm / passo_px, 5) if passo_px else None,
+            "step_mm": passo_mm,
+            "from": len(noti),
+            "spread_px": round(scarto_lunghezza, 1),
+            "reason": motivo,
+        }
+    return proposte
+
+
+@app.get("/api/projects/<project_id>/scale/study/suggestions")
+def api_scale_study_suggestions(project_id: str):
+    """I righelli proposti per i fotogrammi in cui non e' stato trovato."""
+    project = _project(project_id)
+    stadi = ((project.data.get("analysis") or {}).get("stages") or {})
+    percorso = str((stadi.get("scale_study") or {}).get("data_json") or "")
+    if not percorso or not Path(percorso).is_file():
+        return jsonify({"error": "lo studio della scala non e' ancora stato fatto",
+                        "suggestions": {}}), 404
+    dati = json.loads(Path(percorso).read_text(encoding="utf-8"))
+    base = project.working_dir() or Path("")
+    for frame in dati.get("frames") or []:
+        percorso_frame = Path(str(frame.get("path") or ""))
+        try:
+            frame["name"] = str(percorso_frame.relative_to(base))
+        except ValueError:
+            frame["name"] = percorso_frame.name
+    correzioni = project.step_value("scale_study").get("corrections") or {}
+    proposte = _suggerisci_righelli(dati.get("frames") or [], correzioni)
+    return jsonify({"suggestions": proposte, "known": sum(
+        1 for f in dati.get("frames") or [] if _righello_noto(f, correzioni))})
+
+
 @app.post("/api/projects/<project_id>/scale/study/correct")
 def api_scale_study_correct(project_id: str):
     """Correggi colonna, zero, fondo, tacche o numeri su un fotogramma."""

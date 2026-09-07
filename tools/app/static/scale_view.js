@@ -20,7 +20,9 @@ async function createScaleViewer(projectId) {
 
   let indice = 0;
   let filtro = '';
-  let modo = 'guarda';          // guarda · tacca · numero
+  let modo = 'guarda';          // guarda · disegna · tacca · numero
+  let suggerimenti = {};
+  let disegnoInCorso = null;    // il righello che si sta indicando a mano
   const corrente = () => frames[indice] || {};
   const passa = (f) => !filtro || f.status === filtro;
   const visibili = () => frames.filter(passa);
@@ -70,6 +72,37 @@ async function createScaleViewer(projectId) {
       }
       strati.append(numero);
     }
+    const proposta = suggerimenti[f.name];
+    if (proposta && f.x == null) {
+      // La proposta si disegna in ambra tratteggiata: e' un consiglio, non una misura.
+      const colonna = el('div', { class: 'scala-colonna proposta' });
+      colonna.style.left = `${proposta.x * s}px`;
+      colonna.style.height = `${alto}px`;
+      strati.append(colonna);
+      for (const t of proposta.ticks || []) {
+        const tacca = el('div', { class: 'scala-tacca proposta' });
+        tacca.style.top = `${t * s}px`;
+        tacca.style.left = `${(proposta.x - 20) * s}px`;
+        tacca.style.width = `${40 * s}px`;
+        strati.append(tacca);
+      }
+      for (const [chiave, classe, etichetta] of [['y_zero', 'zero', '0 proposto'],
+                                                 ['y_far', 'fondo', 'fondo proposto']]) {
+        const riga = el('div', { class: `scala-estremo proposta scala-${classe}` },
+          el('span', {}, etichetta));
+        riga.style.top = `${proposta[chiave] * s}px`;
+        strati.append(riga);
+      }
+    }
+    if (disegnoInCorso) {
+      const colonna = el('div', { class: 'scala-colonna disegno' });
+      colonna.style.left = `${disegnoInCorso.x * s}px`;
+      colonna.style.height = `${alto}px`;
+      strati.append(colonna);
+      const zero = el('div', { class: 'scala-estremo disegno scala-zero' }, el('span', {}, '0'));
+      zero.style.top = `${disegnoInCorso.y_zero * s}px`;
+      strati.append(zero);
+    }
     for (const [chiave, classe, etichetta] of [['y_zero', 'zero', '0'], ['y_far', 'fondo', 'fondo']]) {
       if (f[chiave] == null) continue;
       const riga = el('div', { class: `scala-estremo scala-${classe}` },
@@ -105,9 +138,46 @@ async function createScaleViewer(projectId) {
 
   /* --- tacche: si aggiungono cliccando sull'immagine, si tolgono cliccandole ---------- */
   stage.addEventListener('click', (event) => {
-    if (modo !== 'tacca' || event.target.closest('.scala-tacca')) return;
     const s = scala();
-    const y = Math.round((event.clientY - stage.getBoundingClientRect().top) / (s || 1));
+    const riquadro = stage.getBoundingClientRect();
+    if (modo === 'disegna') {
+      const x = Math.round((event.clientX - riquadro.left) / (s || 1));
+      const y = Math.round((event.clientY - riquadro.top) / (s || 1));
+      const f = corrente();
+      if (!disegnoInCorso) {
+        // Primo clic: la colonna e lo zero. Secondo clic: il fondo, e da li' le tacche.
+        disegnoInCorso = { x, y_zero: y };
+        toast('ora clicca il fondo del righello');
+      } else {
+        const passoMm = (suggerimenti[f.name] || {}).step_mm || 10;
+        f.x = disegnoInCorso.x;
+        f.y_zero = disegnoInCorso.y_zero;
+        f.y_far = y;
+        f.B_zero_end = y < disegnoInCorso.y_zero ? 'bottom' : 'top';
+        const depth = f.E_depth_interface;
+        const tacche = [];
+        if (depth) {
+          const mmPx = depth / Math.abs(y - disegnoInCorso.y_zero);
+          const passoPx = passoMm / mmPx;
+          const direzione = y > disegnoInCorso.y_zero ? 1 : -1;
+          for (let k = 0; k * passoPx <= Math.abs(y - disegnoInCorso.y_zero) + 0.5; k += 1) {
+            tacche.push(Math.round(disegnoInCorso.y_zero + direzione * k * passoPx));
+          }
+        }
+        f.ticks = tacche;
+        salva({ x: f.x, y_zero: f.y_zero, y_far: f.y_far,
+                zero_end: f.B_zero_end, ticks_add: tacche });
+        disegnoInCorso = null;
+        modo = 'guarda';
+        for (const b of modi.children) b.classList.remove('on');
+        modi.children[0].classList.add('on');
+        toast('righello indicato: rifai lo studio per usarlo anche altrove');
+      }
+      disegna(); renderDati(); renderAzioni();
+      return;
+    }
+    if (modo !== 'tacca' || event.target.closest('.scala-tacca')) return;
+    const y = Math.round((event.clientY - riquadro.top) / (s || 1));
     const f = corrente();
     f.ticks = [...(f.ticks || []), y].sort((a, b) => a - b);
     const aggiunte = [...(correzione().ticks_add || []), y];
@@ -144,9 +214,23 @@ async function createScaleViewer(projectId) {
         { body: { name: corrente().name, ...campi } });
       dati.corrections = dati.corrections || {};
       dati.corrections[corrente().name] = { ...correzione(), ...campi };
-      renderDati();
+      // Un righello indicato a mano diventa subito un consiglio per gli altri falliti.
+      await caricaSuggerimenti();
+      renderDati(); renderLista(); disegna();
     } catch (errore) { toast(errore.message, true); }
   };
+
+  const caricaSuggerimenti = async () => {
+    try {
+      const r = await api(`/projects/${projectId}/scale/study/suggestions`);
+      suggerimenti = r.suggestions || {};
+      notiBox.textContent = Object.keys(suggerimenti).length
+        ? `righello proposto su ${Object.keys(suggerimenti).length} fotogrammi, `
+          + `a partire dai ${r.known} in cui si sa dov'e'`
+        : '';
+    } catch (errore) { suggerimenti = {}; }
+  };
+  const notiBox = el('div', { class: 'hint' });
 
   /* --- il pannello dei dati: cosa ha trovato, e cosa hai corretto tu ------------------ */
   const datiBox = el('div', { class: 'hint' });
@@ -188,6 +272,19 @@ async function createScaleViewer(projectId) {
       const b = el('button', { class: 'chip' + (f.B_zero_end === dove ? ' on' : '') }, etichetta);
       b.addEventListener('click', () => { f.B_zero_end = dove; salva({ zero_end: dove }); renderAzioni(); });
       azioni.append(b);
+    }
+    const proposta = suggerimenti[f.name];
+    if (proposta && f.x == null) {
+      const usa = el('button', {}, 'Usa il righello proposto');
+      usa.addEventListener('click', async () => {
+        f.x = proposta.x; f.y_zero = proposta.y_zero; f.y_far = proposta.y_far;
+        f.ticks = proposta.ticks || []; f.B_zero_end = proposta.zero_end;
+        await salva({ x: proposta.x, y_zero: proposta.y_zero, y_far: proposta.y_far,
+                      zero_end: proposta.zero_end, ticks_add: proposta.ticks || [] });
+        toast('righello proposto accettato');
+        disegna(); renderAzioni(); renderDati();
+      });
+      azioni.append(usa, el('span', { class: 'hint' }, proposta.reason || ''));
     }
     if (Object.keys(correzione()).filter((k) => k !== 'ts').length) {
       azioni.append(confermaInDueTempi('Togli le mie correzioni su questo fotogramma',
@@ -264,13 +361,16 @@ async function createScaleViewer(projectId) {
 
   const modi = el('div', { class: 'ov-chips' });
   for (const [chiave, etichetta] of [['guarda', 'guarda e trascina'],
+                                     ['disegna', 'indica tu il righello'],
                                      ['tacca', 'aggiungi/togli tacche'],
                                      ['numero', 'correggi i numeri']]) {
     const b = el('button', { class: 'chip' + (chiave === modo ? ' on' : '') }, etichetta);
     b.addEventListener('click', () => {
       modo = chiave;
+      disegnoInCorso = null;
       for (const altro of modi.children) altro.classList.remove('on');
       b.classList.add('on');
+      if (chiave === 'disegna') toast('clicca dove sta lo zero del righello');
       disegna();
     });
     modi.append(b);
@@ -306,7 +406,7 @@ async function createScaleViewer(projectId) {
       + `trovata su ${(dati.zone || {}).found || 0} fotogrammi su ${(dati.zone || {}).total || 0}. `
       + 'Trascina la colonna, lo zero e il fondo; con i modi qui sotto aggiungi o togli tacche '
       + 'e correggi i numeri. Le correzioni rientrano nel modulo quando rifai lo studio.'),
-    chips, modi,
+    chips, modi, notiBox,
     el('div', { class: 'ov-bar' },
       el('div', { class: 'ov-nav' },
         el('button', { class: 'ghost sq', onclick: () => passo(-1) }, '‹'),
@@ -323,6 +423,7 @@ async function createScaleViewer(projectId) {
   image.addEventListener('load', disegna);
   window.addEventListener('resize', disegna);
   if (window.ResizeObserver) new ResizeObserver(() => disegna()).observe(image);
+  await caricaSuggerimenti();
   mostra();
   return root;
 }

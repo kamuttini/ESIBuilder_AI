@@ -808,3 +808,10 @@ img.depth-crop {
 }
 .scala-zero { border-top-color: #3fb950; color: #3fb950; }
 .scala-fondo { border-top-color: #d29922; color: #d29922; }
+/* La proposta e il disegno in corso: ambra tratteggiata, per non confonderli con una misura. */
+.scala-colonna.proposta { border-left-style: dotted; border-left-color: #d29922; opacity: .8; }
+.scala-tacca.proposta { border-top-color: #d29922; border-top-style: dotted; opacity: .8; }
+.scala-estremo.proposta { border-top-style: dotted; opacity: .85; }
+.scala-estremo.proposta span { font-weight: 400; }
+.scala-colonna.disegno { border-left-color: #ff4fd8; }
+.scala-estremo.disegno { border-top-color: #ff4fd8; color: #ff4fd8; }

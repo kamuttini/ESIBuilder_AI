@@ -1816,3 +1816,39 @@ Due correzioni. Il server manda `Cache-Control: no-store` per `/` e per `/static
 si ricarica di continuo mentre si lavora, la cache non fa guadagnare nulla e nasconde le
 modifiche. E il pannello, se la funzione della sezione non c'è, lo dice e suggerisce di
 ricaricare, invece di fermarsi muto.
+
+## 8-tervicies. Dove il righello non si trova: indicarlo, e usarlo come consiglio
+
+Su `prova_2` otto fotogrammi su quattordici escono `no_ladder`: la scala non viene trovata, e
+non c'è niente da correggere perché non c'è niente. Due aggiunte.
+
+**Indicarlo a mano.** Modo *«indica tu il righello»*: un clic dove sta lo zero — che fissa anche
+la colonna — e un secondo clic sul fondo. Da quei due punti si ricavano il verso e le tacche, e
+il tutto diventa una correzione come le altre.
+
+**Usarlo come consiglio sugli altri.** `GET /scale/study/suggestions` prende i fotogrammi in cui
+il righello si sa — accettati dal modulo o indicati da te — e propone un righello su quelli
+falliti. Sul fotogramma la proposta si disegna in **ambra punteggiata**, per non confonderla con
+una misura, e un comando la accetta trasformandola in correzione.
+
+**Su cosa si basa la proposta, e perché non sulla depth.** Le grandezze buone sono geometriche e
+di cartella: la macchina disegna il righello sempre nello stesso posto, sempre lungo lo stesso, e
+con lo stesso passo. Quindi colonna e zero dalla mediana dei noti, lunghezza della barra dalla
+mediana dei noti, passo dalla mediana dei noti — e `mm_per_px = passo_mm / passo_px`.
+
+Il primo modello che avevo scritto ricavava la lunghezza dalla depth, ed era sbagliato. I dati lo
+dicono chiaramente:
+
+| fotogramma | depth dell'interfaccia | barra misurata | mm/px × barra |
+|---|---|---|---|
+| `T_LRUD_80` | 20 mm | 550 px | **79,8 mm** |
+| `T_UD_40` | 20 mm | 511 px | **39,9 mm** |
+| `AGHI_T` | 20 mm | 537 px | **59,9 mm** |
+
+`E_depth_interface` dice 20 mm su tutti e tre, mentre il righello letto dal modulo li dà a 80, 40
+e 60 — e i nomi dei file confermano il righello. La lettura della depth su quella cartella è
+sbagliata, quella del righello è giusta: un modello appoggiato alla depth avrebbe propagato
+l'errore su otto fotogrammi.
+
+La proposta dichiara sempre su quanti fotogrammi si basa e con quale scarto — «barra lunga 549 px
+(scarto 39 px); passo 91 px = 10 mm» — e avverte quando le colonne note non concordano fra loro.
