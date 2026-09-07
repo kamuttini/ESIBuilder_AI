@@ -12,7 +12,8 @@
    Le correzioni rientrano nel modulo alla run successiva (`--corrections`), applicate *dopo*
    la detection: la pagina continua a mostrare anche cosa avrebbe detto da solo. */
 
-const COLORI_SCALA = { accepted: '#3fb950', review: '#d29922', reject: '#f85149' };
+const COLORI_SCALA = { accepted: '#3fb950', corrected: '#40d0ff', review: '#d29922',
+                       reject: '#f85149' };
 const INGRANDIMENTO_SCALA = 4;
 
 async function createScaleViewer(projectId) {
@@ -320,9 +321,10 @@ async function createScaleViewer(projectId) {
         { body: { name: corrente().name, ...campi } });
       dati.corrections = dati.corrections || {};
       dati.corrections[corrente().name] = { ...correzione(), ...campi };
-      stato('salvato');
+      stato('salvato — non ancora riletta dal modulo');
+      dati.pending = [...new Set([...(dati.pending || []), corrente().name])];
       await caricaSuggerimenti();
-      renderDati(); renderLista(); renderAzioni();
+      renderGiro(); renderDati(); renderLista(); renderAzioni();
     } catch (errore) { toast(errore.message, true); }
   };
 
@@ -352,6 +354,52 @@ async function createScaleViewer(projectId) {
   };
   const notiBox = el('div', { class: 'row' });
 
+  /* --- la fascia che dice a che punto e' il giro ------------------------------------- */
+  const giroBox = el('div', { class: 'scala-giro' });
+  const renderGiro = () => {
+    giroBox.innerHTML = '';
+    const inAttesa = dati.pending || [];
+    const ultima = dati.last_run || {};
+    if (inAttesa.length) {
+      giroBox.className = 'scala-giro in-attesa';
+      giroBox.append(
+        el('strong', {}, `${inAttesa.length} correzion${inAttesa.length === 1 ? 'e' : 'i'} `
+          + 'ancora da usare'),
+        el('span', { class: 'hint' },
+          ' — sono salvate, ma il modulo non le ha ancora rilette. Rifai lo studio per '
+          + 'applicarle anche ai fotogrammi ancora da sistemare.'),
+      );
+      const nomi = inAttesa.slice(0, 6).map((n) => n.split('/').pop()).join(', ');
+      giroBox.append(el('div', { class: 'hint' },
+        nomi + (inAttesa.length > 6 ? ` … e altre ${inAttesa.length - 6}` : '')));
+      return;
+    }
+    if (!ultima.at) { giroBox.className = 'scala-giro vuota'; return; }
+    giroBox.className = 'scala-giro fatto';
+    const migliorati = ultima.improved || [];
+    const peggiorati = ultima.worsened || [];
+    giroBox.append(el('strong', {},
+      ultima.used && ultima.used.length
+        ? `ultimo giro: il modulo ha riletto ${ultima.used.length} correzion${ultima.used.length === 1 ? 'e' : 'i'}`
+        : 'ultimo giro: nessuna correzione da rileggere'),
+      el('span', { class: 'hint' },
+        ` · ${ultima.accepted_total}/${ultima.frames} fotogrammi con righello`));
+    if (migliorati.length) {
+      giroBox.append(el('div', { class: 'scala-migliorati' },
+        `migliorati ${migliorati.length}: `
+        + migliorati.slice(0, 6).map((m) => `${m.name.split('/').pop()} ${m.from}→${m.to}`).join(' · ')
+        + (migliorati.length > 6 ? ` … e altri ${migliorati.length - 6}` : '')));
+    }
+    if (peggiorati.length) {
+      giroBox.append(el('div', { class: 'scala-peggiorati' },
+        `peggiorati ${peggiorati.length}: `
+        + peggiorati.map((m) => `${m.name.split('/').pop()} ${m.from}→${m.to}`).join(' · ')));
+    }
+    if (!migliorati.length && !peggiorati.length) {
+      giroBox.append(el('div', { class: 'hint' }, 'nessun fotogramma ha cambiato stato'));
+    }
+  };
+
   /* --- i dati: cosa ha trovato, e cosa hai corretto tu ------------------------------- */
   const datiBox = el('div', { class: 'hint' });
   const renderDati = () => {
@@ -360,7 +408,10 @@ async function createScaleViewer(projectId) {
     const corretti = Object.keys(c).filter((k) => !['ts', 'from_suggestion'].includes(k));
     datiBox.innerHTML = '';
     datiBox.append(
-      el('div', {}, `stato ${f.status}${f.reason ? ` — ${f.reason}` : ''}`),
+      el('div', {},
+        `stato ${f.status}`
+        + (f.status === 'corrected' ? ` (il modulo da solo: ${f.detector_status})` : '')
+        + (f.reason ? ` — ${f.reason}` : '')),
       el('div', {},
         `colonna x=${f.x != null ? Math.round(f.x) : '—'} · zero y=${f.y_zero != null ? Math.round(f.y_zero) : '—'}`
         + ` · fondo y=${f.y_far != null ? Math.round(f.y_far) : '—'} · ${(f.ticks || []).length} tacche`
@@ -377,8 +428,21 @@ async function createScaleViewer(projectId) {
         + `${f.E_verdict ? ` · ${f.E_verdict}` : ''}`),
     );
     if (corretti.length) {
-      datiBox.append(el('div', { class: 'score-fixed', style: 'display:inline-block;margin-top:4px' },
-        `${c.from_suggestion ? 'dalla proposta' : 'corretto da te'}: ${corretti.join(', ')}`));
+      const usate = f.corr_applied || [];
+      const inAttesa = (dati.pending || []).includes(f.name);
+      datiBox.append(el('div', { style: 'margin-top:4px' },
+        el('span', { class: 'score-fixed' },
+          `${c.from_suggestion ? 'dalla proposta' : 'corretto da te'}: ${corretti.join(', ')}`),
+        el('span', {
+          class: inAttesa ? 'scala-attesa' : 'scala-usata',
+          style: 'margin-left:6px',
+        }, inAttesa
+          ? 'non ancora riletta dal modulo'
+          : (usate.length ? `il modulo ha applicato: ${usate.join(', ')}` : 'riletta dal modulo'))));
+    }
+    if (f.improved_from) {
+      datiBox.append(el('div', { class: 'scala-migliorati' },
+        `nell'ultimo giro e' passato da ${f.improved_from} a ${f.status}`));
     }
   };
 
@@ -433,11 +497,14 @@ async function createScaleViewer(projectId) {
       const c = (dati.corrections || {})[f.name];
       const riga = el('div', { class: 'score-row' + (f === corrente() ? ' current' : '') },
         el('span', { class: 'score-value', style: `color:${COLORI_SCALA[f.status] || 'var(--muted)'}` },
-          f.status === 'accepted' ? 'ok' : f.status === 'review' ? 'rev' : 'no'),
+          { accepted: 'ok', corrected: 'tuo', review: 'rev' }[f.status] || 'no'),
         el('span', { class: 'score-group' }, `${(f.ticks || []).length}t`),
         el('span', { class: 'score-name', title: f.name }, f.name.split('/').pop()),
         c ? el('span', { class: 'score-fixed' }, c.from_suggestion ? 'proposto' : 'corretto') : null,
         (!c && suggerimenti[f.name]) ? el('span', { class: 'hint' }, 'proposta') : null,
+        f.improved_from ? el('span', { class: 'scala-migliorati' }, '↑') : null,
+        (c && (dati.pending || []).includes(f.name))
+          ? el('span', { class: 'scala-attesa' }, 'in attesa') : null,
       );
       riga.addEventListener('click', () => { indice = frames.indexOf(f); mostra(); });
       listBox.append(riga);
@@ -473,7 +540,8 @@ async function createScaleViewer(projectId) {
   const chips = el('div', { class: 'ov-chips' });
   const perStato = (s) => frames.filter((f) => f.status === s).length;
   for (const [chiave, etichetta] of [['', `tutti ${frames.length}`],
-                                     ['accepted', `accettati ${perStato('accepted')}`],
+                                     ['accepted', `trovati ${perStato('accepted')}`],
+                                     ['corrected', `dati da te ${perStato('corrected')}`],
                                      ['review', `da rivedere ${perStato('review')}`],
                                      ['reject', `senza righello ${perStato('reject')}`]]) {
     const b = el('button', { class: 'chip' + (chiave === filtro ? ' on' : '') }, etichetta);
@@ -499,7 +567,12 @@ async function createScaleViewer(projectId) {
         indice = Math.min(indice, frames.length - 1);
         avanzamento.textContent = '';
         await caricaSuggerimenti();
-        toast('studio rifatto');
+        const esito = dati.last_run || {};
+        const quanti = (esito.improved || []).length;
+        toast(quanti
+          ? `studio rifatto: ${quanti} fotogrammi migliorati`
+          : 'studio rifatto: nessun cambio di stato');
+        renderGiro();
         mostra();
       } catch (errore) { avanzamento.textContent = ''; toast(errore.message, true); }
     });
@@ -533,7 +606,7 @@ async function createScaleViewer(projectId) {
       + 'Shift+clic aggiunge una tacca, clic su una tacca la toglie, doppio clic su un numero lo '
       + 'riscrive. Shift+↑↓ muove lo zero di un pixel, alt+↑↓ il fondo; ← → cambiano fotogramma; '
       + 'cmd+Z annulla.'),
-    chips, notiBox,
+    chips, notiBox, giroBox,
     el('div', { class: 'ov-bar' },
       el('div', { class: 'ov-nav' },
         el('button', { class: 'ghost sq', onclick: () => passo(-1) }, '‹'),
@@ -553,6 +626,7 @@ async function createScaleViewer(projectId) {
   window.addEventListener('resize', disegna);
   if (window.ResizeObserver) new ResizeObserver(() => { disegna(); }).observe(image);
   await caricaSuggerimenti();
+  renderGiro();
   mostra();
   return root;
 }

@@ -845,3 +845,20 @@ img.depth-crop {
   border: 1px solid #d29922; border-radius: 3px;
 }
 
+
+/* La fascia che dice a che punto e' il giro delle correzioni: salvate, riletto, cambiato. */
+.scala-giro { margin: 8px 0; padding: 8px 11px; border-radius: 8px; font-size: 13px; }
+.scala-giro.vuota { display: none; }
+.scala-giro.in-attesa {
+  background: rgba(210, 153, 34, .12); border: 1px solid rgba(210, 153, 34, .45);
+}
+.scala-giro.fatto {
+  background: rgba(63, 185, 80, .10); border: 1px solid rgba(63, 185, 80, .32);
+}
+.scala-migliorati { color: #3fb950; font-size: 12px; margin-top: 3px; }
+.scala-peggiorati { color: #f85149; font-size: 12px; margin-top: 3px; }
+.scala-attesa {
+  color: var(--warn); font-size: 11px; border: 1px solid rgba(210, 153, 34, .5);
+  border-radius: 10px; padding: 1px 7px;
+}
+.scala-usata { color: #3fb950; font-size: 11px; }

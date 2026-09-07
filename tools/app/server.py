@@ -3992,7 +3992,13 @@ def _run_scale_study_only(job_id: str, project_id: str, max_images: int) -> None
         if not contesto or not (Path(contesto) / "pipeline_context.json").is_file():
             raise ValueError("serve prima lo stadio della scala: rifai i tre moduli")
         correzioni = _write_scale_corrections(project)
-        quante = max_images or max(14, len(project.step_value("scale_study").get("corrections") or {}) + 14)
+        # Lo stato di prima, per poter dire dopo quali fotogrammi sono cambiati grazie alle
+        # correzioni: senza questo confronto "rifai lo studio" e' un salto nel buio.
+        prima = _stati_studio(project)
+        correzioni_prima = sorted((project.step_value("scale_study").get("corrections") or {}))
+        # Stessi fotogrammi del giro precedente, altrimenti il confronto non vuol dire niente:
+        # con un insieme piu' grande i nuovi arrivati sembrerebbero comparsi dal nulla.
+        quante = max_images or max(len(prima), 14)
         _job_update(job_id, stage=f"studio del righello su {quante} fotogrammi")
         esito = stages_mod.run_scale_study(
             context_dir=Path(contesto), python_bin=sys.executable,
@@ -4010,9 +4016,81 @@ def _run_scale_study_only(job_id: str, project_id: str, max_images: int) -> None
         analisi["stages"] = stadi
         project.data["analysis"] = analisi
         project.save()
-        _job_update(job_id, status="done", stage="fatto", result=stadi["scale_study"])
+
+        dopo = _stati_studio(_project(project_id))
+        confronto = _esito_run_studio(prima, dopo, correzioni_prima)
+
+        def registra(_p: Project, value: Dict) -> Dict:
+            value["last_run"] = confronto
+            return value
+
+        _write_step(project_id, "scale_study", registra,
+                    status="corrected" if correzioni_prima else "proposed",
+                    source="user" if correzioni_prima else "model")
+        _job_update(job_id, status="done", stage="fatto",
+                    result={**stadi["scale_study"], "last_run": confronto})
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
+def _stati_studio(project: Project) -> Dict[str, str]:
+    """Lo stato di ogni fotogramma nello studio attuale, per poterlo confrontare dopo."""
+    stadi = ((project.data.get("analysis") or {}).get("stages") or {})
+    percorso = str((stadi.get("scale_study") or {}).get("data_json") or "")
+    if not percorso or not Path(percorso).is_file():
+        return {}
+    try:
+        dati = json.loads(Path(percorso).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    base = project.working_dir() or Path("")
+    correzioni = project.step_value("scale_study").get("corrections") or {}
+    fuori: Dict[str, str] = {}
+    for frame in dati.get("frames") or []:
+        percorso_frame = Path(str(frame.get("path") or ""))
+        try:
+            nome = str(percorso_frame.relative_to(base))
+        except ValueError:
+            nome = percorso_frame.name
+        fuori[nome] = _stato_effettivo(frame, correzioni.get(nome))
+    return fuori
+
+
+ORDINE_STATO = {"reject": 0, "review": 1, "accepted": 2, "corrected": 3}
+
+
+def _stato_effettivo(frame: Dict, correzione: Optional[Dict]) -> str:
+    """Lo stato che conta per chi guarda: il modulo non lo ricalcola dopo una correzione.
+
+    `study_scale_folder` applica le correzioni *dopo* la detection e lascia `status` com'era —
+    scelta giusta la' dentro, perche' cosi' si continua a vedere cosa avrebbe detto da solo.
+    Ma se il righello glielo hai dato tu, quel fotogramma un righello ce l'ha, e chiamarlo
+    ancora `reject` fa credere che la correzione non sia servita a niente.
+    """
+    if correzione and all(correzione.get(k) is not None
+                          for k in ("x", "y_zero", "y_far")):
+        return "corrected"
+    return str(frame.get("status") or "")
+
+
+def _esito_run_studio(prima: Dict[str, str], dopo: Dict[str, str],
+                      usate: Sequence[str]) -> Dict:
+    """Cosa e' cambiato fra due studi: e' questo che dice se una correzione e' servita."""
+    migliorati, peggiorati = [], []
+    for nome, stato in dopo.items():
+        vecchio = prima.get(nome)
+        if vecchio is None or vecchio == stato:
+            continue
+        (migliorati if ORDINE_STATO.get(stato, -1) > ORDINE_STATO.get(vecchio, -1)
+         else peggiorati).append({"name": nome, "from": vecchio, "to": stato})
+    return {
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "used": sorted(usate),
+        "improved": migliorati,
+        "worsened": peggiorati,
+        "accepted_total": sum(1 for v in dopo.values() if v in ("accepted", "corrected")),
+        "frames": len(dopo),
+    }
 
 
 @app.get("/api/projects/<project_id>/scale/study")
@@ -4042,8 +4120,30 @@ def api_scale_study(project_id: str):
             frame["name"] = str(percorso_frame.relative_to(base))
         except ValueError:
             frame["name"] = percorso_frame.name
-    dati["corrections"] = project.step_value("scale_study").get("corrections") or {}
-    dati["note"] = project.step_value("scale_study").get("note") or ""
+    valore = project.step_value("scale_study")
+    correzioni = valore.get("corrections") or {}
+    dati["corrections"] = correzioni
+    dati["note"] = valore.get("note") or ""
+    ultima = valore.get("last_run") or {}
+    dati["last_run"] = ultima
+    # Una correzione fatta dopo l'ultima run non e' ancora entrata nel calcolo: dirlo e' la
+    # differenza fra "salvata" e "usata", e sono due cose diverse.
+    quando = str(ultima.get("at") or "")
+    dati["pending"] = sorted(
+        nome for nome, voce in correzioni.items()
+        if not quando or str(voce.get("ts") or "") > quando
+    )
+    per_nome = {}
+    for frame in dati.get("frames") or []:
+        # Lo stato del modulo resta visibile in `detector_status`: serve a vedere se la
+        # detection da sola migliora, che e' l'altra domanda.
+        frame["detector_status"] = str(frame.get("status") or "")
+        frame["status"] = _stato_effettivo(frame, correzioni.get(frame["name"]))
+        per_nome[frame["name"]] = frame
+    for cambio in ultima.get("improved") or []:
+        frame = per_nome.get(cambio["name"])
+        if frame is not None:
+            frame["improved_from"] = cambio["from"]
     dati["stage"] = stadi.get("scale") or {}
     return jsonify(dati)
 

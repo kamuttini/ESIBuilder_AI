@@ -1911,3 +1911,41 @@ disegnata sopra — si accetta in blocco, e si ritoccano i pochi che stonano. Ne
 ogni fotogramma dice se è `proposto`, `corretto` o se ha solo una `proposta` in attesa.
 
 Ogni salvataggio lo dice — un «salvato» accanto alla didascalia — così non serve chiederselo.
+
+## 8-quinvicies. Far vedere che le correzioni sono state accettate e usate
+
+Correggere e non sapere se è servito è lavorare al buio. Mancavano tre risposte: la correzione è
+salvata? il modulo l'ha riletta? e cos'è cambiato per gli altri fotogrammi?
+
+**Salvata ≠ usata.** Ogni correzione porta il suo `ts`, ogni giro dello studio il suo. Le
+correzioni più recenti dell'ultimo giro sono *in attesa*: una fascia ambra le conta e le nomina —
+«3 correzioni ancora da usare — sono salvate, ma il modulo non le ha ancora rilette» — e nell'elenco
+laterale quei fotogrammi portano `in attesa`. Dopo il giro la fascia diventa verde e dice cosa è
+successo: quante correzioni ha riletto, quanti fotogrammi hanno un righello, quali sono migliorati
+e quali peggiorati. Su ciascun fotogramma si legge cosa il modulo ha applicato davvero
+(`corr_applied`): «il modulo ha applicato: verso, colonna».
+
+**Lo stato diceva il falso.** `study_scale_folder` applica le correzioni *dopo* la detection e
+lascia `status` com'era — scelta giusta là dentro, perché così si continua a vedere cosa avrebbe
+detto da solo. Ma in una pagina di revisione un fotogramma di cui hai disegnato tu il righello
+restava `reject`, e sembrava che la correzione non fosse servita a niente. L'app calcola ora uno
+stato effettivo: `corrected` quando la correzione fornisce colonna, zero e fondo. Quello del
+modulo resta visibile accanto — «stato corrected (il modulo da solo: reject)» — perché la domanda
+«la detection sta migliorando?» è un'altra e va tenuta.
+
+I filtri seguono: *trovati* dal modulo, *dati da te*, *da rivedere*, *senza righello*.
+
+**Giro completo misurato** sulla cartella BK, 29 fotogrammi:
+
+| | trovati | dati da te | da rivedere | senza righello | in attesa |
+|---|---|---|---|---|---|
+| partenza | 14 | 0 | 1 | 14 | 0 |
+| accettate le 9 proposte | 14 | **9** | 1 | 5 | **9** |
+| dopo il giro | 14 | 9 | 1 | 5 | **0** |
+
+«ultimo giro: il modulo ha riletto 9 correzioni · 23/29 fotogrammi con righello». Da 14 a 23 con
+un comando e un giro.
+
+Un dettaglio che rendeva il confronto senza senso: la run rifaceva lo studio su
+`len(correzioni) + 14` fotogrammi, quindi ogni giro ne guardava di più e i nuovi arrivati
+sembravano comparsi dal nulla. Ora il numero di fotogrammi resta quello del giro precedente.
