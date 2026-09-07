@@ -2622,8 +2622,8 @@ def api_orientation_crop(project_id: str):
         return jsonify({"error": "nessun marker in questa immagine"}), 404
     box = [box["top"], box["left"], box["bottom"], box["right"]]
 
-    path = (folder / name).resolve()
-    if not path.is_file():
+    path = _immagine_nella_cartella(folder, name)
+    if path is None:
         return jsonify({"error": "immagine non trovata"}), 404
 
     scale = max(1, min(16, int(request.args.get("scale") or 6)))
@@ -4594,8 +4594,8 @@ def api_depth_crop(project_id: str):
     base = project.dedup_link_dir() or Path(project.source.get("folder") or "")
     if not nome or not base.is_dir():
         return jsonify({"error": "immagine non disponibile"}), 404
-    percorso = (base / nome).resolve()
-    if not percorso.is_file():
+    percorso = _immagine_nella_cartella(base, nome)
+    if percorso is None:
         return jsonify({"error": "immagine non disponibile"}), 404
 
     def _intero_iniziale(chiave: str) -> Optional[int]:
@@ -4811,6 +4811,22 @@ def api_compare(project_id: str):
 _image_lists: Dict[str, List[str]] = {}
 
 
+def _immagine_nella_cartella(folder: Path, name: str) -> Optional[Path]:
+    """Il file dentro alla cartella, o None se il nome prova a uscirne.
+
+    Il controllo va fatto sul **nome**, non sul percorso risolto: lo specchio di lavoro e' fatto
+    di symlink alle immagini originali, e `resolve()` porta fuori dallo specchio per definizione.
+    Confrontando i percorsi risolti ogni anteprima di una cartella non ruotata rispondeva 403.
+    """
+    if not name or Path(name).is_absolute():
+        return None
+    parti = Path(name).parts
+    if any(pezzo in ("..", "") for pezzo in parti):
+        return None
+    candidato = folder / name
+    return candidato if candidato.is_file() else None
+
+
 @app.get("/api/projects/<project_id>/images")
 def api_images(project_id: str):
     """Every frame of the folder, so the full-screen viewer can scroll through them."""
@@ -4843,8 +4859,8 @@ def api_image(project_id: str):
     name = request.args.get("name") or ""
     if not folder.is_dir() or not name:
         return jsonify({"error": "immagine non disponibile"}), 404
-    path = (folder / name).resolve()
-    if not path.is_file() or folder.resolve() not in path.parents:
+    path = _immagine_nella_cartella(folder, name)
+    if path is None:
         return jsonify({"error": "percorso non consentito"}), 403
     width = int(request.args.get("w") or 320)
     box = request.args.get("box")  # "top,left,bottom,right" in original coordinates

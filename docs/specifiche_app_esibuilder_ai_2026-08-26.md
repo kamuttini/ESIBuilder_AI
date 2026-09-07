@@ -1985,3 +1985,27 @@ cartella: **da 12 righe a 54 su 56**, riquadro di cartella applicato a 54, 13 va
 
 È lo stesso difetto del template `#13`: uno step ha più padroni, e chi scrive per ultimo cancella
 il lavoro degli altri se non si limita alla propria parte.
+
+### Le anteprime sparite: `resolve()` esce dallo specchio per definizione
+
+Nella pagina dell'orientamento le anteprime non caricavano più: **403 «percorso non consentito»**.
+La causa è la difesa contro il path traversal, scritta così:
+
+```python
+path = (folder / name).resolve()
+if not path.is_file() or folder.resolve() not in path.parents:
+    return 403
+```
+
+Finché `folder` era la cartella originale funzionava. Da quando le immagini si servono dallo
+specchio di lavoro, no: **lo specchio è fatto di symlink**, e `resolve()` li segue fino al file
+vero sull'SSD — che sta fuori dallo specchio per costruzione. Quindi ogni anteprima di una cartella
+**non ruotata** veniva rifiutata, mentre quelle ruotate (dove lo specchio contiene copie vere)
+passavano: è per questo che `prova_2` mostrava le immagini e gli altri no.
+
+Il controllo va fatto sul **nome**, non sul percorso risolto: niente percorso assoluto, nessun
+segmento `..`, e poi il file deve esistere. Raccolto in `_immagine_nella_cartella()` e usato nei
+tre punti che avevano lo stesso schema — anteprima, ritaglio del marker, ritaglio della depth.
+
+Verifica: 12 anteprime su 12 per ciascuno dei tre progetti (378, 136 e 56 fotogrammi), e il
+ritaglio del marker risponde 200.
