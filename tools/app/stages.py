@@ -352,6 +352,7 @@ def run_scale_study(
     python_bin: str,
     vendor: str = "",
     max_images: int = 14,
+    corrections: Optional[Path] = None,
     timeout: float = 1800.0,
 ) -> Dict:
     """Lo studio del righello: dove sta, le tacche, lo zero, il passo, i numeri.
@@ -382,6 +383,11 @@ def run_scale_study(
     ]
     if vendor:
         cmd += ["--vendor", str(vendor)]
+    if corrections is not None and Path(corrections).is_file():
+        # Le correzioni dell'operatore rientrano nel calcolo: e' cosi' che il modulo impara
+        # dagli errori, e una colonna corretta su un fotogramma fa da ancora per tutta la
+        # cartella (`_corr_anchor_x`).
+        cmd += ["--corrections", Path(corrections).as_posix()]
     code, error = _run(cmd, target / "study_subprocess.log", timeout)
 
     payload: Dict = {}
@@ -405,6 +411,7 @@ def run_scale_study(
         "by_status": per_stato,
         "vendor": payload.get("vendor", ""),
         "zone": payload.get("zone"),
+        "corrected_frames": sum(1 for f in frames if f.get("corr_applied")),
     }
 
 

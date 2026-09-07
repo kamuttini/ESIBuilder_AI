@@ -782,3 +782,29 @@ img.depth-crop {
 .selettore-nome { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .selettore-icona { color: var(--muted); }
 .selettore-scelta { align-items: center; }
+
+/* --- studio della scala: il righello disegnato sul fotogramma -------------------------- */
+.scala-stage { position: relative; }
+.scala-strati { position: absolute; inset: 0; pointer-events: none; }
+.scala-strati > * { pointer-events: auto; }
+.scala-colonna {
+  position: absolute; top: 0; width: 0; border-left: 2px dashed #40d0ff;
+  cursor: ew-resize; transform: translateX(-1px);
+}
+.scala-tacca { position: absolute; height: 0; border-top: 2px solid #40d0ff; opacity: .85; }
+.scala-tacca.togliibile { cursor: not-allowed; border-top-color: #f85149; height: 7px; }
+.scala-numero {
+  position: absolute; transform: translateY(-50%); font-size: 11px; color: #40d0ff;
+  background: rgba(0, 0, 0, .55); padding: 0 4px; border-radius: 3px; white-space: nowrap;
+}
+.scala-numero.modificabile { cursor: text; outline: 1px solid #d29922; }
+.scala-estremo {
+  position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid;
+  cursor: ns-resize; transform: translateY(-1px);
+}
+.scala-estremo span {
+  position: absolute; left: 4px; top: -8px; font-size: 11px; font-weight: 700;
+  background: rgba(0, 0, 0, .6); padding: 0 4px; border-radius: 3px;
+}
+.scala-zero { border-top-color: #3fb950; color: #3fb950; }
+.scala-fondo { border-top-color: #d29922; color: #d29922; }

@@ -59,6 +59,11 @@ STEPS: tuple[Step, ...] = (
     Step("orientation", "Orientamento", "PAGE_ORIENTATION", (12, 16), ("rect",)),
     Step("depth_scale", "Depth e scala", "PAGE_DEPTH_VALUE", (18, 19, 20, 21),
          ("rect", "orientation")),
+    # Lo studio del righello ha una schermata sua, dopo la depth: si guarda un fotogramma
+    # per volta — colonna, zero, tacche, numeri — e si corregge. Non possiede righe del
+    # `.fss`: le sue correzioni tornano nel modulo, ed e' lo stadio della scala a
+    # consolidare #19-#21 dentro `depth_scale`.
+    Step("scale_study", "Scala: righello e tacche", "PAGE_DEPTH_VALUE", (), ("depth_scale",)),
     Step("depth_find", "Ricerca depth", "PAGE_DEPTH_FIND", (17,), ("depth_scale",)),
     Step("thresholds", "Soglie", "PAGE_FSS_THRESHOLDS", (),
          ("vendor", "probe", "rect", "proibited", "orientation", "depth_find")),

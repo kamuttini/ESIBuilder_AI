@@ -1757,3 +1757,39 @@ trova, lo misura bene. E **tutti gli otto scarti sono `no_ladder` sulle depth ba
 Il passo successivo è la sezione dell'app che disegna il righello sul fotogramma e lascia
 correggere colonna, zero, fondo, passo e numeri — le correzioni sono già previste dal modulo
 (`--corrections`), che le rimette nel calcolo.
+
+## 8-duovicies. La sezione «Scala: righello e tacche»
+
+Sezione sua, subito dopo la depth. Non possiede righe del `.fss` — `#19-#21` continua a
+consolidarle lo stadio dentro `depth_scale` — perché il suo mestiere è un altro: far vedere e
+correggere quello che il modulo ha trovato sul righello, un fotogramma per volta.
+
+**Cosa si vede.** Sul fotogramma: la colonna del righello (tratteggiata), ogni tacca, lo zero in
+verde e il fondo in ambra, e accanto alla colonna i numeri letti dall'OCR con il loro valore in
+cm. Sotto: cosa ha trovato il modulo — x della colonna, y dello zero e del fondo, quante tacche,
+il passo in pixel, il `mm_per_px`, i numeri e il loro passo in mm, da che parte sta lo zero, e il
+confronto con la depth dell'interfaccia.
+
+**Cosa si corregge**, e sono le cinque cose che il modulo sa riprendere:
+
+| | come |
+|---|---|
+| colonna | si trascina in orizzontale |
+| zero e fondo | si trascinano in verticale |
+| tacche | modo «aggiungi/togli»: clic sull'immagine per aggiungerne una, clic su una tacca per toglierla |
+| numeri | modo «correggi i numeri»: clic sul numero e si riscrive il valore in cm |
+| verso | due chip: lo zero è in alto / in basso |
+
+**Come impara.** Le correzioni finiscono nello step `scale_study` e vengono scritte in
+`scale_study_corrections.json` nel formato che il modulo già si aspetta — `{cartella: {note,
+frames: {nome: {...}}}}`. Ogni run successiva le riceve con `--corrections`, e il modulo le
+applica **dopo** la detection: così la pagina continua a mostrare anche cosa avrebbe detto da
+solo, e si vede la differenza. Una colonna corretta su un fotogramma diventa l'ancora di tutta la
+cartella (`_corr_anchor_x`), a patto che le colonne corrette non si contraddicano fra loro.
+
+Verifica del giro completo: correggendo colonna e verso su `L_LRUD_20.png` e rifacendo lo studio,
+il fotogramma torna con `corr_applied: ['verso', 'colonna']` e la colonna a 959.5. Resta `reject`
+perché lì la scala non ha proprio tacche (`no_ladder`): la colonna da sola non basta, e infatti è
+per quello che le tacche si possono aggiungere a mano.
+
+Round-trip dei 10 `.fss` legacy ancora identico dopo l'aggiunta dello step.

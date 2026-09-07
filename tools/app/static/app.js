@@ -1740,6 +1740,16 @@ function panelModuleStage(panel, step) {
       .catch((error) => host.append(el('p', { class: 'hint' }, error.message)));
   }
 
+  if (step.id === 'scale_study') {
+    const host = el('div', {});
+    panel.append(host);
+    createScaleViewer(state.projectId)
+      .then((node) => host.append(node))
+      .catch((error) => host.append(el('p', { class: 'hint' },
+        error.message + ' — rifai i tre moduli dalla sezione «Depth e scala».')));
+    return;
+  }
+
   if (step.id === 'orientation' && stages.marker && stages.marker.status === 'ok') {
     const host = el('div', {});
     panel.append(host);

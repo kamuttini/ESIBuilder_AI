@@ -808,6 +808,7 @@ def _run_advanced_stages(
             studio = stages_mod.run_scale_study(
                 context_dir=Path(scale["output_dir"]), python_bin=python_bin,
                 vendor=vendor, max_images=max(14, sample),
+                corrections=_write_scale_corrections(_project(project_id)),
             )
             results["scale_study"] = {
                 k: studio.get(k)
@@ -3675,6 +3676,106 @@ def _depth_module_rows(project: Project) -> Tuple[List[Dict], Optional[Path]]:
     return righe, stage
 
 
+# --- studio della scala: le correzioni dell'operatore ----------------------
+# Il modulo le rilegge a ogni run (`--corrections`) e le applica *dopo* la detection, cosi'
+# la pagina mostra sempre anche cosa avrebbe detto da solo. Una colonna corretta su un
+# fotogramma fa da ancora per tutta la cartella. E' in questo senso che impara: la verita'
+# non si perde, rientra nel calcolo ogni volta.
+SCALE_CORRECTION_FIELDS = ("x", "y_zero", "y_far", "zero_end", "ticks_add", "ticks_del",
+                           "nums", "depth_mm")
+
+
+def _scale_corrections_path(project: Project) -> Path:
+    return project.root / "scale_study_corrections.json"
+
+
+def _write_scale_corrections(project: Project) -> Path:
+    """Scrive le correzioni nel formato del modulo: {cartella: {note, frames: {nome: {...}}}}."""
+    valore = project.step_value("scale_study")
+    base = project.working_dir() or Path(project.source.get("folder") or "")
+    chiave = base.name or "cartella"
+    payload = {chiave: {"note": str(valore.get("note") or ""),
+                        "frames": valore.get("corrections") or {}}}
+    percorso = _scale_corrections_path(project)
+    percorso.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    return percorso
+
+
+@app.post("/api/projects/<project_id>/scale/study/correct")
+def api_scale_study_correct(project_id: str):
+    """Correggi colonna, zero, fondo, tacche o numeri su un fotogramma."""
+    project = _project(project_id)
+    payload = _payload()
+    nome = str(payload.get("name") or "").strip()
+    if not nome:
+        return jsonify({"error": "manca l'immagine"}), 400
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        correzioni = dict(value.get("corrections") or {})
+        if payload.get("reset"):
+            correzioni.pop(nome, None)
+        else:
+            voce = dict(correzioni.get(nome) or {})
+            for campo in SCALE_CORRECTION_FIELDS:
+                if campo in payload:
+                    if payload[campo] in (None, ""):
+                        voce.pop(campo, None)
+                    else:
+                        voce[campo] = payload[campo]
+            voce["ts"] = datetime.now().isoformat(timespec="seconds")
+            if not any(k in voce for k in SCALE_CORRECTION_FIELDS):
+                correzioni.pop(nome, None)
+            else:
+                correzioni[nome] = voce
+        value["corrections"] = correzioni
+        if "note" in payload:
+            value["note"] = str(payload.get("note") or "")
+        return value
+
+    valore = _write_step(project_id, "scale_study", mutate, status="corrected", source="user")
+    _write_scale_corrections(_project(project_id))
+    return jsonify({"saved": True, "corrections": len(valore.get("corrections") or {})})
+
+
+@app.post("/api/projects/<project_id>/scale/study/run")
+def api_scale_study_run(project_id: str):
+    """Rifai lo studio del righello, con dentro le correzioni fatte finora."""
+    _project(project_id)
+    quante = int(_payload().get("max_images") or 0)
+    return jsonify({"job_id": _start_job(_run_scale_study_only, project_id, quante)})
+
+
+def _run_scale_study_only(job_id: str, project_id: str, max_images: int) -> None:
+    try:
+        project = _project(project_id)
+        stadi = ((project.data.get("analysis") or {}).get("stages") or {})
+        contesto = str((stadi.get("scale") or {}).get("output_dir") or "")
+        if not contesto or not (Path(contesto) / "pipeline_context.json").is_file():
+            raise ValueError("serve prima lo stadio della scala: rifai i tre moduli")
+        correzioni = _write_scale_corrections(project)
+        quante = max_images or max(14, len(project.step_value("scale_study").get("corrections") or {}) + 14)
+        _job_update(job_id, stage=f"studio del righello su {quante} fotogrammi")
+        esito = stages_mod.run_scale_study(
+            context_dir=Path(contesto), python_bin=sys.executable,
+            vendor=((project.data.get("analysis") or {}).get("vendor") or {}).get("vendor") or "",
+            max_images=quante, corrections=correzioni,
+        )
+        if esito.get("status") != "ok":
+            raise ValueError(esito.get("error") or "lo studio non e' andato a buon fine")
+        project = _project(project_id)
+        analisi = dict(project.data.get("analysis") or {})
+        stadi = dict(analisi.get("stages") or {})
+        stadi["scale_study"] = {k: esito.get(k) for k in
+                                ("status", "frames", "by_status", "vendor", "zone",
+                                 "output_dir", "data_json", "corrected_frames")}
+        analisi["stages"] = stadi
+        project.data["analysis"] = analisi
+        project.save()
+        _job_update(job_id, status="done", stage="fatto", result=stadi["scale_study"])
+    except Exception as error:  # noqa: BLE001
+        _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
 @app.get("/api/projects/<project_id>/scale/study")
 def api_scale_study(project_id: str):
     """Lo studio del righello, fotogramma per fotogramma: tacche, zero, passo, numeri.
@@ -3702,8 +3803,8 @@ def api_scale_study(project_id: str):
             frame["name"] = str(percorso_frame.relative_to(base))
         except ValueError:
             frame["name"] = percorso_frame.name
-    correzioni = project.step_value("depth_scale").get("scale_study_corrections") or {}
-    dati["corrections"] = correzioni
+    dati["corrections"] = project.step_value("scale_study").get("corrections") or {}
+    dati["note"] = project.step_value("scale_study").get("note") or ""
     dati["stage"] = stadi.get("scale") or {}
     return jsonify(dati)
 
