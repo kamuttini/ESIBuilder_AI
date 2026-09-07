@@ -1969,3 +1969,19 @@ mira dell'estremo. Il titolo porta le coordinate esatte — «zero: y=784 · col
 
 Verifica: ricostruendo le coordinate dai pixel disegnati si torna a `y=784` e `x=867`, cioè
 esattamente i valori del titolo e dell'overlay.
+
+### La depth tornava alle dodici del campione: lo stadio della scala la cancellava
+
+Sul progetto BK la depth risultava trovata su 12 immagini invece che su tutte, benché lo stadio
+registrasse `box_reads: 54`. La propagazione era avvenuta davvero: veniva cancellata subito dopo.
+
+Alla fine del giro lo stadio della scala scriveva lo step `depth_scale` **sostituendo** il valore
+per intero — `project.set_step("depth_scale", {**parsed, ...})` — e nello stesso step vivono anche
+`depth_box_reads`, `depth_box_template` e le correzioni dell'utente. Sparivano tutte, e la sezione
+depth tornava alle dodici immagini del campione.
+
+Ora quella scrittura aggiorna il valore invece di sostituirlo. Rifacendo i tre moduli sulla stessa
+cartella: **da 12 righe a 54 su 56**, riquadro di cartella applicato a 54, 13 valori distinti.
+
+È lo stesso difetto del template `#13`: uno step ha più padroni, e chi scrive per ultimo cancella
+il lavoro degli altri se non si limita alla propria parte.

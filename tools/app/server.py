@@ -818,14 +818,19 @@ def _run_advanced_stages(
 
         parsed = stages_mod.parse_scale_lines(scale.get("lines") or {})
         if parsed.get("depths"):
-            project = _project(project_id)
             complete = bool(parsed["pixel_ratio_x"] and parsed["pixel_ratio_y"] and parsed["scale_lines"])
-            project.set_step(
-                "depth_scale",
-                {**parsed, "depth_module": results["depth"], "scale_module": results["scale"]},
-                status="proposed" if complete else "blocked",
-                source="model",
-            )
+
+            def scrivi_scala(_p: Project, value: Dict) -> Dict:
+                # Si **aggiorna**, non si sostituisce: nello stesso step vivono anche la
+                # rilettura della depth su tutta la cartella e le correzioni dell'utente, e
+                # riscrivendo il valore per intero sparivano — la depth tornava alle dodici
+                # immagini del campione appena finiva lo stadio della scala.
+                value.update({**parsed, "depth_module": results["depth"],
+                              "scale_module": results["scale"]})
+                return value
+
+            _write_step(project_id, "depth_scale", scrivi_scala,
+                        status="proposed" if complete else "blocked", source="model")
 
         project = _project(project_id)
         project.data.setdefault("analysis", {})["stages"] = results
