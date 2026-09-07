@@ -1719,3 +1719,41 @@ restano vuote finché `#21` non è completa, che richiede una risposta buona per
 
 Il passo successivo è la revisione umana della scala dentro l'app — la stessa cosa che oggi fa
 `tools/scale/build_scale_correction_tool.py` in una pagina HTML separata.
+
+## 8-unvicies. Lo studio del righello entra nell'app
+
+Il modulo che studia la scala è un'altra cosa dallo stadio che consolida `#18-#21`:
+`detect_scale_ladder` più i controlli incrociati di `study_scale_folder` trovano **la colonna
+del righello**, ne staccano **le tacche**, distinguono **lo zero dal fondo**, ricavano **il
+passo** e leggono **i numeri con l'OCR**. Non gli serve la depth — due etichette lette a due
+altezze danno già `mm_per_px` e lo zero, che è quello che `#19`, `#20` e `#21` codificano.
+
+Integrato con lo stesso patto degli altri: sottoprocesso, nessuna logica duplicata. Gira sul
+**contesto che lo stadio della scala ha già scritto** (`--from-pipeline`), quindi i due guardano
+gli stessi fotogrammi e i loro esiti sono confrontabili tacca per tacca.
+
+Una sola aggiunta al modulo: `--data-json`, che scrive i dati dello studio **senza le immagini
+in base64**. Sono quelle a far pesare megabyte la pagina HTML, e l'app le immagini ce le ha già —
+21 KB invece di alcuni MB. `GET /scale/study` le serve, con i nomi ricondotti allo specchio di
+lavoro.
+
+**Primo esito sulla cartella BK** — 14 fotogrammi, 5 accepted, 1 review, 8 reject:
+
+```
+needle last hole.png   accepted  x=866.8  zero=784.4  7 tacche  passo 91.2 px  0.1087 mm/px  passo 10 mm
+AGHI_T.png             accepted  x=959.5  zero=728.5  7 tacche  passo 89.3 px  0.1115 mm/px  passo 10 mm
+T_LRUD_80.png          accepted  x=959.5  zero=741.5  9 tacche  passo 69.0 px  0.1449 mm/px  passo 10 mm
+T_UD_40.png            accepted  x=959.5  zero=702.5  5 tacche  passo 128 px   0.0781 mm/px  passo 10 mm
+L_UD_30.png            review    ...  geometry_step_over_pitch_single_label
+L_LRUD_20/25/30, T_LRUD_20/25, L_UD_20/25, T_UD_25   reject   no_ladder
+```
+
+Due cose si leggono subito. Il passo torna **10 mm su tutti i fotogrammi accettati**, e il
+`mm_per_px` cresce proporzionalmente alla depth (0,078 a 40 mm, 0,145 a 80): dove il righello lo
+trova, lo misura bene. E **tutti gli otto scarti sono `no_ladder` sulle depth basse** — 20, 25,
+30 — cioè esattamente le stesse che lo stadio non riusciva ad accettare. Non sono due problemi:
+è uno solo, e sta nella ricerca della scala a depth bassa, dove le tacche visibili sono poche.
+
+Il passo successivo è la sezione dell'app che disegna il righello sul fotogramma e lascia
+correggere colonna, zero, fondo, passo e numeri — le correzioni sono già previste dal modulo
+(`--corrections`), che le rimette nel calcolo.

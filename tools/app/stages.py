@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEPTH_SCRIPT = REPO_ROOT / "tools" / "depth" / "predict_rect_depth_autonomous.py"
 RANKER_RELATIVE = Path("artifacts/24_rect_depth_hybrid/candidate_ranker_v11_bk_reviews/ranker.joblib")
 SCALE_SCRIPT = REPO_ROOT / "tools" / "scale" / "predict_scale_from_pipeline.py"
+SCALE_STUDY_SCRIPT = REPO_ROOT / "tools" / "scale" / "study_scale_folder.py"
 MARKER_SCRIPT = REPO_ROOT / "tools" / "orientation" / "predict_marker_envelopes_batch.py"
 
 _SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -341,6 +342,69 @@ def run_scale(
         "profile": summary.get("profile", ""),
         "per_depth": per_depth,
         "summary": summary,
+    }
+
+
+# --- studio della scala: il righello, tacca per tacca ----------------------
+def run_scale_study(
+    *,
+    context_dir: Path,
+    python_bin: str,
+    vendor: str = "",
+    max_images: int = 14,
+    timeout: float = 1800.0,
+) -> Dict:
+    """Lo studio del righello: dove sta, le tacche, lo zero, il passo, i numeri.
+
+    E' il modulo autonomo (`detect_scale_ladder` + i controlli incrociati di
+    `study_scale_folder`), non lo stadio che consolida `#18-#21`: qui non serve la depth,
+    perche' due etichette lette a due altezze danno gia' `mm_per_px` e lo zero.
+
+    Gli si passa il contesto che lo stadio della scala ha gia' scritto — stessi fotogrammi,
+    stesso rettangolo, stesso orientamento — con `--from-pipeline`, cosi' i due guardano le
+    stesse immagini e i loro esiti sono confrontabili.
+    """
+    if not SCALE_STUDY_SCRIPT.is_file():
+        return {"status": "error", "error": f"script assente: {SCALE_STUDY_SCRIPT}"}
+    contesto = Path(context_dir) / "pipeline_context.json"
+    if not contesto.is_file():
+        return {"status": "error", "error": f"contesto assente: {contesto}"}
+
+    target = Path(context_dir) / "studio"
+    target.mkdir(parents=True, exist_ok=True)
+    dati = target / "scale_study.json"
+    cmd = [
+        python_bin, SCALE_STUDY_SCRIPT.as_posix(),
+        "--from-pipeline", contesto.as_posix(),
+        "--data-json", dati.as_posix(),
+        "--out", (target / "scale_study.html").as_posix(),
+        "--max-images", str(int(max_images)),
+    ]
+    if vendor:
+        cmd += ["--vendor", str(vendor)]
+    code, error = _run(cmd, target / "study_subprocess.log", timeout)
+
+    payload: Dict = {}
+    if dati.is_file():
+        try:
+            payload = json.loads(dati.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+    frames = payload.get("frames") or []
+    per_stato: Dict[str, int] = {}
+    for frame in frames:
+        stato = str(frame.get("status") or "?")
+        per_stato[stato] = per_stato.get(stato, 0) + 1
+    return {
+        "status": "ok" if code == 0 and frames else "error",
+        "error": error or ("" if code == 0 else f"returncode={code}"),
+        "output_dir": target.as_posix(),
+        "data_json": dati.as_posix() if dati.is_file() else "",
+        "html": (target / "scale_study.html").as_posix(),
+        "frames": len(frames),
+        "by_status": per_stato,
+        "vendor": payload.get("vendor", ""),
+        "zone": payload.get("zone"),
     }
 
 

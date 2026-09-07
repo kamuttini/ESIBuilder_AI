@@ -800,6 +800,21 @@ def _run_advanced_stages(
                       "review_reasons", "profile", "output_dir", "lines")
         }
 
+        # Lo studio del righello: modulo autonomo, non ha bisogno della depth. Gira sullo
+        # stesso contesto dello stadio, cosi' i due guardano gli stessi fotogrammi ed e'
+        # possibile confrontarli tacca per tacca.
+        if scale.get("output_dir"):
+            _job_update(job_id, stage="scala: studio del righello, tacca per tacca")
+            studio = stages_mod.run_scale_study(
+                context_dir=Path(scale["output_dir"]), python_bin=python_bin,
+                vendor=vendor, max_images=max(14, sample),
+            )
+            results["scale_study"] = {
+                k: studio.get(k)
+                for k in ("status", "error", "frames", "by_status", "vendor", "zone",
+                          "output_dir", "data_json")
+            }
+
         parsed = stages_mod.parse_scale_lines(scale.get("lines") or {})
         if parsed.get("depths"):
             project = _project(project_id)
@@ -3658,6 +3673,39 @@ def _depth_module_rows(project: Project) -> Tuple[List[Dict], Optional[Path]]:
                           "value_mm": numero("best_scale_value_mm")},
             })
     return righe, stage
+
+
+@app.get("/api/projects/<project_id>/scale/study")
+def api_scale_study(project_id: str):
+    """Lo studio del righello, fotogramma per fotogramma: tacche, zero, passo, numeri.
+
+    E' il modulo autonomo della scala (`detect_scale_ladder` piu' i controlli incrociati di
+    `study_scale_folder`): trova la colonna del righello, ne stacca le tacche, distingue lo
+    zero dal fondo, ricava il passo e legge i numeri con l'OCR. Non usa la depth: due
+    etichette lette a due altezze danno gia' `mm_per_px` e lo zero.
+    """
+    project = _project(project_id)
+    stadi = ((project.data.get("analysis") or {}).get("stages") or {})
+    percorso = str((stadi.get("scale_study") or {}).get("data_json") or "")
+    if not percorso or not Path(percorso).is_file():
+        return jsonify({"error": "lo studio della scala non e' ancora stato fatto",
+                        "frames": []}), 404
+    try:
+        dati = json.loads(Path(percorso).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as errore:
+        return jsonify({"error": f"studio illeggibile: {errore}", "frames": []}), 500
+
+    base = project.working_dir() or Path("")
+    for frame in dati.get("frames") or []:
+        percorso_frame = Path(str(frame.get("path") or ""))
+        try:
+            frame["name"] = str(percorso_frame.relative_to(base))
+        except ValueError:
+            frame["name"] = percorso_frame.name
+    correzioni = project.step_value("depth_scale").get("scale_study_corrections") or {}
+    dati["corrections"] = correzioni
+    dati["stage"] = stadi.get("scale") or {}
+    return jsonify(dati)
 
 
 @app.get("/api/projects/<project_id>/depth")

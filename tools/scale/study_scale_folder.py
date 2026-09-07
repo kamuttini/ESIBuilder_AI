@@ -802,7 +802,9 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
             view = cv2.resize(view, (int(f["gray"].shape[1] * s), int(f["gray"].shape[0] * s)),
                               interpolation=cv2.INTER_AREA)
         frames.append({
-            "name": name, "idx": idx, "img": _b64(view),
+            # `path` serves consumers that render the frame themselves (the ESIBuilder app
+            # serves it from its own deduplicated mirror) and so do not want the base64 copy.
+            "name": name, "idx": idx, "img": _b64(view), "path": f["path"],
             "w": f["gray"].shape[1], "h": f["gray"].shape[0], "scale": round(s, 6),
             "status": pred.status, "reason": pred.reason,
             "x": pred.x, "y_zero": y_zero, "y_far": far,
@@ -998,6 +1000,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="Cartella dello stadio scala della pipeline (quella con "
                          "pipeline_context.json): la pagina mostra le predizioni della pipeline "
                          "invece di ricalcolarle, e le tue correzioni valgono su quelle.")
+    ap.add_argument("--data-json", type=Path, default=None,
+                    help="Also write the study data as JSON, without the embedded frame "
+                         "images. For callers that render the frames themselves.")
     ap.add_argument("--out", type=Path, default=None,
                     help="Default: artifacts/50_scale_study/<cartella>.html")
     args = ap.parse_args(argv)
@@ -1035,6 +1040,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                  pipeline_context=pipeline_context)
     if not data:
         return 2
+    if args.data_json is not None:
+        # Without the base64 frames: they are what makes the HTML weigh megabytes, and a
+        # caller that has the images already does not need a second copy of them.
+        magro = {**data, "frames": [{k: v for k, v in f.items() if k != "img"}
+                                    for f in data.get("frames") or []]}
+        args.data_json.parent.mkdir(parents=True, exist_ok=True)
+        args.data_json.write_text(json.dumps(magro, ensure_ascii=False), encoding="utf-8")
+        print(f"[ok] dati dello studio -> {args.data_json}")
     tpl = PAGE.read_text(encoding="utf-8")
     html = tpl.replace("__DATA__", json.dumps(data, ensure_ascii=False))
     args.out.parent.mkdir(parents=True, exist_ok=True)
