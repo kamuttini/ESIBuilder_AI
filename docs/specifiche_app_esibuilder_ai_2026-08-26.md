@@ -1793,3 +1793,14 @@ perché lì la scala non ha proprio tacche (`no_ladder`): la colonna da sola non
 per quello che le tacche si possono aggiungere a mano.
 
 Round-trip dei 10 `.fss` legacy ancora identico dopo l'aggiunta dello step.
+
+### La sezione non compariva: mancava la riga nel registro dei pannelli
+
+Lo step c'era, la vista era scritta, l'endpoint rispondeva — e sulla pagina non si vedeva niente.
+`PANELS` è il registro che associa uno step alla funzione che lo disegna, e `scale_study` non ci
+era stato messo: la pagina cadeva sul pannello generico, che mostra il JSON dello step e nessuna
+immagine. Aggiunta la riga, la sezione disegna colonna, tacche, numeri ed estremi.
+
+Nell'occasione: un progetto analizzato prima che lo studio esistesse non ha i suoi dati, e la
+pagina restava vuota anche a ragione. Ora in quel caso mostra un comando — *Studia il righello di
+questa cartella* — che lo fa partire da lì, senza dover rifare tutti e tre i moduli.

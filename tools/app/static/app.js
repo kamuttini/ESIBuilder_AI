@@ -136,6 +136,7 @@ const PANELS = {
   rect: panelRect,
   orientation: panelModuleStage,
   depth_scale: panelModuleStage,
+  scale_study: panelModuleStage,
   generate: panelGenerate,
 };
 
@@ -1692,6 +1693,36 @@ function panelModuleStage(panel, step) {
   const stages = (state.project.analysis || {}).stages || {};
   const rect = (state.project.steps.rect || {}).value || {};
 
+  // Lo studio del righello ha una schermata tutta sua: niente comando dei tre moduli sopra,
+  // ha il suo «rifai lo studio» che ci rimette dentro le correzioni.
+  if (step.id === 'scale_study') {
+    const host = el('div', {});
+    panel.append(host);
+    createScaleViewer(state.projectId)
+      .then((node) => host.append(node))
+      .catch((error) => {
+        // Un progetto analizzato prima che lo studio esistesse non ha ancora i suoi dati:
+        // invece di lasciare la pagina vuota, la si fa partire da qui.
+        host.append(el('p', { class: 'hint' }, error.message + '.'));
+        const stato = el('span', { class: 'hint' }, 'qualche minuto: gira sui fotogrammi della scala');
+        const avvia = el('button', {}, 'Studia il righello di questa cartella');
+        avvia.addEventListener('click', async () => {
+          avvia.disabled = true;
+          try {
+            const { job_id } = await api(`/projects/${state.projectId}/scale/study/run`, { body: {} });
+            await pollJob(job_id, stato);
+            toast('studio del righello fatto');
+            await reload();
+          } catch (errore) {
+            toast(errore.message, true);
+            stato.textContent = errore.message;
+          } finally { avvia.disabled = false; }
+        });
+        host.append(el('div', { class: 'row' }, avvia, stato));
+      });
+    return;
+  }
+
   const giaFatti = Object.keys(stages).length > 0;
   panel.append(el('p', { class: 'hint' },
     'marker di orientamento, depth e scala girano come i moduli della pipeline, in '
@@ -1738,16 +1769,6 @@ function panelModuleStage(panel, step) {
     createDepthViewer(state.projectId, sampleSize)
       .then((node) => host.append(node))
       .catch((error) => host.append(el('p', { class: 'hint' }, error.message)));
-  }
-
-  if (step.id === 'scale_study') {
-    const host = el('div', {});
-    panel.append(host);
-    createScaleViewer(state.projectId)
-      .then((node) => host.append(node))
-      .catch((error) => host.append(el('p', { class: 'hint' },
-        error.message + ' — rifai i tre moduli dalla sezione «Depth e scala».')));
-    return;
   }
 
   if (step.id === 'orientation' && stages.marker && stages.marker.status === 'ok') {
