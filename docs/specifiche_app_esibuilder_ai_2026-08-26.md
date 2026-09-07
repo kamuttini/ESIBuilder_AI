@@ -1877,3 +1877,37 @@ Verifica su `L_LRUD_20.png`, che il modulo scarta con `no_ladder`:
 
 Venti millimetri a 10 mm ogni 91 px fanno 182 px di barra, non 549: la depth confermata cambia la
 proposta, e il perché è scritto accanto.
+
+## 8-quatervicies. Correggere il righello con un gesto, non con un modo
+
+La prima versione della sezione aveva quattro modi da scambiare con dei chip — guarda, disegna,
+tacca, numero — e per riscrivere un numero apriva la finestrella di sistema. Correggere costava
+più clic del dovuto, e ogni clic andava speso a dire al programma *cosa* si stava per fare.
+
+Rifatta senza modi: ogni gesto vale da sé.
+
+| gesto | cosa fa |
+|---|---|
+| trascina la colonna, lo zero o il fondo | li sposta |
+| **alt** + trascina | sposta **tutto il righello** insieme, tacche comprese |
+| **shift** + clic sull'immagine | aggiunge una tacca |
+| clic su una tacca | la toglie |
+| **doppio clic** su un numero | lo riscrive lì dove sta, con Invio o Esc |
+| due clic, dove il righello non c'è | lo indicano: prima lo zero e la colonna, poi il fondo |
+| **shift+↑↓** / **alt+↑↓** | muovono lo zero / il fondo di un pixel |
+| **← →** | cambiano fotogramma |
+| **cmd+Z** | annulla l'ultimo gesto |
+
+**Le due finestre ingrandite.** Sopra il fotogramma, zero e fondo a **4×** con una mira: a
+grandezza naturale una tacca è alta due pixel e il pixel giusto non si vede. Trascinando dentro la
+finestra si muove l'estremo, e il ritaglio segue. Arriva da `GET /depth/crop`, che ora accetta una
+finestra esplicita anche senza riquadro della depth — prima la pretendeva, e nello studio della
+scala non c'entra: era il motivo per cui le due finestre restavano vuote.
+
+**Accettare in blocco.** Otto fotogrammi da sistemare uno per uno sono otto volte le stesse
+quattro conferme. `POST /scale/study/accept` accetta i righelli proposti su un fotogramma o su
+tutti, e la sezione ha *«Accetta tutti gli N proposti»*: si guarda che la proposta sia buona — è
+disegnata sopra — si accetta in blocco, e si ritoccano i pochi che stonano. Nell'elenco laterale
+ogni fotogramma dice se è `proposto`, `corretto` o se ha solo una `proposta` in attesa.
+
+Ogni salvataggio lo dice — un «salvato» accanto alla didascalia — così non serve chiederselo.

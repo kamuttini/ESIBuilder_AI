@@ -3923,6 +3923,59 @@ def api_scale_study_correct(project_id: str):
     return jsonify({"saved": True, "corrections": len(valore.get("corrections") or {})})
 
 
+@app.post("/api/projects/<project_id>/scale/study/accept")
+def api_scale_study_accept(project_id: str):
+    """Accetta i righelli proposti: su un fotogramma, o su tutti quelli falliti in un colpo.
+
+    Otto fotogrammi da sistemare uno per uno sono otto volte le stesse quattro conferme. Se la
+    proposta e' buona — e lo si vede dal righello disegnato sopra — vale la pena accettarla in
+    blocco e poi ritoccare i pochi che stonano.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    solo = str(payload.get("name") or "").strip()
+
+    stadi = ((project.data.get("analysis") or {}).get("stages") or {})
+    percorso = str((stadi.get("scale_study") or {}).get("data_json") or "")
+    if not percorso or not Path(percorso).is_file():
+        return jsonify({"error": "lo studio della scala non e' ancora stato fatto"}), 404
+    dati = json.loads(Path(percorso).read_text(encoding="utf-8"))
+    base = project.working_dir() or Path("")
+    for frame in dati.get("frames") or []:
+        percorso_frame = Path(str(frame.get("path") or ""))
+        try:
+            frame["name"] = str(percorso_frame.relative_to(base))
+        except ValueError:
+            frame["name"] = percorso_frame.name
+    correzioni_ora = project.step_value("scale_study").get("corrections") or {}
+    proposte = _suggerisci_righelli(dati.get("frames") or [], correzioni_ora,
+                                    _depth_confermate(project))
+    if solo:
+        proposte = {k: v for k, v in proposte.items() if k == solo}
+    if not proposte:
+        return jsonify({"accepted": 0, "nothing": True})
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        correzioni = dict(value.get("corrections") or {})
+        for nome, proposta in proposte.items():
+            voce = dict(correzioni.get(nome) or {})
+            voce.update({
+                "x": proposta["x"], "y_zero": proposta["y_zero"],
+                "y_far": proposta["y_far"], "zero_end": proposta["zero_end"],
+                "ticks_add": proposta.get("ticks") or [],
+                "from_suggestion": True,
+                "ts": datetime.now().isoformat(timespec="seconds"),
+            })
+            correzioni[nome] = voce
+        value["corrections"] = correzioni
+        return value
+
+    valore = _write_step(project_id, "scale_study", mutate, status="corrected", source="user")
+    _write_scale_corrections(_project(project_id))
+    return jsonify({"accepted": len(proposte), "names": sorted(proposte),
+                    "corrections": len(valore.get("corrections") or {})})
+
+
 @app.post("/api/projects/<project_id>/scale/study/run")
 def api_scale_study_run(project_id: str):
     """Rifai lo studio del righello, con dentro le correzioni fatte finora."""
@@ -4440,12 +4493,23 @@ def api_depth_crop(project_id: str):
     if not percorso.is_file():
         return jsonify({"error": "immagine non disponibile"}), 404
 
+    def _intero_iniziale(chiave: str) -> Optional[int]:
+        try:
+            return int(float(request.args[chiave]))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    finestra_chiesta = [_intero_iniziale(k) for k in ("x0", "y0", "x1", "y1")]
+    esplicita = all(v is not None for v in finestra_chiesta)
+
     letture = project.step_value("depth_scale").get("depth_box_reads") or {}
     box = (letture.get(nome) or {}).get("box")
     if box is None:
         righe, _stage = _depth_module_rows(project)
         box = next((r["box"] for r in righe if r["name"] == nome), None)
-    if not box:
+    if not box and not esplicita:
+        # Senza riquadro non si sa cosa ritagliare — a meno che la finestra arrivi dal client,
+        # che e' il caso dello studio della scala: li' il riquadro della depth non c'entra.
         return jsonify({"error": "nessun riquadro per questa immagine"}), 404
 
     zoom = max(1, min(8, int(request.args.get("zoom") or 3)))
@@ -4465,9 +4529,8 @@ def api_depth_crop(project_id: str):
         immagine = grezza.convert("RGB")
         # Poco margine in verticale: le righe di interfaccia sopra e sotto distano una
         # ventina di pixel, e mostrarne una fetta tagliata a meta' e' solo rumore.
-        finestra = [_intero(k) for k in ("x0", "y0", "x1", "y1")]
-        if all(v is not None for v in finestra):
-            x0, y0, x1, y1 = finestra
+        if esplicita:
+            x0, y0, x1, y1 = finestra_chiesta
         else:
             x0, y0 = box["left"] - 60, box["top"] - 7
             x1, y1 = box["right"] + 120, box["bottom"] + 7
@@ -4477,7 +4540,7 @@ def api_depth_crop(project_id: str):
         y1 = max(y0 + 2, min(int(y1), immagine.size[1]))
         ritaglio = immagine.crop((x0, y0, x1, y1))
         ritaglio = ritaglio.resize((ritaglio.width * zoom, ritaglio.height * zoom), Image.NEAREST)
-        if not grezzo:
+        if not grezzo and box:
             disegno = ImageDraw.Draw(ritaglio)
             disegno.rectangle(
                 [(box["left"] - x0) * zoom - 1, (box["top"] - y0) * zoom - 1,

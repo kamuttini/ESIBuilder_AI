@@ -1,13 +1,19 @@
-/* Lo studio del righello, fotogramma per fotogramma.
+/* Lo studio del righello, fotogramma per fotogramma, con le correzioni sotto le dita.
 
    Il modulo trova la colonna della scala, ne stacca le tacche, distingue lo zero dal fondo,
-   ricava il passo e legge i numeri con l'OCR. Qui si guarda quello che ha trovato disegnato
-   sull'immagine e lo si corregge: la colonna e lo zero si trascinano, le tacche si aggiungono
-   e si tolgono con un clic, i numeri si riscrivono.
+   ricava il passo e legge i numeri con l'OCR. Qui si guarda quello che ha trovato e si
+   corregge — e la correzione deve costare un gesto, non un cambio di modo.
 
-   Le correzioni non restano qui: rientrano nel modulo alla run successiva (`--corrections`),
-   che le applica *dopo* la detection — cosi' la pagina continua a mostrare anche cosa avrebbe
-   detto da solo — e una colonna corretta fa da ancora per tutta la cartella. */
+   Quindi: si trascina direttamente (colonna, zero, fondo, o tutto il righello insieme),
+   shift+clic aggiunge una tacca, clic su una tacca la toglie, doppio clic su un numero lo
+   riscrive lì dove sta. Le due finestre ingrandite su zero e fondo servono perché a
+   grandezza naturale una tacca è alta due pixel e il pixel giusto non si vede.
+
+   Le correzioni rientrano nel modulo alla run successiva (`--corrections`), applicate *dopo*
+   la detection: la pagina continua a mostrare anche cosa avrebbe detto da solo. */
+
+const COLORI_SCALA = { accepted: '#3fb950', review: '#d29922', reject: '#f85149' };
+const INGRANDIMENTO_SCALA = 4;
 
 async function createScaleViewer(projectId) {
   let dati = await api(`/projects/${projectId}/scale/study`);
@@ -20,203 +26,303 @@ async function createScaleViewer(projectId) {
 
   let indice = 0;
   let filtro = '';
-  let modo = 'guarda';          // guarda · disegna · tacca · numero
   let suggerimenti = {};
-  let disegnoInCorso = null;    // il righello che si sta indicando a mano
+  let attesaSecondoClic = null;   // il righello che si sta indicando a mano
+  const storia = [];             // per annullare l'ultimo gesto sul fotogramma
   const corrente = () => frames[indice] || {};
   const passa = (f) => !filtro || f.status === filtro;
   const visibili = () => frames.filter(passa);
+  const correzione = () => (dati.corrections || {})[corrente().name] || {};
+  const proposta = () => suggerimenti[corrente().name];
 
+  /* --- il fotogramma intero, con il righello sopra ------------------------------------ */
   const stage = el('div', { class: 'editor-stage scala-stage' });
   const image = el('img', { alt: '' });
   const strati = el('div', { class: 'scala-strati' });
   stage.append(image, strati);
+  const scala = () => (image.clientWidth || 1) / (corrente().w || image.naturalWidth || 1);
 
-  const scala = () => {
-    const f = corrente();
-    return (image.clientWidth || 1) / (f.w || image.naturalWidth || 1);
-  };
-
-  /* --- il disegno: colonna, zero, fondo, tacche, numeri ------------------------------- */
   const disegna = () => {
     const f = corrente();
     strati.innerHTML = '';
     const s = scala();
     if (!s || !f.w) return;
     const alto = (f.h || 0) * s;
-    if (f.x != null) {
-      const colonna = el('div', { class: 'scala-colonna', title: `colonna x=${Math.round(f.x)}` });
-      colonna.style.left = `${f.x * s}px`;
-      colonna.style.height = `${alto}px`;
-      colonna.addEventListener('pointerdown', (e) => trascina(e, 'x'));
-      strati.append(colonna);
-    }
-    for (const t of f.ticks || []) {
-      const tacca = el('div', { class: 'scala-tacca', title: `tacca y=${Math.round(t)}` });
-      tacca.style.top = `${t * s}px`;
-      tacca.style.left = `${((f.x ?? 0) - 26) * s}px`;
-      tacca.style.width = `${52 * s}px`;
-      if (modo === 'tacca') {
-        tacca.classList.add('togliibile');
-        tacca.addEventListener('click', (e) => { e.stopPropagation(); togliTacca(t); });
-      }
-      strati.append(tacca);
-    }
-    for (const [y, valore] of f.labels || []) {
-      const numero = el('div', { class: 'scala-numero' }, `${valore} cm`);
-      numero.style.top = `${y * s}px`;
-      numero.style.left = `${((f.x ?? 0) + 34) * s}px`;
-      if (modo === 'numero') {
-        numero.classList.add('modificabile');
-        numero.addEventListener('click', (e) => { e.stopPropagation(); cambiaNumero(y, valore); });
-      }
-      strati.append(numero);
-    }
-    const proposta = suggerimenti[f.name];
-    if (proposta && f.x == null) {
-      // La proposta si disegna in ambra tratteggiata: e' un consiglio, non una misura.
+
+    const prop = proposta();
+    if (prop && f.x == null) {
       const colonna = el('div', { class: 'scala-colonna proposta' });
-      colonna.style.left = `${proposta.x * s}px`;
+      colonna.style.left = `${prop.x * s}px`;
       colonna.style.height = `${alto}px`;
       strati.append(colonna);
-      for (const t of proposta.ticks || []) {
+      for (const t of prop.ticks || []) {
         const tacca = el('div', { class: 'scala-tacca proposta' });
         tacca.style.top = `${t * s}px`;
-        tacca.style.left = `${(proposta.x - 20) * s}px`;
+        tacca.style.left = `${(prop.x - 20) * s}px`;
         tacca.style.width = `${40 * s}px`;
         strati.append(tacca);
       }
-      for (const [chiave, classe, etichetta] of [['y_zero', 'zero', '0 proposto'],
-                                                 ['y_far', 'fondo', 'fondo proposto']]) {
+      for (const [chiave, classe, testo] of [['y_zero', 'zero', '0 proposto'],
+                                             ['y_far', 'fondo', 'fondo proposto']]) {
         const riga = el('div', { class: `scala-estremo proposta scala-${classe}` },
-          el('span', {}, etichetta));
-        riga.style.top = `${proposta[chiave] * s}px`;
+          el('span', {}, testo));
+        riga.style.top = `${prop[chiave] * s}px`;
         strati.append(riga);
       }
     }
-    if (disegnoInCorso) {
+
+    if (attesaSecondoClic) {
       const colonna = el('div', { class: 'scala-colonna disegno' });
-      colonna.style.left = `${disegnoInCorso.x * s}px`;
+      colonna.style.left = `${attesaSecondoClic.x * s}px`;
       colonna.style.height = `${alto}px`;
-      strati.append(colonna);
       const zero = el('div', { class: 'scala-estremo disegno scala-zero' }, el('span', {}, '0'));
-      zero.style.top = `${disegnoInCorso.y_zero * s}px`;
-      strati.append(zero);
+      zero.style.top = `${attesaSecondoClic.y_zero * s}px`;
+      strati.append(colonna, zero);
     }
-    for (const [chiave, classe, etichetta] of [['y_zero', 'zero', '0'], ['y_far', 'fondo', 'fondo']]) {
+
+    if (f.x != null) {
+      const colonna = el('div', { class: 'scala-colonna', title: 'trascina: sposta la colonna' });
+      colonna.style.left = `${f.x * s}px`;
+      colonna.style.height = `${alto}px`;
+      colonna.addEventListener('pointerdown', (e) => trascina(e, e.altKey ? 'tutto' : 'x', scala));
+      strati.append(colonna);
+    }
+    for (const t of f.ticks || []) {
+      const tacca = el('div', { class: 'scala-tacca', title: 'clic: togli questa tacca' });
+      tacca.style.top = `${t * s}px`;
+      tacca.style.left = `${((f.x ?? 0) - 26) * s}px`;
+      tacca.style.width = `${52 * s}px`;
+      tacca.addEventListener('click', (e) => { e.stopPropagation(); togliTacca(t); });
+      strati.append(tacca);
+    }
+    for (const [y, valore] of f.labels || []) {
+      const numero = el('div', { class: 'scala-numero', title: 'doppio clic: correggi' },
+        `${valore} cm`);
+      numero.style.top = `${y * s}px`;
+      numero.style.left = `${((f.x ?? 0) + 34) * s}px`;
+      numero.addEventListener('dblclick', (e) => { e.stopPropagation(); cambiaNumero(numero, y, valore); });
+      strati.append(numero);
+    }
+    for (const [chiave, classe, testo] of [['y_zero', 'zero', '0'], ['y_far', 'fondo', 'fondo']]) {
       if (f[chiave] == null) continue;
-      const riga = el('div', { class: `scala-estremo scala-${classe}` },
-        el('span', {}, etichetta));
+      const riga = el('div', { class: `scala-estremo scala-${classe}` }, el('span', {}, testo));
       riga.style.top = `${f[chiave] * s}px`;
-      riga.addEventListener('pointerdown', (e) => trascina(e, chiave));
+      riga.addEventListener('pointerdown', (e) => trascina(e, e.altKey ? 'tutto' : chiave, scala));
       strati.append(riga);
     }
   };
 
-  /* --- trascinare: la colonna in orizzontale, zero e fondo in verticale --------------- */
-  function trascina(event, quale) {
+  /* --- le due finestre ingrandite: e' li' che si prende il pixel giusto -------------- */
+  const zoom = {};
+  const creaZoom = (chiave, etichetta, colore) => {
+    const scatola = el('div', { class: 'scala-zoom' });
+    const img = el('img', { alt: '' });
+    const mira = el('div', { class: 'scala-mira', style: `border-top-color:${colore}` });
+    const piano = el('div', { class: 'scala-zoom-piano' });
+    piano.append(mira);
+    scatola.append(el('div', { class: 'scala-zoom-titolo' }, etichetta), img, piano);
+    piano.addEventListener('pointerdown', (e) => trascina(e, chiave, () => ({
+      x: INGRANDIMENTO_SCALA, y: INGRANDIMENTO_SCALA,
+    })));
+    zoom[chiave] = { scatola, img, mira, finestra: null };
+    return scatola;
+  };
+  const zoomZero = creaZoom('y_zero', 'zero, ingrandito 4×', '#3fb950');
+  const zoomFondo = creaZoom('y_far', 'fondo, ingrandito 4×', '#d29922');
+
+  const aggiornaZoom = () => {
+    const f = corrente();
+    for (const chiave of ['y_zero', 'y_far']) {
+      const z = zoom[chiave];
+      const y = f[chiave];
+      z.scatola.style.display = (y == null || f.x == null) ? 'none' : '';
+      if (y == null || f.x == null) continue;
+      const x0 = Math.max(0, Math.round(f.x - 46));
+      const y0 = Math.max(0, Math.round(y - 22));
+      const nuova = [x0, y0, x0 + 150, y0 + 44];
+      if (!z.finestra || z.finestra.join() !== nuova.join()) {
+        z.finestra = nuova;
+        z.img.src = `/api/projects/${projectId}/depth/crop`
+          + `?name=${encodeURIComponent(f.name)}&zoom=${INGRANDIMENTO_SCALA}&raw=1`
+          + `&x0=${nuova[0]}&y0=${nuova[1]}&x1=${nuova[2]}&y1=${nuova[3]}`;
+      }
+      z.mira.style.top = `${(y - z.finestra[1]) * INGRANDIMENTO_SCALA}px`;
+      z.mira.style.left = `${(f.x - z.finestra[0]) * INGRANDIMENTO_SCALA - 30}px`;
+    }
+  };
+
+  /* --- trascinare: un lato, o tutto il righello insieme ------------------------------- */
+  function trascina(event, quale, scalaFn) {
     event.preventDefault();
     event.stopPropagation();
     const f = corrente();
-    const s = scala();
-    const da = { x: event.clientX, y: event.clientY, valore: f[quale] };
+    const s = scalaFn();
+    const fx = typeof s === 'object' ? s.x : s;
+    const fy = typeof s === 'object' ? s.y : s;
+    const da = { cx: event.clientX, cy: event.clientY,
+                 x: f.x, y_zero: f.y_zero, y_far: f.y_far,
+                 ticks: [...(f.ticks || [])] };
+    ricorda();
     const muovi = (e) => {
-      const delta = quale === 'x' ? (e.clientX - da.x) : (e.clientY - da.y);
-      const massimo = quale === 'x' ? f.w : f.h;
-      f[quale] = Math.max(0, Math.min(massimo, Math.round(da.valore + delta / (s || 1))));
-      disegna();
-      renderDati();
+      const dx = Math.round((e.clientX - da.cx) / (fx || 1));
+      const dy = Math.round((e.clientY - da.cy) / (fy || 1));
+      if (quale === 'tutto') {
+        f.x = limita(da.x + dx, f.w);
+        f.y_zero = limita(da.y_zero + dy, f.h);
+        f.y_far = limita(da.y_far + dy, f.h);
+        f.ticks = da.ticks.map((t) => limita(t + dy, f.h));
+      } else if (quale === 'x') {
+        f.x = limita(da.x + dx, f.w);
+      } else {
+        f[quale] = limita(da[quale] + dy, f.h);
+      }
+      disegna(); aggiornaZoom(); renderDati();
     };
     const molla = () => {
       window.removeEventListener('pointermove', muovi);
       window.removeEventListener('pointerup', molla);
-      salva({ [quale]: f[quale] });
+      const campi = quale === 'tutto'
+        ? { x: f.x, y_zero: f.y_zero, y_far: f.y_far, ticks_add: f.ticks }
+        : { [quale]: f[quale] };
+      salva(campi);
     };
     window.addEventListener('pointermove', muovi);
     window.addEventListener('pointerup', molla);
   }
+  const limita = (v, massimo) => Math.max(0, Math.min(Math.round(v), Math.round(massimo || 0)));
 
-  /* --- tacche: si aggiungono cliccando sull'immagine, si tolgono cliccandole ---------- */
+  /* --- gesti sull'immagine: shift+clic aggiunge, due clic indicano il righello -------- */
   stage.addEventListener('click', (event) => {
+    if (event.target.closest('.scala-tacca, .scala-numero')) return;
     const s = scala();
     const riquadro = stage.getBoundingClientRect();
-    if (modo === 'disegna') {
-      const x = Math.round((event.clientX - riquadro.left) / (s || 1));
-      const y = Math.round((event.clientY - riquadro.top) / (s || 1));
-      const f = corrente();
-      if (!disegnoInCorso) {
-        // Primo clic: la colonna e lo zero. Secondo clic: il fondo, e da li' le tacche.
-        disegnoInCorso = { x, y_zero: y };
-        toast('ora clicca il fondo del righello');
-      } else {
-        const passoMm = (suggerimenti[f.name] || {}).step_mm || 10;
-        f.x = disegnoInCorso.x;
-        f.y_zero = disegnoInCorso.y_zero;
-        f.y_far = y;
-        f.B_zero_end = y < disegnoInCorso.y_zero ? 'bottom' : 'top';
-        const depth = f.E_depth_interface;
-        const tacche = [];
-        if (depth) {
-          const mmPx = depth / Math.abs(y - disegnoInCorso.y_zero);
-          const passoPx = passoMm / mmPx;
-          const direzione = y > disegnoInCorso.y_zero ? 1 : -1;
-          for (let k = 0; k * passoPx <= Math.abs(y - disegnoInCorso.y_zero) + 0.5; k += 1) {
-            tacche.push(Math.round(disegnoInCorso.y_zero + direzione * k * passoPx));
-          }
-        }
-        f.ticks = tacche;
-        salva({ x: f.x, y_zero: f.y_zero, y_far: f.y_far,
-                zero_end: f.B_zero_end, ticks_add: tacche });
-        disegnoInCorso = null;
-        modo = 'guarda';
-        for (const b of modi.children) b.classList.remove('on');
-        modi.children[0].classList.add('on');
-        toast('righello indicato: rifai lo studio per usarlo anche altrove');
-      }
-      disegna(); renderDati(); renderAzioni();
-      return;
-    }
-    if (modo !== 'tacca' || event.target.closest('.scala-tacca')) return;
+    const x = Math.round((event.clientX - riquadro.left) / (s || 1));
     const y = Math.round((event.clientY - riquadro.top) / (s || 1));
     const f = corrente();
-    f.ticks = [...(f.ticks || []), y].sort((a, b) => a - b);
-    const aggiunte = [...(correzione().ticks_add || []), y];
-    salva({ ticks_add: aggiunte });
-    disegna();
-    renderDati();
+
+    if (f.x == null) {
+      // Righello mai trovato: due clic lo indicano. Primo lo zero e la colonna, poi il fondo.
+      if (!attesaSecondoClic) {
+        attesaSecondoClic = { x, y_zero: y };
+        stato('ora clicca il fondo del righello');
+      } else {
+        indicaRighello(attesaSecondoClic, y);
+        attesaSecondoClic = null;
+      }
+      disegna(); return;
+    }
+    if (event.shiftKey) {
+      ricorda();
+      f.ticks = [...(f.ticks || []), y].sort((a, b) => a - b);
+      salva({ ticks_add: [...(correzione().ticks_add || []), y] });
+      disegna();
+    }
   });
-  const togliTacca = (y) => {
+
+  const indicaRighello = (inizio, yFondo) => {
     const f = corrente();
-    f.ticks = (f.ticks || []).filter((t) => Math.round(t) !== Math.round(y));
-    const tolte = [...(correzione().ticks_del || []), Math.round(y)];
-    salva({ ticks_del: tolte });
-    disegna();
-    renderDati();
-  };
-  const cambiaNumero = (y, valore) => {
-    const scritto = window.prompt(`valore della tacca a y=${Math.round(y)} (in cm)`, String(valore));
-    if (scritto === null) return;
-    const cm = parseFloat(scritto.replace(',', '.'));
-    if (!isFinite(cm)) { toast('non e\' un numero', true); return; }
-    const f = corrente();
-    f.labels = (f.labels || []).map(([yy, vv]) => (Math.round(yy) === Math.round(y) ? [yy, cm] : [yy, vv]));
-    const numeri = [...(correzione().nums || []).filter(([yy]) => Math.round(yy) !== Math.round(y)),
-                    [Math.round(y), cm * 10]];
-    salva({ nums: numeri });
-    disegna();
-    renderDati();
+    ricorda();
+    const passoMm = (proposta() || {}).step_mm || 10;
+    const depth = (proposta() || {}).depth_confirmed_mm || f.E_depth_interface;
+    f.x = inizio.x; f.y_zero = inizio.y_zero; f.y_far = yFondo;
+    f.B_zero_end = yFondo < inizio.y_zero ? 'bottom' : 'top';
+    const tacche = [];
+    if (depth) {
+      const passoPx = (passoMm / depth) * Math.abs(yFondo - inizio.y_zero);
+      const direzione = yFondo > inizio.y_zero ? 1 : -1;
+      for (let k = 0; k * passoPx <= Math.abs(yFondo - inizio.y_zero) + 0.5; k += 1) {
+        tacche.push(Math.round(inizio.y_zero + direzione * k * passoPx));
+      }
+    }
+    f.ticks = tacche;
+    salva({ x: f.x, y_zero: f.y_zero, y_far: f.y_far,
+            zero_end: f.B_zero_end, ticks_add: tacche });
+    stato('righello indicato');
   };
 
-  const correzione = () => (dati.corrections || {})[corrente().name] || {};
+  const togliTacca = (y) => {
+    const f = corrente();
+    ricorda();
+    f.ticks = (f.ticks || []).filter((t) => Math.round(t) !== Math.round(y));
+    salva({ ticks_del: [...(correzione().ticks_del || []), Math.round(y)] });
+    disegna();
+  };
+
+  /* --- i numeri si riscrivono dove stanno, senza finestrelle di sistema -------------- */
+  const cambiaNumero = (nodo, y, valore) => {
+    const campo = el('input', { class: 'scala-numero-campo', type: 'text', value: String(valore) });
+    nodo.replaceChildren(campo);
+    campo.focus(); campo.select();
+    const chiudi = (salvare) => {
+      const cm = parseFloat(campo.value.replace(',', '.'));
+      if (salvare && isFinite(cm)) {
+        const f = corrente();
+        ricorda();
+        f.labels = (f.labels || []).map(([yy, vv]) =>
+          (Math.round(yy) === Math.round(y) ? [yy, cm] : [yy, vv]));
+        salva({ nums: [...(correzione().nums || []).filter(([yy]) => Math.round(yy) !== Math.round(y)),
+                       [Math.round(y), cm * 10]] });
+      }
+      disegna();
+    };
+    campo.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); chiudi(true); }
+      if (e.key === 'Escape') { e.preventDefault(); chiudi(false); }
+    });
+    campo.addEventListener('blur', () => chiudi(true));
+  };
+
+  /* --- annullare l'ultimo gesto ------------------------------------------------------- */
+  const ricorda = () => {
+    const f = corrente();
+    storia.push({ name: f.name, x: f.x, y_zero: f.y_zero, y_far: f.y_far,
+                  ticks: [...(f.ticks || [])], labels: (f.labels || []).map((l) => [...l]),
+                  zero_end: f.B_zero_end, correzione: { ...correzione() } });
+    if (storia.length > 40) storia.shift();
+  };
+  const annulla = async () => {
+    const prima = storia.pop();
+    if (!prima) { stato('niente da annullare'); return; }
+    const f = frames.find((x) => x.name === prima.name);
+    if (!f) return;
+    Object.assign(f, { x: prima.x, y_zero: prima.y_zero, y_far: prima.y_far,
+                       ticks: prima.ticks, labels: prima.labels, B_zero_end: prima.zero_end });
+    indice = frames.indexOf(f);
+    try {
+      await api(`/projects/${projectId}/scale/study/correct`,
+        { body: { name: f.name, reset: true } });
+      const rimasto = Object.fromEntries(Object.entries(prima.correzione)
+        .filter(([k]) => k !== 'ts'));
+      if (Object.keys(rimasto).length) {
+        await api(`/projects/${projectId}/scale/study/correct`,
+          { body: { name: f.name, ...rimasto } });
+        dati.corrections[f.name] = prima.correzione;
+      } else {
+        delete dati.corrections[f.name];
+      }
+      await caricaSuggerimenti();
+      stato('annullato');
+      mostra();
+    } catch (errore) { toast(errore.message, true); }
+  };
+
+  /* --- salvataggio, con un segnale che si vede -------------------------------------- */
+  const statoBox = el('span', { class: 'hint scala-stato' });
+  let orologio = null;
+  const stato = (testo) => {
+    statoBox.textContent = testo;
+    clearTimeout(orologio);
+    orologio = setTimeout(() => { statoBox.textContent = ''; }, 2200);
+  };
   const salva = async (campi) => {
     try {
       await api(`/projects/${projectId}/scale/study/correct`,
         { body: { name: corrente().name, ...campi } });
       dati.corrections = dati.corrections || {};
       dati.corrections[corrente().name] = { ...correzione(), ...campi };
-      // Un righello indicato a mano diventa subito un consiglio per gli altri falliti.
+      stato('salvato');
       await caricaSuggerimenti();
-      renderDati(); renderLista(); disegna();
+      renderDati(); renderLista(); renderAzioni();
     } catch (errore) { toast(errore.message, true); }
   };
 
@@ -224,95 +330,114 @@ async function createScaleViewer(projectId) {
     try {
       const r = await api(`/projects/${projectId}/scale/study/suggestions`);
       suggerimenti = r.suggestions || {};
-      notiBox.textContent = Object.keys(suggerimenti).length
-        ? `righello proposto su ${Object.keys(suggerimenti).length} fotogrammi, `
-          + `a partire dai ${r.known} in cui si sa dov'e'`
-        : '';
-    } catch (errore) { suggerimenti = {}; }
+      const quanti = Object.keys(suggerimenti).length;
+      notiBox.innerHTML = '';
+      if (!quanti) return;
+      notiBox.append(el('span', { class: 'hint' },
+        `righello proposto su ${quanti} fotogrammi, dai ${r.known} in cui si sa dov'e'`
+        + `${r.depth_confirmed ? ` · ${r.depth_confirmed} depth confermate da te` : ''}`));
+      const tutti = el('button', { class: 'ghost' }, `Accetta tutti i ${quanti} proposti`);
+      tutti.addEventListener('click', async () => {
+        try {
+          const esito = await api(`/projects/${projectId}/scale/study/accept`, { body: {} });
+          toast(`accettati ${esito.accepted} righelli proposti`);
+          dati = await api(`/projects/${projectId}/scale/study`);
+          frames = dati.frames || [];
+          await caricaSuggerimenti();
+          mostra();
+        } catch (errore) { toast(errore.message, true); }
+      });
+      notiBox.append(tutti);
+    } catch (errore) { suggerimenti = {}; notiBox.innerHTML = ''; }
   };
-  const notiBox = el('div', { class: 'hint' });
+  const notiBox = el('div', { class: 'row' });
 
-  /* --- il pannello dei dati: cosa ha trovato, e cosa hai corretto tu ------------------ */
+  /* --- i dati: cosa ha trovato, e cosa hai corretto tu ------------------------------- */
   const datiBox = el('div', { class: 'hint' });
   const renderDati = () => {
     const f = corrente();
     const c = correzione();
-    const corretti = Object.keys(c).filter((k) => k !== 'ts');
+    const corretti = Object.keys(c).filter((k) => !['ts', 'from_suggestion'].includes(k));
     datiBox.innerHTML = '';
     datiBox.append(
-      el('div', {},
-        `stato ${f.status}${f.reason ? ` — ${f.reason}` : ''}`),
+      el('div', {}, `stato ${f.status}${f.reason ? ` — ${f.reason}` : ''}`),
       el('div', {},
         `colonna x=${f.x != null ? Math.round(f.x) : '—'} · zero y=${f.y_zero != null ? Math.round(f.y_zero) : '—'}`
         + ` · fondo y=${f.y_far != null ? Math.round(f.y_far) : '—'} · ${(f.ticks || []).length} tacche`
         + ` · passo ${f.pitch ? Math.round(f.pitch) + ' px' : '—'}`
         + ` · ${f.mm_per_px ? f.mm_per_px.toFixed(4) + ' mm/px' : '—'}`),
       el('div', {},
-        `numeri letti: ${(f.labels || []).map(([, v]) => `${v}`).join(' · ') || 'nessuno'}`
+        `numeri: ${(f.labels || []).map(([, v]) => `${v}`).join(' · ') || 'nessuno'}`
         + `${f.D_step_mm ? ` · passo ${f.D_step_mm} mm` : ''}`
         + `${f.D_coherent === false ? ' · numeri incoerenti fra loro' : ''}`),
       el('div', {},
-        `verso: lo zero e' ${f.B_zero_end === 'top' ? 'in alto' : f.B_zero_end === 'bottom' ? 'in basso' : '—'}`
-        + `${f.B_zero_moved ? ' (spostato rispetto alla detection)' : ''}`
-        + `${f.E_depth_interface ? ` · depth dall'interfaccia ${f.E_depth_interface} mm` : ''}`
+        `zero ${f.B_zero_end === 'top' ? 'in alto' : f.B_zero_end === 'bottom' ? 'in basso' : '—'}`
+        + `${f.E_depth_interface ? ` · depth letta ${f.E_depth_interface} mm` : ''}`
+        + `${(proposta() || {}).depth_confirmed_mm ? ` · depth confermata ${proposta().depth_confirmed_mm} mm` : ''}`
         + `${f.E_verdict ? ` · ${f.E_verdict}` : ''}`),
     );
     if (corretti.length) {
       datiBox.append(el('div', { class: 'score-fixed', style: 'display:inline-block;margin-top:4px' },
-        `corretto da te: ${corretti.join(', ')}`));
+        `${c.from_suggestion ? 'dalla proposta' : 'corretto da te'}: ${corretti.join(', ')}`));
     }
   };
 
-  /* --- il verso e il ripristino ------------------------------------------------------- */
   const azioni = el('div', { class: 'row' });
   const renderAzioni = () => {
     azioni.innerHTML = '';
     const f = corrente();
-    for (const [dove, etichetta] of [['top', 'lo zero e\' in alto'], ['bottom', 'lo zero e\' in basso']]) {
+    for (const [dove, etichetta] of [['top', 'zero in alto'], ['bottom', 'zero in basso']]) {
       const b = el('button', { class: 'chip' + (f.B_zero_end === dove ? ' on' : '') }, etichetta);
-      b.addEventListener('click', () => { f.B_zero_end = dove; salva({ zero_end: dove }); renderAzioni(); });
+      b.addEventListener('click', () => {
+        ricorda(); f.B_zero_end = dove; salva({ zero_end: dove }); renderAzioni();
+      });
       azioni.append(b);
     }
-    const proposta = suggerimenti[f.name];
-    if (proposta && f.x == null) {
+    const prop = proposta();
+    if (prop && f.x == null) {
       const usa = el('button', {}, 'Usa il righello proposto');
       usa.addEventListener('click', async () => {
-        f.x = proposta.x; f.y_zero = proposta.y_zero; f.y_far = proposta.y_far;
-        f.ticks = proposta.ticks || []; f.B_zero_end = proposta.zero_end;
-        await salva({ x: proposta.x, y_zero: proposta.y_zero, y_far: proposta.y_far,
-                      zero_end: proposta.zero_end, ticks_add: proposta.ticks || [] });
-        toast('righello proposto accettato');
-        disegna(); renderAzioni(); renderDati();
+        try {
+          await api(`/projects/${projectId}/scale/study/accept`, { body: { name: f.name } });
+          dati = await api(`/projects/${projectId}/scale/study`);
+          frames = dati.frames || [];
+          await caricaSuggerimenti();
+          stato('proposta accettata');
+          mostra();
+        } catch (errore) { toast(errore.message, true); }
       });
-      azioni.append(usa, el('span', { class: 'hint' }, proposta.reason || ''));
+      azioni.append(usa);
     }
+    const indietro = el('button', { class: 'ghost' }, 'Annulla l\'ultimo gesto');
+    indietro.addEventListener('click', annulla);
+    azioni.append(indietro);
     if (Object.keys(correzione()).filter((k) => k !== 'ts').length) {
-      azioni.append(confermaInDueTempi('Togli le mie correzioni su questo fotogramma',
+      azioni.append(confermaInDueTempi('Togli le mie correzioni qui',
         'torna a quello che ha trovato il modulo.',
         async () => {
           await api(`/projects/${projectId}/scale/study/correct`,
             { body: { name: corrente().name, reset: true } });
-          toast('correzioni tolte: rifai lo studio per rivederlo');
           delete dati.corrections[corrente().name];
-          renderAzioni(); renderDati();
+          await caricaSuggerimenti();
+          stato('correzioni togliate');
+          renderAzioni(); renderDati(); renderLista();
         }));
     }
+    if (prop) azioni.append(el('span', { class: 'hint' }, prop.reason || ''));
   };
 
-  /* --- elenco laterale ---------------------------------------------------------------- */
   const listBox = el('div', { class: 'score-list' });
   const renderLista = () => {
     listBox.innerHTML = '';
     for (const f of visibili()) {
       const c = (dati.corrections || {})[f.name];
-      const riga = el('div', {
-        class: 'score-row' + (f === corrente() ? ' current' : ''),
-      },
+      const riga = el('div', { class: 'score-row' + (f === corrente() ? ' current' : '') },
         el('span', { class: 'score-value', style: `color:${COLORI_SCALA[f.status] || 'var(--muted)'}` },
           f.status === 'accepted' ? 'ok' : f.status === 'review' ? 'rev' : 'no'),
         el('span', { class: 'score-group' }, `${(f.ticks || []).length}t`),
         el('span', { class: 'score-name', title: f.name }, f.name.split('/').pop()),
-        c ? el('span', { class: 'score-fixed' }, 'corretto') : null,
+        c ? el('span', { class: 'score-fixed' }, c.from_suggestion ? 'proposto' : 'corretto') : null,
+        (!c && suggerimenti[f.name]) ? el('span', { class: 'hint' }, 'proposta') : null,
       );
       riga.addEventListener('click', () => { indice = frames.indexOf(f); mostra(); });
       listBox.append(riga);
@@ -326,12 +451,16 @@ async function createScaleViewer(projectId) {
     if (!elenco.length) { didascalia.textContent = 'nessun fotogramma con questo filtro'; return; }
     if (!elenco.includes(corrente())) indice = frames.indexOf(elenco[0]);
     const f = corrente();
+    attesaSecondoClic = null;
     image.src = `/api/projects/${projectId}/image?name=${encodeURIComponent(f.name)}&w=980`;
     didascalia.innerHTML = '';
     didascalia.append(
-      `fotogramma ${elenco.indexOf(f) + 1} di ${elenco.length} — ${f.name.split('/').pop()} · `,
+      `${elenco.indexOf(f) + 1} di ${elenco.length} — ${f.name.split('/').pop()} · `,
       el('strong', { style: `color:${COLORI_SCALA[f.status] || 'var(--text)'}` }, f.status));
-    disegna(); renderDati(); renderAzioni(); renderLista();
+    if (f.x == null) {
+      didascalia.append(el('span', {}, ' · righello non trovato: due clic per indicarlo'));
+    }
+    disegna(); aggiornaZoom(); renderDati(); renderAzioni(); renderLista();
   };
   const passo = (delta) => {
     const elenco = visibili();
@@ -341,13 +470,12 @@ async function createScaleViewer(projectId) {
     mostra();
   };
 
-  /* --- barra: filtri, modo, rifai ------------------------------------------------------ */
   const chips = el('div', { class: 'ov-chips' });
   const perStato = (s) => frames.filter((f) => f.status === s).length;
   for (const [chiave, etichetta] of [['', `tutti ${frames.length}`],
                                      ['accepted', `accettati ${perStato('accepted')}`],
                                      ['review', `da rivedere ${perStato('review')}`],
-                                     ['reject', `scartati ${perStato('reject')}`]]) {
+                                     ['reject', `senza righello ${perStato('reject')}`]]) {
     const b = el('button', { class: 'chip' + (chiave === filtro ? ' on' : '') }, etichetta);
     if (chiave) b.style.borderColor = COLORI_SCALA[chiave];
     b.addEventListener('click', () => {
@@ -357,23 +485,6 @@ async function createScaleViewer(projectId) {
       mostra();
     });
     chips.append(b);
-  }
-
-  const modi = el('div', { class: 'ov-chips' });
-  for (const [chiave, etichetta] of [['guarda', 'guarda e trascina'],
-                                     ['disegna', 'indica tu il righello'],
-                                     ['tacca', 'aggiungi/togli tacche'],
-                                     ['numero', 'correggi i numeri']]) {
-    const b = el('button', { class: 'chip' + (chiave === modo ? ' on' : '') }, etichetta);
-    b.addEventListener('click', () => {
-      modo = chiave;
-      disegnoInCorso = null;
-      for (const altro of modi.children) altro.classList.remove('on');
-      b.classList.add('on');
-      if (chiave === 'disegna') toast('clicca dove sta lo zero del righello');
-      disegna();
-    });
-    modi.append(b);
   }
 
   const avanzamento = el('span', { class: 'hint' });
@@ -387,6 +498,7 @@ async function createScaleViewer(projectId) {
         frames = dati.frames || [];
         indice = Math.min(indice, frames.length - 1);
         avanzamento.textContent = '';
+        await caricaSuggerimenti();
         toast('studio rifatto');
         mostra();
       } catch (errore) { avanzamento.textContent = ''; toast(errore.message, true); }
@@ -395,6 +507,19 @@ async function createScaleViewer(projectId) {
   const daTastiera = (event) => {
     if (!root.isConnected) return;
     if (['INPUT', 'TEXTAREA', 'SELECT'].includes((event.target || {}).tagName)) return;
+    const f = corrente();
+    if (event.key === 'z' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); annulla(); return; }
+    const su_giu = { ArrowUp: -1, ArrowDown: 1 }[event.key];
+    if (su_giu && (event.shiftKey || event.altKey) && f.x != null) {
+      // Il pixel esatto con la tastiera: shift muove lo zero, alt il fondo.
+      event.preventDefault();
+      const chiave = event.altKey ? 'y_far' : 'y_zero';
+      ricorda();
+      f[chiave] = limita((f[chiave] || 0) + su_giu, f.h);
+      disegna(); aggiornaZoom(); renderDati();
+      salva({ [chiave]: f[chiave] });
+      return;
+    }
     if (event.key === 'ArrowLeft') { event.preventDefault(); passo(-1); }
     if (event.key === 'ArrowRight') { event.preventDefault(); passo(1); }
   };
@@ -404,28 +529,30 @@ async function createScaleViewer(projectId) {
     el('p', { class: 'hint' },
       `il righello di questa cartella: colonna a x=${Math.round((dati.zone || {}).x || 0)}, `
       + `trovata su ${(dati.zone || {}).found || 0} fotogrammi su ${(dati.zone || {}).total || 0}. `
-      + 'Trascina la colonna, lo zero e il fondo; con i modi qui sotto aggiungi o togli tacche '
-      + 'e correggi i numeri. Le correzioni rientrano nel modulo quando rifai lo studio.'),
-    chips, modi, notiBox,
+      + 'Trascina la colonna, lo zero o il fondo — con alt premuto trascini tutto il righello. '
+      + 'Shift+clic aggiunge una tacca, clic su una tacca la toglie, doppio clic su un numero lo '
+      + 'riscrive. Shift+↑↓ muove lo zero di un pixel, alt+↑↓ il fondo; ← → cambiano fotogramma; '
+      + 'cmd+Z annulla.'),
+    chips, notiBox,
     el('div', { class: 'ov-bar' },
       el('div', { class: 'ov-nav' },
         el('button', { class: 'ghost sq', onclick: () => passo(-1) }, '‹'),
         el('button', { class: 'ghost sq', onclick: () => passo(1) }, '›'),
-        didascalia)),
+        didascalia, statoBox)),
     el('div', { class: 'ov-body' },
-      el('div', { class: 'ov-main' }, stage,
+      el('div', { class: 'ov-main' },
+        el('div', { class: 'scala-zoom-coppia' }, zoomZero, zoomFondo),
+        stage,
         el('div', { class: 'ov-under' },
           el('div', { class: 'ov-under-text' }, datiBox, azioni,
             el('div', { class: 'row' }, rifai, avanzamento)))),
       el('div', { class: 'ov-side' }, listBox)),
   );
 
-  image.addEventListener('load', disegna);
+  image.addEventListener('load', () => { disegna(); aggiornaZoom(); });
   window.addEventListener('resize', disegna);
-  if (window.ResizeObserver) new ResizeObserver(() => disegna()).observe(image);
+  if (window.ResizeObserver) new ResizeObserver(() => { disegna(); }).observe(image);
   await caricaSuggerimenti();
   mostra();
   return root;
 }
-
-const COLORI_SCALA = { accepted: '#3fb950', review: '#d29922', reject: '#f85149' };

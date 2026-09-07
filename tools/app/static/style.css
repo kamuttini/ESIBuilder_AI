@@ -815,3 +815,33 @@ img.depth-crop {
 .scala-estremo.proposta span { font-weight: 400; }
 .scala-colonna.disegno { border-left-color: #ff4fd8; }
 .scala-estremo.disegno { border-top-color: #ff4fd8; color: #ff4fd8; }
+
+/* Le due finestre ingrandite su zero e fondo: a grandezza naturale una tacca e' alta due
+   pixel, e il pixel giusto non si vede. Qui si prende con la mira, non a occhio. */
+.scala-zoom-coppia { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.scala-zoom {
+  position: relative; border: 1px solid var(--line); border-radius: 8px;
+  background: #000; overflow: hidden; flex: 1 1 260px; min-width: 220px;
+}
+.scala-zoom-titolo {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 2; font-size: 11px;
+  color: var(--muted); background: rgba(0, 0, 0, .55); padding: 2px 6px;
+}
+.scala-zoom img { display: block; width: 100%; image-rendering: pixelated; }
+.scala-zoom-piano { position: absolute; inset: 0; cursor: ns-resize; }
+.scala-mira {
+  position: absolute; width: 60px; height: 0; border-top: 2px solid;
+  transform: translateY(-1px);
+}
+.scala-mira::before, .scala-mira::after {
+  content: ''; position: absolute; top: -5px; width: 2px; height: 10px;
+  background: currentColor; opacity: .8;
+}
+.scala-mira::before { left: 0; }
+.scala-mira::after { right: 0; }
+.scala-stato { color: var(--accent); }
+.scala-numero-campo {
+  width: 52px; padding: 0 2px; font-size: 11px; background: #000; color: #40d0ff;
+  border: 1px solid #d29922; border-radius: 3px;
+}
+
