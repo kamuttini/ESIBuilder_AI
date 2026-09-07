@@ -383,6 +383,81 @@ def _require_folder(project: Project) -> Path:
     return folder
 
 
+def _righe_depth_per_nome(project: Project, righe: Sequence[Dict]) -> List[Dict]:
+    """Le righe del modulo con il nome relativo, come le vuole il resto dell'app."""
+    base = project.dedup_link_dir() or Path(project.source.get("folder") or "")
+    fuori: List[Dict] = []
+    for riga in righe:
+        percorso = Path(str(riga.get("image_path") or ""))
+        try:
+            nome = str(percorso.relative_to(base))
+        except ValueError:
+            nome = percorso.name
+
+        def numero(chiave: str) -> Optional[float]:
+            try:
+                return float(riga.get(chiave) or "")
+            except (TypeError, ValueError):
+                return None
+
+        lati = [numero(k) for k in ("top", "left", "bottom", "right")]
+        box = None
+        if all(v is not None for v in lati):
+            box = {"top": int(lati[0]), "left": int(lati[1]),
+                   "bottom": int(lati[2]), "right": int(lati[3])}
+        fuori.append({"name": nome, "mode": str(riga.get("mode") or ""),
+                      "status": str(riga.get("status") or ""), "box": box,
+                      "depth_mm": numero("depth_mm"),
+                      "ocr_text": str(riga.get("ocr_text") or "")})
+    return fuori
+
+
+def _fotogrammi_per_depth(
+    project: Project, base: Path, letture: Dict[str, Dict],
+    righe_modulo: Sequence[Dict], per_valore: int = 6,
+) -> Tuple[List[Path], List[Dict]]:
+    """Fotogrammi scelti **per valore di depth**, non a campione piatto.
+
+    La scala vuole piu' fotogrammi che concordino sullo stesso valore; un campione uniforme
+    sulla cartella gliene dava uno per depth. Qui si prendono fino a `per_valore` immagini per
+    ogni depth distinta, distribuite nel gruppo per non pescarle tutte dalla stessa
+    acquisizione.
+    """
+    if not letture:
+        # Nessuna rilettura: si resta alle righe del modulo, com'era prima.
+        percorsi = [Path(r["image_path"]) for r in righe_modulo if r.get("image_path")]
+        return percorsi, list(righe_modulo)
+
+    per_depth: Dict[float, List[str]] = {}
+    for nome, lettura in sorted(letture.items()):
+        valore = lettura.get("depth_mm")
+        if valore is None or valore <= 0:
+            continue
+        per_depth.setdefault(float(valore), []).append(nome)
+
+    scelti: List[str] = []
+    for valore in sorted(per_depth):
+        gruppo = per_depth[valore]
+        if len(gruppo) <= per_valore:
+            scelti.extend(gruppo)
+            continue
+        passo = len(gruppo) / per_valore
+        scelti.extend(gruppo[int(indice * passo)] for indice in range(per_valore))
+
+    righe = [
+        {
+            "image_path": (base / nome).as_posix(),
+            "depth_mm": letture[nome]["depth_mm"],
+            "status": "accepted",
+            "mode": "direct_label",
+            "ocr_text": letture[nome].get("ocr_text", ""),
+            **{k: letture[nome]["box"][k] for k in ("left", "top", "right", "bottom")},
+        }
+        for nome in scelti
+    ]
+    return [base / nome for nome in scelti], righe
+
+
 def _run_advanced_stages(
     job_id: str, project_id: str, sample: int, marker_min_score: float = 0.55,
     base_result: Optional[Dict] = None,
@@ -417,6 +492,7 @@ def _run_advanced_stages(
         results: Dict = {}
         # The subprocess modules scan a folder: they get the mirror with only unique frames.
         scan_folder_for_modules = project.dedup_link_dir() or folder
+        base_moduli = scan_folder_for_modules
         results["images_source"] = {
             "deduplicated": scan_folder_for_modules != folder,
             "folder": str(scan_folder_for_modules),
@@ -646,23 +722,76 @@ def _run_advanced_stages(
                       "output_dir", "ranker_model", "folder_strategy")
         }
 
+        # --- la depth su tutta la cartella, che e' cio' di cui la scala ha bisogno ------
+        # Il modulo della scala misura il righello *per valore di depth*, e per accettare un
+        # valore vuole vedere piu' fotogrammi che concordano. Con un campione piatto ogni
+        # depth compariva una volta sola e ogni riga usciva `setup_too_small_for_consensus`.
+        # Rileggere la depth dentro al riquadro gia' trovato costa 0.4 s per immagine, contro
+        # i minuti della generazione dei candidati: si fa su tutta la cartella, e poi la
+        # scala riceve piu' fotogrammi per ogni depth.
+        righe_depth = list(depth.get("rows") or [])
+        letture: Dict[str, Dict] = {}
+        riferimento = _riquadro_depth_di_riferimento(_righe_depth_per_nome(project, righe_depth))
+        if riferimento is not None:
+            nome_rif, box_rif, testo_rif, valore_rif = riferimento
+            numero = _rileggi_nel_riquadro(base_moduli / nome_rif, box_rif)
+            if numero is not None:
+                fattore = _fattore_unita(testo_rif, valore_rif, numero["value"])
+                tutti = list(project.dedup_names())
+                _job_update(job_id, stage=f"depth: la stessa etichetta su {len(tutti)} immagini",
+                            done=0, total=len(tutti))
+                letture, falliti = _leggi_riquadro_su(
+                    base_moduli, box_rif, fattore, tutti,
+                    progress=lambda fatte, quante: _job_update(job_id, done=fatte),
+                )
+                if letture:
+                    def salva_letture(_p: Project, value: Dict) -> Dict:
+                        value["depth_box_template"] = {
+                            "box": box_rif, "from": nome_rif, "unit_factor": fattore,
+                            "scope": "auto", "applied": len(letture), "targets": len(tutti),
+                            "failed": falliti,
+                            "at": datetime.now().isoformat(timespec="seconds"),
+                        }
+                        value["depth_box_reads"] = letture
+                        return value
+
+                    _write_step(project_id, "depth_scale", salva_letture,
+                                status="proposed", source="model")
+                    results["depth"]["box_reads"] = len(letture)
+                    results["depth"]["box_failed"] = len(falliti)
+
         _job_update(job_id, stage="scala: righello e righe #18-#21")
         engine = _inference_engine()
         # Same base as the depth module: the scale stage joins su/giu and depth rows by path,
         # so both must see the images through the same folder (the deduplicated mirror).
-        images = sample_paths(scan_folder(scan_folder_for_modules), sample)
+        images, righe_depth = _fotogrammi_per_depth(
+            project, base_moduli, letture, righe_depth, sample
+        )
         su_giu = engine.predict_su_giu(images, final_rect)
         results["su_giu"] = {
             k: su_giu.get(k) for k in ("counts", "majority", "images", "mean_confidence")
         }
         frames = stages_mod.build_scale_frames(
             images=images, su_giu_rows=su_giu.get("rows") or [],
-            depth_rows=depth.get("rows") or [], rect=final_rect,
+            depth_rows=righe_depth, rect=final_rect,
         )
+        gruppi_immagine = _groups_of_images(project)
+        per_nome = {}
+        for gruppo, elenco in (gruppi_immagine or {}).items():
+            for nome in elenco:
+                per_nome[nome] = gruppo
+        for frame in frames:
+            try:
+                nome = str(Path(frame["image_path"]).relative_to(base_moduli))
+            except ValueError:
+                nome = Path(frame["image_path"]).name
+            # L'orientamento e' il dato che dice alla scala da che parte guardare: era
+            # sempre vuoto, benche' il marker fosse gia' girato.
+            frame["orientation_group"] = per_nome.get(nome, "")
         scale = stages_mod.run_scale(
             folder=scan_folder_for_modules, output_root=out_root, python_bin=python_bin,
             vendor=vendor, vendor_confidence=vendor_conf, probe_id=str(probe_id or ""),
-            rect=final_rect, video_size=video_size, frames=frames, max_frames=sample,
+            rect=final_rect, video_size=video_size, frames=frames, max_frames=len(frames),
             rotation=rotation,
         )
         results["scale"] = {
@@ -3858,11 +3987,58 @@ def api_depth_box(project_id: str):
     })
 
 
+def _leggi_riquadro_su(base: Path, box: Dict, fattore: float, nomi: Sequence[str],
+                       progress=None) -> Tuple[Dict[str, Dict], List[str]]:  # noqa: ANN001
+    """La rilettura nel riquadro su un elenco di immagini, in parallelo. 0.4 s l'una."""
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    letture: Dict[str, Dict] = {}
+    falliti: List[str] = []
+    fatte = 0
+
+    def leggi(n: str) -> Tuple[str, Optional[Dict]]:
+        return n, _rileggi_nel_riquadro(base / n, box)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for n, esito in pool.map(leggi, nomi):
+            fatte += 1
+            if progress is not None and (fatte % 10 == 0 or fatte == len(nomi)):
+                progress(fatte, len(nomi))
+            if esito is None:
+                falliti.append(n)
+                continue
+            letture[n] = {"box": esito["box"],
+                          "depth_mm": round(esito["value"] * fattore, 2),
+                          "ocr_text": esito["text"]}
+    return letture, falliti
+
+
+def _riquadro_depth_di_riferimento(righe: Sequence[Dict]) -> Optional[Tuple[str, Dict, str, Optional[float]]]:
+    """Da quale immagine propagare: il riquadro piu' stretto fra quelli letti dall'interfaccia.
+
+    Il piu' stretto perche' e' quello che contiene meno contesto oltre al numero, ed e' il
+    contesto che cambia da un'immagine all'altra.
+    """
+    def utili(stato: str) -> List[Dict]:
+        return [r for r in righe
+                if r.get("mode") in DEPTH_BOX_MODES and r.get("box")
+                and (not stato or str(r.get("status") or "") == stato)]
+
+    candidati = utili("accepted") or utili("")
+    if not candidati:
+        return None
+
+    def area(r: Dict) -> int:
+        b = r["box"]
+        return (b["right"] - b["left"]) * (b["bottom"] - b["top"])
+
+    scelto = min(candidati, key=area)
+    return scelto["name"], scelto["box"], str(scelto.get("ocr_text") or ""), scelto.get("depth_mm")
+
+
 def _run_depth_box(job_id: str, project_id: str, nome: str, box: Dict,
                    fattore: float, scope: str, elenco: Sequence[str] = ()) -> None:
     """Rilegge la depth nel riquadro, immagine per immagine, in parallelo."""
-    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
-
     try:
         project = _project(project_id)
         base = project.dedup_link_dir() or Path(project.source.get("folder") or "")
@@ -3882,24 +4058,10 @@ def _run_depth_box(job_id: str, project_id: str, nome: str, box: Dict,
 
         _job_update(job_id, stage=f"rilettura nel riquadro su {len(nomi)} immagini",
                     total=len(nomi), done=0)
-        letture: Dict[str, Dict] = {}
-        falliti: List[str] = []
-        fatte = 0
-
-        def leggi(n: str) -> Tuple[str, Optional[Dict]]:
-            return n, _rileggi_nel_riquadro(base / n, box)
-
-        with ThreadPoolExecutor(max_workers=6) as pool:
-            for n, esito in pool.map(leggi, nomi):
-                fatte += 1
-                if fatte % 10 == 0 or fatte == len(nomi):
-                    _job_update(job_id, done=fatte)
-                if esito is None:
-                    falliti.append(n)
-                    continue
-                letture[n] = {"box": esito["box"],
-                              "depth_mm": round(esito["value"] * fattore, 2),
-                              "ocr_text": esito["text"]}
+        letture, falliti = _leggi_riquadro_su(
+            base, box, fattore, nomi,
+            progress=lambda fatte, quante: _job_update(job_id, done=fatte),
+        )
 
         def salva(_project: Project, value: Dict) -> Dict:
             applicazione = {

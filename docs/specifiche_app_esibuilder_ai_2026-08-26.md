@@ -1672,3 +1672,50 @@ Alla fine ogni sezione ha la sua proposta: ecografo, rettangolo e orientamento `
 moduli `ok`, depth 12 accettate su 12, marker con tre gruppi su quattro. La scala risulta
 `blocked` perché le sue righe `#19-#21` non sono complete — che è un esito onesto da correggere,
 non un passo da lanciare.
+
+## 8-vicies. La scala: il primo blocco era la depth, non il righello
+
+Lo stadio della scala girava già, ma su tutte e tre le cartelle di prova finiva a
+`depths_accepted: 0`. Guardando `scale_per_depth.csv` la causa era la stessa ovunque:
+
+```
+25.0 mm  reject   frames_total=1 usable=0 agree=0  setup_too_small_for_consensus
+50.0 mm  review   frames_total=1 usable=1 agree=1  setup_too_small_for_consensus
+60.0 mm  review   frames_total=1 usable=1 agree=1  setup_too_small_for_consensus
+```
+
+Il modulo misura il righello **per valore di depth**, e per accettarne uno vuole più
+fotogrammi che concordino. L'app gliene passava dodici presi a campione piatto sulla cartella:
+ogni depth ne aveva uno. E `#18` elencava solo le depth capitate nel campione — `25|50|60|` su
+una cartella che ne ha tredici.
+
+La correzione non tocca il righello: cambia **cosa gli si dà da guardare**.
+
+1. Dopo il modulo depth, il riquadro più stretto fra quelli accettati viene propagato a tutta
+   la cartella con la rilettura da 0,4 s per immagine — la stessa della sezione depth. Ora ogni
+   fotogramma ha un valore, non solo i dodici del campione.
+2. I fotogrammi per la scala si scelgono **per valore di depth**: fino a sei per ciascuno,
+   distribuiti nel gruppo per non pescarli tutti dalla stessa acquisizione.
+3. Ogni fotogramma porta il suo `orientation_group`, che era sempre vuoto benché il marker
+   fosse già girato: è il dato che dice alla scala da che parte guardare.
+
+**Misura sulla cartella BK**, stessi moduli, stesse immagini:
+
+| | prima | dopo |
+|---|---|---|
+| depth con un valore | 12 (il campione) | 54 su 56 |
+| depth viste dalla scala | 3 | 13 |
+| depth accettate | 0 | **7** |
+| `#18` | `25\|50\|60\|` | `10\|20\|25\|30\|35\|40\|50\|55\|60\|65\|70\|75\|80\|` |
+| motivi di review | `line21_incomplete`, `depth_without_answer` | solo `line21_incomplete` |
+
+`scale_depth_without_answer` è sparito: ogni depth ha una risposta.
+
+**Cosa resta.** Le sei depth non accettate sono tutte quelle basse (10, 20, 25, 30, 35, 40): o
+`no_detection_filled_from_neighbours`, o `rejected_as_incoherent_with_setup`. Il `mm_per_px` che
+il modulo trova va da 0,070 a 0,145 fra 10 e 80 mm, cioè cresce di 2× mentre la depth cresce di
+8×: sulle depth basse la misura non è credibile, ed è lì che va guardato il righello. E `#19-#21`
+restano vuote finché `#21` non è completa, che richiede una risposta buona per ogni depth.
+
+Il passo successivo è la revisione umana della scala dentro l'app — la stessa cosa che oggi fa
+`tools/scale/build_scale_correction_tool.py` in una pagina HTML separata.
