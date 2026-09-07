@@ -3703,13 +3703,57 @@ def _scale_corrections_path(project: Project) -> Path:
     return project.root / "scale_study_corrections.json"
 
 
+def _depth_confermate(project: Project) -> Dict[str, float]:
+    """Le depth che l'utente ha confermato, e solo quelle.
+
+    Il modulo della scala distingue una depth *letta* da una depth *dell'operatore*, e la
+    seconda la tratta come l'evidenza piu' forte che ha. La distinzione conta davvero: su
+    `prova_2` la depth letta dice 20 mm su fotogrammi che il righello misura a 40 e 80, e
+    propagarla farebbe danno. Quella confermata invece e' verita' e va usata.
+
+    Vale come confermata: un valore riscritto a mano; le letture nate da un riquadro che
+    l'utente ha applicato lui (`scope` diverso da `auto`); oppure tutte, se lo step della
+    depth risulta confermato o corretto dall'utente.
+    """
+    valore = project.step_value("depth_scale")
+    stato = (project.steps.get("depth_scale") or {})
+    confermate: Dict[str, float] = {}
+
+    letture = valore.get("depth_box_reads") or {}
+    modello = valore.get("depth_box_template") or {}
+    tutto_confermato = (
+        bool(stato.get("user_edited"))
+        and str(stato.get("status") or "") in ("confirmed", "corrected")
+    )
+    if letture and (tutto_confermato or str(modello.get("scope") or "") not in ("", "auto")):
+        for nome, lettura in letture.items():
+            misura = lettura.get("depth_mm")
+            if misura:
+                confermate[nome] = float(misura)
+
+    for nome, fix in (valore.get("depth_corrections") or {}).items():
+        misura = fix.get("depth_mm")
+        if misura:
+            confermate[nome] = float(misura)
+    return confermate
+
+
 def _write_scale_corrections(project: Project) -> Path:
-    """Scrive le correzioni nel formato del modulo: {cartella: {note, frames: {nome: {...}}}}."""
+    """Scrive le correzioni nel formato del modulo: {cartella: {note, frames: {nome: {...}}}}.
+
+    Le depth confermate entrano qui come `depth_mm` per fotogramma: e' il canale che il modulo
+    ha per la depth dell'operatore, quindi non serve inventarne un altro.
+    """
     valore = project.step_value("scale_study")
     base = project.working_dir() or Path(project.source.get("folder") or "")
     chiave = base.name or "cartella"
-    payload = {chiave: {"note": str(valore.get("note") or ""),
-                        "frames": valore.get("corrections") or {}}}
+    frames: Dict[str, Dict] = {
+        nome: dict(voce) for nome, voce in (valore.get("corrections") or {}).items()
+    }
+    for nome, misura in _depth_confermate(project).items():
+        voce = frames.setdefault(nome, {})
+        voce.setdefault("depth_mm", misura)
+    payload = {chiave: {"note": str(valore.get("note") or ""), "frames": frames}}
     percorso = _scale_corrections_path(project)
     percorso.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     return percorso
@@ -3722,7 +3766,8 @@ def _righello_noto(frame: Dict, correzioni: Dict) -> bool:
     return bool(frame.get("status") == "accepted" or correzioni.get(frame.get("name")))
 
 
-def _suggerisci_righelli(frames: Sequence[Dict], correzioni: Dict) -> Dict[str, Dict]:
+def _suggerisci_righelli(frames: Sequence[Dict], correzioni: Dict,
+                         depth_confermate: Optional[Dict[str, float]] = None) -> Dict[str, Dict]:
     """Dove il righello non si trova, proporlo a partire da dove si sa.
 
     Si usano solo le grandezze che i fotogrammi noti misurano bene, e la depth non e' fra
@@ -3738,6 +3783,7 @@ def _suggerisci_righelli(frames: Sequence[Dict], correzioni: Dict) -> Dict[str, 
       * passo in pixel: mediana dei noti, da cui `mm_per_px = passo_mm / passo_px`.
     Lo scarto fra i noti viene riportato: e' la misura di quanto fidarsi della proposta.
     """
+    depth_confermate = depth_confermate or {}
     noti = [f for f in frames if _righello_noto(f, correzioni)]
     if not noti:
         return {}
@@ -3778,13 +3824,25 @@ def _suggerisci_righelli(frames: Sequence[Dict], correzioni: Dict) -> Dict[str, 
     for frame in frames:
         if _righello_noto(frame, correzioni) or frame.get("x"):
             continue
-        y_far = y_zero_cartella + direzione * lunghezza
+        lunghezza_frame = lunghezza
+        motivo_frame = motivo
+        confermata = depth_confermate.get(str(frame.get("name")))
+        if confermata and passo_px:
+            # Una depth confermata dall'utente e' l'unico dato esterno affidabile: dice quanti
+            # millimetri deve coprire la barra, e con il passo si sa a quanti pixel corrispondono.
+            lunghezza_frame = confermata / (passo_mm / passo_px)
+            motivo_frame = (f"lunghezza dalla depth che hai confermato ({confermata:g} mm) "
+                            f"col passo di {passo_mm:g} mm ogni {passo_px:.0f} px; "
+                            f"colonna e zero dalla mediana di {len(noti)} noti")
+            if scarto_x > 12.0:
+                motivo_frame += "; colonne note discordi"
+        y_far = y_zero_cartella + direzione * lunghezza_frame
         altezza = float(frame.get("h") or 0)
         if altezza and not (0 <= y_far <= altezza):
             continue
         tacche: List[float] = []
         if passo_px:
-            quante = int(lunghezza / passo_px)
+            quante = int(lunghezza_frame / passo_px)
             tacche = [round(y_zero_cartella + direzione * k * passo_px, 1)
                       for k in range(quante + 1)]
         proposte[str(frame.get("name"))] = {
@@ -3797,7 +3855,8 @@ def _suggerisci_righelli(frames: Sequence[Dict], correzioni: Dict) -> Dict[str, 
             "step_mm": passo_mm,
             "from": len(noti),
             "spread_px": round(scarto_lunghezza, 1),
-            "reason": motivo,
+            "depth_confirmed_mm": confermata,
+            "reason": motivo_frame,
         }
     return proposte
 
@@ -3820,9 +3879,12 @@ def api_scale_study_suggestions(project_id: str):
         except ValueError:
             frame["name"] = percorso_frame.name
     correzioni = project.step_value("scale_study").get("corrections") or {}
-    proposte = _suggerisci_righelli(dati.get("frames") or [], correzioni)
-    return jsonify({"suggestions": proposte, "known": sum(
-        1 for f in dati.get("frames") or [] if _righello_noto(f, correzioni))})
+    confermate = _depth_confermate(project)
+    proposte = _suggerisci_righelli(dati.get("frames") or [], correzioni, confermate)
+    return jsonify({"suggestions": proposte,
+                    "known": sum(1 for f in dati.get("frames") or []
+                                 if _righello_noto(f, correzioni)),
+                    "depth_confirmed": len(confermate)})
 
 
 @app.post("/api/projects/<project_id>/scale/study/correct")

@@ -1852,3 +1852,28 @@ l'errore su otto fotogrammi.
 
 La proposta dichiara sempre su quanti fotogrammi si basa e con quale scarto — «barra lunga 549 px
 (scarto 39 px); passo 91 px = 10 mm» — e avverte quando le colonne note non concordano fra loro.
+
+### La depth confermata sì, quella letta no
+
+La proposta del righello non usa la depth *letta* dal modulo, per la ragione misurata sopra. Ma
+una depth **confermata dall'utente** è un'altra cosa, e il modulo della scala lo sa già: nel suo
+codice la depth dell'operatore è commentata come «the strongest kind of evidence there is». Quindi
+si usa, e attraverso il canale che il modulo ha già.
+
+Conta come confermata: un valore riscritto a mano nella sezione depth; le letture nate da un
+riquadro che l'utente ha applicato lui (`scope` diverso da `auto`); o tutte, se lo step della
+depth risulta confermato o corretto dall'utente. Le automatiche della catena no.
+
+Finiscono in `scale_study_corrections.json` come `depth_mm` per fotogramma, così le usa tutto lo
+studio e non solo la proposta. E nella proposta danno la lunghezza della barra: `depth / (passo_mm
+/ passo_px)`.
+
+Verifica su `L_LRUD_20.png`, che il modulo scarta con `no_ladder`:
+
+| | proposta |
+|---|---|
+| senza depth confermata | fondo a 192,6 · 7 tacche · «barra lunga 549 px (scarto 39 px)» |
+| con 20 mm confermati | fondo a 559,2 · 3 tacche · «lunghezza dalla depth che hai confermato (20 mm) col passo di 10 mm ogni 91 px» |
+
+Venti millimetri a 10 mm ogni 91 px fanno 182 px di barra, non 549: la depth confermata cambia la
+proposta, e il perché è scritto accanto.
