@@ -791,8 +791,26 @@ img.depth-crop {
   position: absolute; top: 0; width: 0; border-left: 2px dashed #40d0ff;
   cursor: ew-resize; transform: translateX(-1px);
 }
-.scala-tacca { position: absolute; height: 0; border-top: 2px solid #40d0ff; opacity: .85; }
-.scala-tacca.togliibile { cursor: not-allowed; border-top-color: #f85149; height: 7px; }
+/* La tacca si prende e si sposta: quindi ha una presa visibile e una croce per toglierla.
+   Prima un clic sopra la cancellava, che e' l'ultima cosa che ci si aspetta trascinandola. */
+.scala-tacca {
+  position: absolute; height: 0; border-top: 2px solid #40d0ff; opacity: .85;
+  cursor: ns-resize;
+}
+.scala-tacca-presa {
+  position: absolute; left: 50%; top: -4px; width: 9px; height: 9px; margin-left: -4px;
+  background: #40d0ff; border: 1px solid rgba(0, 0, 0, .55); border-radius: 2px;
+}
+.scala-tacca-via {
+  position: absolute; right: -20px; top: -9px; width: 17px; height: 17px; padding: 0;
+  line-height: 1; font-size: 12px; border-radius: 50%; opacity: 0;
+  background: rgba(248, 81, 73, .85); color: #fff; border: none; cursor: pointer;
+}
+.scala-tacca:hover { opacity: 1; }
+.scala-tacca:hover .scala-tacca-via { opacity: 1; }
+.scala-tacca.proposta .scala-tacca-presa, .scala-tacca.proposta .scala-tacca-via {
+  display: none;
+}
 .scala-numero {
   position: absolute; transform: translateY(-50%); font-size: 11px; color: #40d0ff;
   background: rgba(0, 0, 0, .55); padding: 0 4px; border-radius: 3px; white-space: nowrap;
@@ -877,4 +895,27 @@ img.depth-crop {
 }
 .depth-copertura.confermata {
   background: rgba(63, 185, 80, .10); border-color: rgba(63, 185, 80, .35);
+}
+
+/* I gesti scritti dove servono, non in un paragrafo che nessuno legge mentre corregge. */
+.scala-legenda {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 6px 0 10px;
+  font-size: 12px; color: var(--muted);
+}
+.scala-legenda-voce { display: inline-flex; align-items: center; gap: 5px; }
+.scala-legenda kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+  padding: 1px 5px; color: var(--text);
+}
+
+/* L'elenco della scala porta piu' segnali degli altri: il nome deve restare leggibile lo
+   stesso, quindi le colonne sono fissate e i segnali stanno stretti. */
+.score-row.scala-riga { gap: 6px; }
+.score-row.scala-riga .score-value { width: 26px; }
+.score-row.scala-riga .score-group { width: 24px; }
+.score-row.scala-riga .score-name { flex: 1 1 auto; min-width: 70px; }
+.score-row.scala-riga .score-fixed { padding: 0 5px; font-size: 10px; }
+.score-row.scala-riga .scala-attesa {
+  padding: 0 5px; border: none; font-size: 15px; line-height: 1;
 }

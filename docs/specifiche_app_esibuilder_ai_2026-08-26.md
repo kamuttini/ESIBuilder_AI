@@ -2044,3 +2044,27 @@ file, e il motivo è l'OCR che perde il punto decimale:
 
 Lo stesso valore viene letto `3.5 cm` su un fotogramma e `35cm` su un altro. Trenta centimetri su
 una L12-3 non esistono: vanno corretti prima di confermare.
+
+### Le tacche si spostano, e i gesti si vedono
+
+Due cose rendevano il tool poco intuitivo.
+
+**Un clic su una tacca la cancellava.** È l'ultima cosa che ci si aspetta da un oggetto che
+sembra afferrabile: il gesto naturale su una tacca fuori posto è trascinarla. Ora la tacca **si
+trascina**, ha una presa quadrata visibile sulla colonna, e per toglierla c'è una **×** che
+compare passandoci sopra. Per il modulo spostare una tacca è toglierla da dov'era e rimetterla
+dove sta ora, quindi la correzione viaggia come `ticks_del` + `ticks_add` — il contratto che ha
+già.
+
+**I gesti erano in un paragrafo.** Nessuno legge un paragrafo mentre corregge. Al suo posto una
+legenda a chip, sempre in vista: *trascina · alt+trascina · doppio clic · × sulla tacca · doppio
+clic sul numero · shift+↑↓ · ← → · cmd+Z*.
+
+Aggiunte, per lo stesso motivo:
+
+- **doppio clic** sull'immagine aggiunge una tacca — più facile da scoprire di shift+clic, che
+  resta perché è più rapido quando se ne aggiungono parecchie;
+- **«Tacche a passo costante»**: le tacche di un righello sono equidistanti, e quando ce ne sono
+  di storte rifarle tutte dal passo costa un comando invece di dieci trascinamenti;
+- l'elenco laterale porta ora segnali stretti (`corr`, `prop`, `·`, `~`) invece di parole intere:
+  i nomi dei file tornano leggibili per intero — erano diventati «ne…», «A…».

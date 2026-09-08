@@ -14,6 +14,23 @@
 
 const COLORI_SCALA = { accepted: '#3fb950', corrected: '#40d0ff', review: '#d29922',
                        reject: '#f85149' };
+
+/* I gesti, scritti dove servono. Una riga di prosa lunga non la legge nessuno mentre corregge. */
+function legenda() {
+  const voci = [
+    ['trascina', 'colonna, zero, fondo o una tacca'],
+    ['alt + trascina', 'tutto il righello insieme'],
+    ['doppio clic', 'aggiunge una tacca'],
+    ['× sulla tacca', 'la toglie'],
+    ['doppio clic sul numero', 'lo riscrive'],
+    ['shift+↑↓ · alt+↑↓', 'zero · fondo, un pixel per volta'],
+    ['← →', 'cambia fotogramma'],
+    ['cmd+Z', 'annulla'],
+  ];
+  return el('div', { class: 'scala-legenda' },
+    ...voci.map(([gesto, cosa]) => el('span', { class: 'scala-legenda-voce' },
+      el('kbd', {}, gesto), el('span', {}, cosa))));
+}
 const INGRANDIMENTO_SCALA = 4;
 
 async function createScaleViewer(projectId) {
@@ -89,11 +106,20 @@ async function createScaleViewer(projectId) {
       strati.append(colonna);
     }
     for (const t of f.ticks || []) {
-      const tacca = el('div', { class: 'scala-tacca', title: 'clic: togli questa tacca' });
+      const tacca = el('div', { class: 'scala-tacca', title: 'trascina per spostarla' },
+        el('span', { class: 'scala-tacca-presa' }),
+        el('button', { class: 'scala-tacca-via', title: 'togli questa tacca' }, '×'));
       tacca.style.top = `${t * s}px`;
-      tacca.style.left = `${((f.x ?? 0) - 26) * s}px`;
-      tacca.style.width = `${52 * s}px`;
-      tacca.addEventListener('click', (e) => { e.stopPropagation(); togliTacca(t); });
+      tacca.style.left = `${((f.x ?? 0) - 30) * s}px`;
+      tacca.style.width = `${60 * s}px`;
+      tacca.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('.scala-tacca-via')) return;
+        e.stopPropagation();
+        trascinaTacca(e, t);
+      });
+      tacca.querySelector('.scala-tacca-via').addEventListener('click', (e) => {
+        e.stopPropagation(); togliTacca(t);
+      });
       strati.append(tacca);
     }
     for (const [y, valore] of f.labels || []) {
@@ -251,13 +277,22 @@ async function createScaleViewer(projectId) {
       }
       disegna(); return;
     }
-    if (event.shiftKey) {
-      ricorda();
-      f.ticks = [...(f.ticks || []), y].sort((a, b) => a - b);
-      salva({ ticks_add: [...(correzione().ticks_add || []), y] });
-      disegna();
-    }
+    if (event.shiftKey) aggiungiTacca(y);
   });
+  stage.addEventListener('dblclick', (event) => {
+    // Doppio clic sull'immagine: aggiunge una tacca. Piu' facile da scoprire di shift+clic,
+    // che resta perche' e' piu' rapido quando se ne aggiungono parecchie.
+    if (event.target.closest('.scala-tacca, .scala-numero') || corrente().x == null) return;
+    const s = scala();
+    aggiungiTacca(Math.round((event.clientY - stage.getBoundingClientRect().top) / (s || 1)));
+  });
+  const aggiungiTacca = (y) => {
+    const f = corrente();
+    ricorda();
+    f.ticks = [...(f.ticks || []), y].sort((a, b) => a - b);
+    salva({ ticks_add: [...(correzione().ticks_add || []), y] });
+    disegna(); aggiornaZoom();
+  };
 
   const indicaRighello = (inizio, yFondo) => {
     const f = corrente();
@@ -278,6 +313,63 @@ async function createScaleViewer(projectId) {
     salva({ x: f.x, y_zero: f.y_zero, y_far: f.y_far,
             zero_end: f.B_zero_end, ticks_add: tacche });
     stato('righello indicato');
+  };
+
+  function trascinaTacca(event, y) {
+    event.preventDefault();
+    const f = corrente();
+    const s = scala();
+    const partenza = event.clientY;
+    const originale = y;
+    let attuale = y;
+    let mossa = false;
+    ricorda();
+    const muovi = (e) => {
+      const dy = (e.clientY - partenza) / (s || 1);
+      if (Math.abs(dy) < 0.5 && !mossa) return;
+      mossa = true;
+      attuale = limita(originale + dy, f.h);
+      f.ticks = (f.ticks || [])
+        .map((t) => (Math.round(t) === Math.round(originale) ? attuale : t))
+        .sort((a, b) => a - b);
+      disegna(); aggiornaZoom(); renderDati();
+    };
+    const molla = () => {
+      window.removeEventListener('pointermove', muovi);
+      window.removeEventListener('pointerup', molla);
+      if (!mossa) { storia.pop(); return; }
+      // Spostare una tacca, per il modulo, e' toglierla da dov'era e metterla dove sta ora.
+      salva({
+        ticks_del: [...(correzione().ticks_del || []), Math.round(originale)],
+        ticks_add: [...(correzione().ticks_add || [])
+          .filter((v) => Math.round(v) !== Math.round(originale)), Math.round(attuale)],
+      });
+    };
+    window.addEventListener('pointermove', muovi);
+    window.addEventListener('pointerup', molla);
+  }
+
+  /* Le tacche di un righello sono equidistanti: quando ce ne sono di storte, rifarle tutte
+     dal passo costa un comando invece di dieci trascinamenti. */
+  const ridistribuisci = () => {
+    const f = corrente();
+    if (f.y_zero == null || f.y_far == null) { stato('servono zero e fondo'); return; }
+    const passoMm = (f.D_step_mm || (proposta() || {}).step_mm || 10);
+    const quante = (f.ticks || []).length;
+    const lunghezza = Math.abs(f.y_far - f.y_zero);
+    const passoPx = quante > 1 ? lunghezza / (quante - 1) : (f.pitch || lunghezza);
+    if (!passoPx) { stato('non so con che passo'); return; }
+    ricorda();
+    const direzione = f.y_far > f.y_zero ? 1 : -1;
+    const nuove = [];
+    for (let k = 0; k * passoPx <= lunghezza + 0.5; k += 1) {
+      nuove.push(Math.round(f.y_zero + direzione * k * passoPx));
+    }
+    const vecchie = (f.ticks || []).map((t) => Math.round(t));
+    f.ticks = nuove;
+    salva({ ticks_del: [...(correzione().ticks_del || []), ...vecchie], ticks_add: nuove });
+    stato(`${nuove.length} tacche a passo costante (${passoMm} mm)`);
+    disegna(); aggiornaZoom();
   };
 
   const togliTacca = (y) => {
@@ -511,6 +603,11 @@ async function createScaleViewer(projectId) {
       });
       azioni.append(usa);
     }
+    if (f.x != null && (f.ticks || []).length > 1) {
+      const rifai = el('button', { class: 'ghost' }, 'Tacche a passo costante');
+      rifai.addEventListener('click', ridistribuisci);
+      azioni.append(rifai);
+    }
     const indietro = el('button', { class: 'ghost' }, 'Annulla l\'ultimo gesto');
     indietro.addEventListener('click', annulla);
     azioni.append(indietro);
@@ -534,16 +631,17 @@ async function createScaleViewer(projectId) {
     listBox.innerHTML = '';
     for (const f of visibili()) {
       const c = (dati.corrections || {})[f.name];
-      const riga = el('div', { class: 'score-row' + (f === corrente() ? ' current' : '') },
+      const riga = el('div', { class: 'score-row scala-riga' + (f === corrente() ? ' current' : '') },
         el('span', { class: 'score-value', style: `color:${COLORI_SCALA[f.status] || 'var(--muted)'}` },
           { accepted: 'ok', corrected: 'tuo', review: 'rev' }[f.status] || 'no'),
         el('span', { class: 'score-group' }, `${(f.ticks || []).length}t`),
         el('span', { class: 'score-name', title: f.name }, f.name.split('/').pop()),
-        c ? el('span', { class: 'score-fixed' }, c.from_suggestion ? 'proposto' : 'corretto') : null,
-        (!c && suggerimenti[f.name]) ? el('span', { class: 'hint' }, 'proposta') : null,
+        c ? el('span', { class: 'score-fixed', title: c.from_suggestion ? 'dalla proposta' : 'corretto da te' },
+          c.from_suggestion ? 'prop' : 'corr') : null,
+        (!c && suggerimenti[f.name]) ? el('span', { class: 'hint', title: 'righello proposto' }, '~') : null,
         f.improved_from ? el('span', { class: 'scala-migliorati' }, '↑') : null,
         (c && (dati.pending || []).includes(f.name))
-          ? el('span', { class: 'scala-attesa' }, 'in attesa') : null,
+          ? el('span', { class: 'scala-attesa', title: 'non ancora riletta dal modulo' }, '·') : null,
       );
       riga.addEventListener('click', () => { indice = frames.indexOf(f); mostra(); });
       listBox.append(riga);
@@ -640,11 +738,8 @@ async function createScaleViewer(projectId) {
   root.append(
     el('p', { class: 'hint' },
       `il righello di questa cartella: colonna a x=${Math.round((dati.zone || {}).x || 0)}, `
-      + `trovata su ${(dati.zone || {}).found || 0} fotogrammi su ${(dati.zone || {}).total || 0}. `
-      + 'Trascina la colonna, lo zero o il fondo — con alt premuto trascini tutto il righello. '
-      + 'Shift+clic aggiunge una tacca, clic su una tacca la toglie, doppio clic su un numero lo '
-      + 'riscrive. Shift+↑↓ muove lo zero di un pixel, alt+↑↓ il fondo; ← → cambiano fotogramma; '
-      + 'cmd+Z annulla.'),
+      + `trovata su ${(dati.zone || {}).found || 0} fotogrammi su ${(dati.zone || {}).total || 0}.`),
+    legenda(),
     chips, notiBox, giroBox,
     el('div', { class: 'ov-bar' },
       el('div', { class: 'ov-nav' },
