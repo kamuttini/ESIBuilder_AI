@@ -801,6 +801,13 @@ function rectChainCard(panel) {
         pass.missing.length
           ? el('div', { class: 'hint', style: 'color:var(--warn)' },
               'aspetta: ' + pass.missing.map((m) => NEED_LABEL[m] || m).join(', '))
+          : null,
+        // Un giro mai fatto, con tutto pronto: dire che parte da solo evita di leggere
+        // la sezione vuota come "il modulo non sa rispondere".
+        (!pass.missing.length && !(pass.saved && pass.saved.proposal)
+          && ['specularita', 'segmento'].includes(pass.id))
+          ? el('div', { class: 'hint' },
+              'gira da solo insieme all\'analisi; qui si rifa\' quando serve')
           : null));
       if (['specularita', 'segmento'].includes(pass.id) && !pass.missing.length) {
         const run = el('button', { class: 'ghost' },

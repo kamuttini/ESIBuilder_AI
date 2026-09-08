@@ -368,6 +368,50 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int,
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
 
+def _giri_rettangolo(job_id: str, project_id: str, per_group: int = 6) -> Dict:
+    """I giri 2 e 3 del rettangolo, fatti girare da soli dopo l'orientamento.
+
+    Sono le due misure che l'orientamento rende possibili: la specularita' fra i quattro
+    gruppi e la corda piu' larga del ventaglio nel piano giusto. Nessuno dei due tocca il
+    rettangolo - scrivono una proposta in `chain.passes`, e applicarla resta un gesto
+    dell'utente. Per questo si possono fare senza chiedere: costano una decina di secondi
+    l'uno e riempiono una sezione che altrimenti l'utente trova vuota, senza capire se il
+    modulo non sa rispondere o se semplicemente non e' partito.
+
+    Un giro gia' fatto non si rifa': una proposta guardata, o corretta a mano, non va persa
+    perche' si e' ricalcolata l'analisi.
+    """
+    esito: Dict[str, str] = {}
+    giri = (
+        ("specularita", _run_rect_specularity, "rettangolo: specularita' fra i quattro gruppi"),
+        ("segmento", _run_rect_segments, "rettangolo: la corda piu' larga per piano"),
+    )
+    for passo, funzione, etichetta in giri:
+        try:
+            fatti = ((_project(project_id).step_value("rect").get("chain") or {})
+                     .get("passes") or {})
+        except FileNotFoundError:
+            return esito
+        if fatti.get(passo):
+            esito[passo] = "gia' fatto"
+            continue
+        _job_update(job_id, stage=etichetta)
+        # Un id suo: queste funzioni chiudono il job quando finiscono, e chiudere quello
+        # grosso a meta' strada farebbe credere all'interfaccia che sia tutto finito.
+        interno = uuid.uuid4().hex[:12]
+        with _jobs_lock:
+            _jobs[interno] = {"id": interno, "status": "running", "stage": "avvio",
+                              "done": 0, "total": 0}
+        try:
+            funzione(interno, project_id, per_group)
+        finally:
+            with _jobs_lock:
+                stato = dict(_jobs.pop(interno, {}))
+        esito[passo] = "fatto" if stato.get("status") == "done" else (
+            stato.get("error") or "non riuscito")
+    return esito
+
+
 def _require_folder(project: Project) -> Path:
     """A folder that was imported but is no longer reachable is a different problem from a
     project with no folder at all: on external drives it usually just means "not mounted"."""
@@ -709,6 +753,12 @@ def _run_advanced_stages(
                 source="model",
             )
             project.save()
+
+        # I due giri della catena che dipendono solo dall'orientamento appena fatto. Non
+        # applicano niente: propongono, e la scelta resta sua. Ma se non girano qui, la
+        # sezione del rettangolo resta vuota finche' qualcuno non preme un tasto - ed e'
+        # proprio quello che non deve succedere.
+        results["rect_chain"] = _giri_rettangolo(job_id, project_id)
 
         _job_update(job_id, stage="depth: lettura dalla scala ecografica")
         depth = stages_mod.run_depth(
