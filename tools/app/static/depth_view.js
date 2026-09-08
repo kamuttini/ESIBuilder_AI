@@ -445,23 +445,34 @@ async function createDepthViewer(projectId, sampleSize) {
         const job = await pollJob(job_id, stato);
         stato.textContent = '';
         const esito = job.result || {};
-        toast(`${esito.tightened} riquadri su ${esito.targets} stretti sul numero`);
+        toast(`${esito.tightened} riquadri su ${esito.targets} stretti sul numero`
+          + (esito.folder_box ? ` · ${esito.folder_box} col riquadro di cartella` : ''));
         await rileggiTutto();
       } catch (errore) { stato.textContent = errore.message; toast(errore.message, true); }
       finally { via.disabled = false; }
     });
     strettoBox.append(el('div', { class: 'row', style: 'margin-top:6px' }, via, stato));
     if (fatto) {
+      const b = fatto.box;
       strettoBox.append(el('div', { class: 'hint' },
-        `${fatto.tightened} su ${fatto.targets} stretti il ${fatto.at.replace('T', ' ')}.`));
+        `${fatto.tightened} su ${fatto.targets} stretti rileggendo il numero`
+        + (fatto.folder_box
+          ? `; ${fatto.folder_box} non si rileggevano e hanno preso il riquadro di cartella`
+            + (b ? ` (${b.right - b.left}x${b.bottom - b.top} px, dove il numero sta in tutte le altre)` : '')
+          : '')
+        + ` — ${fatto.at.replace('T', ' ')}.`));
     }
     // Le immagini rimaste indietro. Spesso non sono un fallimento: il riquadro stretto
     // legge «3.0» dove la parola larga aveva letto «30cm», cioe' ritrova il punto che si
     // era perso. Si mostra cosa ha letto, e la correzione resta un gesto suo.
     const rimaste = (fatto && fatto.unchanged) || [];
     if (rimaste.length) {
+      const prestate = rimaste.filter((r) => r.folder_box).length;
       strettoBox.append(el('div', { class: 'hint', style: 'margin-top:6px' },
-        `${rimaste.length} non si sono strette — il riquadro stretto legge un altro numero:`));
+        `${rimaste.length} non si sono lasciate rileggere`
+        + (prestate ? ` (${prestate} hanno preso il riquadro di cartella, che e' comunque `
+                      + 'sul solo numero)' : '')
+        + ' — ecco cosa ha letto il riquadro stretto:'));
       const elenco = el('div', { class: 'depth-rimaste' });
       for (const riga of rimaste.slice(0, 12)) {
         const vai = el('button', { class: 'ghost link' }, riga.name.split('/').pop());
@@ -471,7 +482,8 @@ async function createDepthViewer(projectId, sampleSize) {
         });
         const voce = el('div', {}, vai, el('span', { class: 'hint' },
           ` legge «${riga.text || '—'}»`
-          + (riga.value_mm != null ? ` = ${riga.value_mm} mm` : '')));
+          + (riga.value_mm != null ? ` = ${riga.value_mm} mm` : '')
+          + (riga.folder_box ? ' · riquadro di cartella' : '')));
         // Il tasto solo se il valore letto sta nella scala della cartella: su prova_3
         // un riquadro legge «50» = 500 mm, e offrire di applicarlo sarebbe un tranello.
         const scala = ((data.coherence || {}).range) || [];

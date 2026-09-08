@@ -4644,6 +4644,38 @@ def _fattore_unita(testo: str, misura_mm: Optional[float], numero: Optional[floa
     return 1.0
 
 
+def _inviluppo_riquadri(riquadri: Sequence[Dict]) -> Optional[Dict]:
+    """Il riquadro che li contiene tutti, se sono abbastanza e stanno davvero insieme.
+
+    Ha senso solo se l'etichetta e' ferma: se i riquadri stretti sono sparsi per lo schermo
+    non c'e' nessun "posto del numero" da prestare, e l'inviluppo sarebbe mezza interfaccia.
+    """
+    utili = [r for r in riquadri if r]
+    if len(utili) < 3:
+        return None
+    fuori = {
+        "left": min(r["left"] for r in utili), "top": min(r["top"] for r in utili),
+        "right": max(r["right"] for r in utili), "bottom": max(r["bottom"] for r in utili),
+    }
+    largo_medio = statistics.median(r["right"] - r["left"] for r in utili)
+    alto_medio = statistics.median(r["bottom"] - r["top"] for r in utili)
+    if (fuori["right"] - fuori["left"] > 3 * largo_medio
+            or fuori["bottom"] - fuori["top"] > 3 * alto_medio):
+        return None
+    return fuori
+
+
+def _contiene(grande: Dict, piccolo: Dict) -> bool:
+    """Il riquadro di cartella sta dentro a quello largo di questa immagine?
+
+    Se non ci sta, qui l'etichetta e' altrove: prestarglielo lo porterebbe su un pezzo di
+    schermo che non c'entra, ed e' meglio lasciare il riquadro largo com'e'.
+    """
+    return (piccolo["left"] >= grande["left"] - 2 and piccolo["top"] >= grande["top"] - 2
+            and piccolo["right"] <= grande["right"] + 2
+            and piccolo["bottom"] <= grande["bottom"] + 2)
+
+
 def _cifre_lette(testo: str) -> str:
     """Il numero dentro a un'etichetta, senza unita' ne' lettere: `3.5 cm` -> `3.5`."""
     trovato = re.search(r"\d+(?:[.,]\d+)?", str(testo or ""))
@@ -4687,6 +4719,17 @@ def _riquadro_stretto(image_path: Path, box: Dict, atteso_testo: str,
         return {"ok": False, "value_mm": valore, "text": letto["text"],
                 "reason": f"rileggendo esce {valore:g} mm invece di {float(atteso_mm):g}: "
                           "il riquadro non si stringe"}
+    # Un riquadro piu' piccolo di un glifo non e' un numero stretto: e' una scheggia.
+    # Su prova_3 l'etichetta «5 cm» (che di suo e' un «3.5» letto male) si stringeva a
+    # 3x3 px, e un riquadro cosi' va a match con qualunque cosa.
+    alto = stretto["bottom"] - stretto["top"]
+    largo = stretto["right"] - stretto["left"]
+    minimo_alto = max(6, int(0.4 * (box["bottom"] - box["top"])))
+    minimo_largo = max(4, 4 * len(lette.replace(".", "")))
+    if alto < minimo_alto or largo < minimo_largo:
+        return {"ok": False, "value_mm": valore, "text": letto["text"],
+                "reason": f"il riquadro stretto verrebbe {largo}x{alto} px, troppo poco per "
+                          f"«{letto['text']}»: non e' il numero"}
     prima = (box["right"] - box["left"]) * (box["bottom"] - box["top"])
     dopo = (stretto["right"] - stretto["left"]) * (stretto["bottom"] - stretto["top"])
     return {"ok": True, "box": stretto, "value_mm": valore, "text": letto["text"],
@@ -4797,6 +4840,7 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
 
         strette: Dict[str, Dict] = {}
         invariate: List[Dict] = []
+        originali = {r["name"]: r.get("box") for r in lavoro}
         with ThreadPoolExecutor(max_workers=6) as pool:
             for nome, esito in pool.map(stringi, lavoro):
                 fatte += 1
@@ -4819,13 +4863,46 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
                                  "depth_mm": riga.get("depth_mm"),
                                  "ocr_text": riga.get("ocr_text") or esito.get("text", "")}
 
+        # Dove non si rilegge, il riquadro non si lascia largo: si mette quello di cartella.
+        # L'etichetta non si sposta dentro una cartella - e' la stessa ipotesi su cui la
+        # propagazione gia' si regge - quindi l'inviluppo dei riquadri stretti e' il posto
+        # dove il numero sta in tutte le altre immagini. Nessuna rilettura, nessun valore
+        # toccato: solo il riquadro, portato dove il numero e' senza le lettere intorno.
+        # Il riquadro prestato si calcola **dentro** al riquadro largo di ogni immagine:
+        # i riquadri stretti che ci cascano dentro sono quelli della stessa etichetta. Cosi'
+        # una cartella con due interfacce - su `prova` le immagini `_trans` hanno la riga
+        # della depth 22 px piu' in basso - ne ha due, senza doverle raggruppare a mano; e
+        # un'immagine la cui etichetta sta altrove non ne riceve nessuno.
+        tutti_stretti = [v["box"] for v in strette.values()]
+        globale = _inviluppo_riquadri(tutti_stretti)
+        ripiegate: List[str] = []
+        for voce in invariate:
+            largo = originali.get(voce["name"])
+            if not largo:
+                continue
+            vicini = [b for b in tutti_stretti if _contiene(largo, b)]
+            prestato = _inviluppo_riquadri(vicini)
+            if prestato is None and globale and _contiene(largo, globale):
+                prestato = globale
+            if prestato is None:
+                continue
+            strette[voce["name"]] = {"box": dict(prestato), "from_folder_box": True}
+            ripiegate.append(voce["name"])
+            voce["folder_box"] = True
+
         def salva(_project: Project, value: Dict) -> Dict:
             precedenti = dict(value.get("depth_box_reads") or {})
             for nome, lettura in strette.items():
-                precedenti[nome] = {**(precedenti.get(nome) or {}), **lettura}
+                riga = per_nome.get(nome) or {}
+                base_lettura = precedenti.get(nome) or {}
+                fusa = {**base_lettura, **lettura}
+                fusa.setdefault("depth_mm", riga.get("depth_mm"))
+                fusa.setdefault("ocr_text", riga.get("ocr_text") or "")
+                precedenti[nome] = fusa
             value["depth_box_reads"] = precedenti
             value["depth_box_tightened"] = {
-                "tightened": len(strette), "targets": len(lavoro),
+                "tightened": len(strette) - len(ripiegate), "targets": len(lavoro),
+                "folder_box": len(ripiegate), "box": globale,
                 "unchanged": invariate[:40], "scope": scope,
                 "at": datetime.now().isoformat(timespec="seconds"),
             }
@@ -4833,7 +4910,8 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
 
         _write_step(project_id, "depth_scale", salva, status="corrected", source="user")
         _job_update(job_id, status="done", stage="fatto",
-                    result={"tightened": len(strette), "targets": len(lavoro),
+                    result={"tightened": len(strette) - len(ripiegate),
+                            "targets": len(lavoro), "folder_box": len(ripiegate),
                             "unchanged": invariate})
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
