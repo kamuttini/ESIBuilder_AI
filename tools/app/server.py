@@ -4553,6 +4553,180 @@ def _stringi_sui_pixel(image_path: Path, box: Dict, caratteri: int) -> Dict:
     }
 
 
+def _inchiostro_fra(image_path: Path, box: Dict, x_da: float, x_a: float) -> Optional[Dict]:
+    """Il riquadro dell'inchiostro che sta fra due ascisse, dentro a `box`.
+
+    Come `_stringi_sui_pixel`, ma invece di contare i glifi da sinistra si guarda **dove**
+    stanno: dei gruppi di colonne accese si tengono quelli il cui centro cade nella
+    finestra. Serve alle etichette che hanno le lettere *prima* del numero — l'Hitachi
+    scrive `R:3.00`, e contando da sinistra si tiene la R e si perde l'ultima cifra.
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    try:
+        with Image.open(image_path) as immagine:
+            ritaglio = immagine.convert("L").crop(
+                (int(box["left"]), int(box["top"]), int(box["right"]), int(box["bottom"]))
+            )
+        larghezza, altezza = ritaglio.size
+        if larghezza < 2 or altezza < 2:
+            return None
+        px = ritaglio.load()
+        valori = [px[x, y] for y in range(altezza) for x in range(larghezza)]
+        chiaro = sum(1 for v in valori if v >= 140) > len(valori) / 2
+        if chiaro:
+            soglia = min(140, max(40, min(valori) + 45))
+            acceso = lambda v: v <= soglia  # noqa: E731
+        else:
+            soglia = max(70, min(155, max(valori) - 35))
+            acceso = lambda v: v >= soglia  # noqa: E731
+        colonne = [x for x in range(larghezza) if any(acceso(px[x, y]) for y in range(altezza))]
+    except Exception:  # noqa: BLE001
+        return None
+    if not colonne:
+        return None
+
+    gruppi: List[Tuple[int, int]] = []
+    inizio = precedente = colonne[0]
+    for colonna in colonne[1:]:
+        if colonna - precedente > 1:
+            gruppi.append((inizio, precedente))
+            inizio = colonna
+        precedente = colonna
+    gruppi.append((inizio, precedente))
+
+    dentro = [(a, b) for a, b in gruppi
+              if x_da <= box["left"] + (a + b) / 2.0 <= x_a]
+    if not dentro:
+        return None
+    # La finestra e' una stima in proporzione, e si sbaglia quando l'OCR aggiunge un
+    # carattere di troppo: su `R:12.0.` il punto finale inventato accorcia il passo e
+    # l'ultimo `0` cade appena fuori. Si allunga la selezione ai gruppi **attaccati**, con
+    # la distanza fra le cifre gia' selezionate a fare da metro: quello che sta lontano come
+    # una spaziatura di parola (le lettere, l'unita') resta fuori.
+    interni = [dentro[i + 1][0] - dentro[i][1] for i in range(len(dentro) - 1)]
+    vicino = max(3, (max(interni) if interni else 0) + 1)
+
+    def righe_di(da: int, a: int) -> Tuple[int, int]:
+        y = [yy for yy in range(altezza) if any(acceso(px[x, yy]) for x in range(da, a + 1))]
+        return (y[0], y[-1]) if y else (0, -1)
+
+    # Le cifre stanno tutte sulla stessa riga: e' questo a distinguerle da cio' che le sta
+    # accanto. Su prova_4 dopo `R:15.0` c'e' un triangolino di marcatura alto la meta',
+    # e su prova_3 un riquadro finito sul righello prendeva la riga bianca al posto del
+    # numero. Un gruppo che non divide la riga con le cifre non e' una cifra.
+    base_su, base_giu = righe_di(dentro[0][0], dentro[-1][1])
+    base_alta = max(1, base_giu - base_su + 1)
+
+    def sulla_stessa_riga(da: int, a: int) -> bool:
+        su, giu = righe_di(da, a)
+        if giu < su:
+            return False
+        comune = min(base_giu, giu) - max(base_su, su) + 1
+        return comune >= 0.6 * base_alta
+    # ...ma non oltre: la finestra dice quanto e' lungo il numero, e crescere molto di piu'
+    # vuol dire aver preso qualcos'altro. Su prova_4 due fotogrammi hanno un triangolino
+    # grigio subito dopo l'etichetta, e senza tetto se lo portavano dentro (55 px invece
+    # dei 36 delle altre).
+    tetto = (x_a - x_da) * 1.25
+    posizione = gruppi.index(dentro[-1])
+    while (posizione + 1 < len(gruppi)
+           and gruppi[posizione + 1][0] - dentro[-1][1] <= vicino
+           and gruppi[posizione + 1][1] - dentro[0][0] <= tetto
+           and sulla_stessa_riga(*gruppi[posizione + 1])):
+        posizione += 1
+        dentro.append(gruppi[posizione])
+    da, a_fine = dentro[0][0], dentro[-1][1]
+    righe = [y for y in range(altezza) if any(acceso(px[x, y]) for x in range(da, a_fine + 1))]
+    if not righe:
+        return None
+    return {"left": int(box["left"] + da), "right": int(box["left"] + a_fine + 1),
+            "top": int(box["top"] + righe[0]), "bottom": int(box["top"] + righe[-1] + 1)}
+
+
+def _vicino_al_riquadro(partenza: Dict, arrivo: Dict) -> bool:
+    """Il riquadro stretto deve restare dov'era il numero.
+
+    La seconda passata cerca l'etichetta in una banda piu' larga, e su un fotogramma di
+    prova_3 si e' agganciata al righello: 252 px di riga bianca invece di 84 di etichetta.
+    Un riquadro largo il doppio, o spostato di piu' di mezza larghezza, non e' lo stesso
+    numero visto meglio: e' un altro pezzo di schermo.
+    """
+    larghezza = max(1, partenza["right"] - partenza["left"])
+    if arrivo["right"] - arrivo["left"] > 1.8 * larghezza:
+        return False
+    # A destra si e' piu' larghi che a sinistra, e non per simmetria: il riquadro di
+    # partenza spesso *taglia* l'ultima cifra (l'OCR conta i glifi sbagliati quando c'e' un
+    # prefisso), e il riquadro giusto finisce piu' in la' di quello vecchio. A sinistra
+    # invece non c'e' niente da recuperare: li' c'e' solo il prefisso da togliere.
+    return (arrivo["left"] >= partenza["left"] - 0.6 * larghezza
+            and arrivo["right"] <= partenza["right"] + larghezza)
+
+
+def _riquadro_sulle_cifre(image_path: Path, box: Dict, cifre: str,
+                          timeout: float = 8.0) -> Optional[Dict]:
+    """Il riquadro sulle sole cifre, trovando prima **tutta** l'etichetta.
+
+    L'OCR con la lista di soli numeri consegna un riquadro di parola che comprende quel che
+    sta attaccato: `R:3.00` torna come «3.00» ma largo da `R` a fine numero. Rileggendo
+    senza restrizioni si ottiene invece l'etichetta intera, e a quel punto si sa *dove* sono
+    le cifre dentro alla stringa: la loro posizione, in proporzione, da' la finestra in cui
+    cercare l'inchiostro.
+    """
+    if not cifre:
+        return None
+    parole_di = _tesseract_words()
+    larghezza = max(1.0, float(box["right"] - box["left"]))
+    banda = (box["left"] - larghezza, box["top"] - 6, box["right"] + larghezza, box["bottom"] + 6)
+    migliori: List[Tuple[int, float, Dict]] = []
+    for variante in ("base", "invert"):
+        for psm in ("7", "11"):
+            try:
+                parole, _ = parole_di(image_path, timeout=timeout, max_side=1800,
+                                      crop_box=banda, psm=psm, preprocess=variante)
+            except Exception:  # noqa: BLE001
+                continue
+            for parola in parole:
+                testo = str(getattr(parola, "text", "") or "").strip().replace(",", ".")
+                indice = testo.find(cifre)
+                lunghezza = len(cifre)
+                grado = 0
+                if indice < 0:
+                    # Le due letture non coincidono sempre: con la lista di soli numeri
+                    # l'Hitachi da' «7.006», senza restrizioni «R:7.00-». Il numero e'
+                    # quello, e quel che serve qui e' *dove* sta, non come si scrive.
+                    corsa = re.search(r"\d+(?:\.\d+)?", testo)
+                    if not corsa:
+                        continue
+                    indice, lunghezza, grado = corsa.start(), len(corsa.group(0)), 1
+                # Solo se c'e' qualcosa **prima** del numero. Quando l'etichetta comincia
+                # con le cifre (`3.5 cm`, `43 *mm`) il riquadro della prima passata parte
+                # gia' dalla cifra ed e' piu' stretto: questa passata lo peggiorerebbe.
+                if indice == 0:
+                    continue
+                per_carattere = (float(parola.right) - float(parola.left)) / max(1, len(testo))
+                migliori.append((
+                    grado,
+                    abs((float(parola.left) + float(parola.right)) / 2.0
+                        - (box["left"] + box["right"]) / 2.0),
+                    {"da": float(parola.left) + indice * per_carattere,
+                     "a": float(parola.left) + (indice + lunghezza) * per_carattere,
+                     "left": float(parola.left), "right": float(parola.right)},
+                ))
+    if not migliori:
+        return None
+    migliori.sort(key=lambda voce: (voce[0], voce[1]))
+    scelto = migliori[0][2]
+    # La scatola di lavoro copre tutta l'etichetta: il numero puo' finire oltre il riquadro
+    # di partenza, che e' proprio il caso in cui contando da sinistra si perdeva una cifra.
+    largo = {
+        "left": int(min(box["left"], scelto["left"])),
+        "right": int(max(box["right"], scelto["right"])),
+        "top": box["top"], "bottom": box["bottom"],
+    }
+    return _inchiostro_fra(image_path, largo, scelto["da"], scelto["a"])
+
+
 def _rileggi_nel_riquadro(image_path: Path, box: Dict, timeout: float = 8.0) -> Optional[Dict]:
     """Rileggi il numero dentro al riquadro, lasciandogli spazio per crescere di cifre.
 
@@ -4665,6 +4839,32 @@ def _inviluppo_riquadri(riquadri: Sequence[Dict]) -> Optional[Dict]:
     return fuori
 
 
+def _riquadri_slittati(riquadri: Dict[str, Dict], minimo: int = 6) -> List[str]:
+    """I riquadri spostati rispetto alla mediana della cartella, non solo piu' o meno lunghi.
+
+    Il discrimine e' la **direzione**: se entrambi i bordi si spostano dalla stessa parte il
+    riquadro e' slittato, e allora e' su un'altra cosa. Se si sposta un bordo solo, il
+    numero ha semplicemente una cifra in piu' o in meno, ed e' giusto cosi' - senza questa
+    distinzione ogni `102` in mezzo ai `18` verrebbe scartato.
+    """
+    if len(riquadri) < minimo:
+        return []
+    sinistre = statistics.median(b["left"] for b in riquadri.values())
+    destre = statistics.median(b["right"] for b in riquadri.values())
+    larghezza = statistics.median(b["right"] - b["left"] for b in riquadri.values())
+    soglia = max(6.0, 0.2 * larghezza)
+    fuori = []
+    for nome, b in riquadri.items():
+        dx_sinistra = b["left"] - sinistre
+        dx_destra = b["right"] - destre
+        if (abs(dx_sinistra) > soglia and abs(dx_destra) > soglia
+                and dx_sinistra * dx_destra > 0):
+            fuori.append(nome)
+    # Se "fuori" e' la maggioranza, la mediana non era il riferimento buono: meglio non
+    # toccare niente che riscrivere mezza cartella su un sospetto.
+    return fuori if len(fuori) * 2 < len(riquadri) else []
+
+
 def _contiene(grande: Dict, piccolo: Dict) -> bool:
     """Il riquadro di cartella sta dentro a quello largo di questa immagine?
 
@@ -4700,6 +4900,12 @@ def _riquadro_stretto(image_path: Path, box: Dict, atteso_testo: str,
     if letto is None:
         return {"ok": False, "reason": "in quel riquadro non si legge nessun numero"}
     stretto = letto["box"]
+    # Seconda passata, che vince quando riesce: rilegge l'etichetta intera e ritaglia sulle
+    # sole cifre, dove che siano dentro alla stringa. Serve dove le lettere stanno *prima*
+    # del numero, e li' la prima passata non poteva farcela.
+    sulle_cifre = _riquadro_sulle_cifre(image_path, box, _cifre_lette(letto["text"]))
+    if sulle_cifre is not None and _vicino_al_riquadro(box, sulle_cifre):
+        stretto = sulle_cifre
     valore = round(float(letto["value"]) * fattore, 2)
     # Il confronto si fa sulle **cifre**, non sui millimetri: e' l'unita' che stiamo
     # buttando fuori dal riquadro, e farla entrare nel guardiano vorrebbe dire rifiutare
@@ -4868,6 +5074,21 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
         # propagazione gia' si regge - quindi l'inviluppo dei riquadri stretti e' il posto
         # dove il numero sta in tutte le altre immagini. Nessuna rilettura, nessun valore
         # toccato: solo il riquadro, portato dove il numero e' senza le lettere intorno.
+        # Un riquadro che si e' *spostato* rispetto ai suoi non e' il numero visto meglio.
+        # Dentro una cartella l'etichetta sta ferma: i riquadri stretti possono essere piu'
+        # lunghi o piu' corti - le cifre non sono sempre le stesse - ma non slittano. Su
+        # prova_4 sei fotogrammi si erano agganciati un carattere piu' in la', perdendo il
+        # `1` di `15.0` e prendendosi il triangolino di marcatura che segue l'etichetta.
+        # Chi e' slittato torna fra quelli da sistemare col riquadro di cartella.
+        slittate = _riquadri_slittati({n: v["box"] for n, v in strette.items()})
+        for nome in slittate:
+            strette.pop(nome, None)
+            invariate.append({
+                "name": nome, "text": "",
+                "reason": "il riquadro stretto si era spostato rispetto agli altri della "
+                          "cartella: e' finito su un altro pezzo di etichetta",
+            })
+
         # Il riquadro prestato si calcola **dentro** al riquadro largo di ogni immagine:
         # i riquadri stretti che ci cascano dentro sono quelli della stessa etichetta. Cosi'
         # una cartella con due interfacce - su `prova` le immagini `_trans` hanno la riga
@@ -4882,8 +5103,12 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
                 continue
             vicini = [b for b in tutti_stretti if _contiene(largo, b)]
             prestato = _inviluppo_riquadri(vicini)
-            if prestato is None and globale and _contiene(largo, globale):
+            if prestato is None and globale:
                 prestato = globale
+            # Stesso metro del restringimento: il riquadro prestato puo' sporgere a destra
+            # (il riquadro largo spesso tagliava l'ultima cifra) ma non puo' finire altrove.
+            if prestato is not None and not _vicino_al_riquadro(largo, prestato):
+                prestato = None
             if prestato is None:
                 continue
             strette[voce["name"]] = {"box": dict(prestato), "from_folder_box": True}
