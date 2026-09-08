@@ -34,7 +34,10 @@ async function createDepthViewer(projectId, sampleSize) {
   const modificabile = () => {
     const r = byName.get(names[index]) || {};
     if (modiBox.includes(r.mode)) return true;
-    return r.status === 'missing' && propagabile();
+    // Il criterio e' il riquadro, non lo stato: un'immagine che il modulo non ha esaminato
+    // resta senza riquadro anche dopo che lei le ha scritto la depth a mano, e allora non
+    // e' piu' `missing` ma `corrected`. Guardare lo stato la lasciava fuori.
+    return !r.box && propagabile();
   };
 
   let cerca = '';
@@ -275,7 +278,15 @@ async function createDepthViewer(projectId, sampleSize) {
       caption.append(el('span', { class: 'hint', style: 'margin-left:6px' }, 'dal riquadro'));
     }
     zoomEtichetta.innerHTML = '';
-    zoomEtichetta.append(
+    if (!r.box && !(modello && modello.box)) {
+      zoomEtichetta.append(
+        `${lista.indexOf(names[index]) + 1} di ${lista.length} · `,
+        el('strong', { style: 'color:var(--muted)' }, 'nessun riquadro su questa immagine'),
+        el('span', { class: 'hint' }, r.depth_mm == null
+          ? ' — il modulo non l\'ha esaminata: scrivi la depth qui sotto'
+          : ` — la depth (${r.depth_mm} mm) l'hai scritta tu; premi «Stringi sul numero» `
+            + 'per darle il riquadro di cartella'));
+    } else zoomEtichetta.append(
       `${lista.indexOf(names[index]) + 1} di ${lista.length} · `,
       el('strong', { style: `color:${r.depth_mm == null ? 'var(--muted)' : m.color || 'var(--text)'}` },
         r.depth_mm == null ? 'nessuna depth' : `${r.depth_mm} mm`),
@@ -317,9 +328,17 @@ async function createDepthViewer(projectId, sampleSize) {
       + `${s2.value_mm != null ? ` (${s2.value_mm} mm)` : ''}`));
     // Senza riquadro proprio si parte da quello di cartella: la label sta nello stesso
     // posto in ogni fotogramma, quindi e' gia' quasi giusto e basta aggiustarlo.
-    const prestato = (!r.box && r.status === 'missing' && modello && modello.box) ? modello.box : null;
+    const prestato = (!r.box && modello && modello.box) ? modello.box : null;
     bozza = r.box ? { ...r.box } : (prestato ? { ...prestato } : null);
-    if (bozza) caricaZoom(names[index], bozza); else zoomBox.style.display = 'none';
+    if (bozza) {
+      caricaZoom(names[index], bozza);
+    } else {
+      // Senza riquadro non c'e' niente da ingrandire, e lasciare il ritaglio di prima e'
+      // peggio del vuoto: sembra questa immagine e non lo e'.
+      finestra = null;
+      zoomImg.removeAttribute('src');
+      zoomBox.style.display = 'none';
+    }
     disegna();
     disegnaZoom();
     aggiornaAmbito();
@@ -637,10 +656,11 @@ async function createDepthViewer(projectId, sampleSize) {
           : 'nessun riquadro su questa immagine'));
       return;
     }
-    if (r.status === 'missing' && !r.box) {
+    if (!r.box) {
       riquadro.append(el('div', { class: 'depth-prestito' },
-        `il modulo non ha esaminato questa immagine: il riquadro qui sopra e' quello di `
-        + `cartella, preso da ${modello.from}. Spostalo se serve, poi applicalo.`));
+        'questa immagine un riquadro suo non ce l\'ha: il modulo non l\'ha esaminata. '
+        + `Quello qui sopra e' il riquadro di cartella, preso da ${modello.from}: `
+        + 'spostalo se serve, poi applicalo.'));
     }
     const misura = el('span', { class: 'hint' },
       `${bozza.right - bozza.left} x ${bozza.bottom - bozza.top} px`);

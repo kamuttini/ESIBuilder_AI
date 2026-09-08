@@ -5031,6 +5031,18 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
                     "ocr_text": lettura.get("ocr_text", "")}
             per_nome[nome] = riga
 
+        # Anche le immagini che il modulo non ha mai guardato: esistono solo come segnaposto
+        # nell'elenco, ma se lei ci ha scritto una depth sono a tutti gli effetti immagini
+        # della cartella, e un riquadro attorno al numero lo devono avere.
+        for nome in project.dedup_names():
+            if nome in per_nome:
+                continue
+            corretta = (correzioni.get(nome) or {}).get("depth_mm")
+            if corretta is None:
+                continue
+            per_nome[nome] = {"name": nome, "mode": "", "box": None, "ocr_text": "",
+                              "depth_mm": corretta}
+
         if scope == "names":
             scelti = [per_nome[n] for n in elenco if n in per_nome]
         elif scope == "run":
@@ -5042,6 +5054,12 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
         # dove si trova. Su prova_3 la depth viene "dalla scala" e i riquadri contengono
         # comunque `3.5 cm` - 92x25 px di cui il numero e' meno di un terzo.
         lavoro = [r for r in scelti if r.get("box")]
+        # Le immagini che un riquadro non ce l'hanno proprio: il modulo non le ha esaminate,
+        # ma la depth gliel'ha data lei a mano. Se la cartella un posto del numero ce l'ha,
+        # tocca anche a loro - restavano grigie, senza riquadro e senza zoom, in mezzo alle
+        # altre marcate come corrette.
+        senza_riquadro = [r for r in scelti
+                          if not r.get("box") and r.get("depth_mm") is not None]
         if not lavoro:
             raise ValueError("nessun riquadro da stringere: la depth non e' ancora stata trovata")
 
@@ -5135,19 +5153,39 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
             ripiegate.append(voce["name"])
             voce["folder_box"] = True
 
+        # Il riquadro di cartella sulle immagini senza: qui pero' si rilegge, perche' non
+        # c'e' un riquadro vecchio a garantire che l'etichetta sia li'. Se ci si legge un
+        # numero, il posto e' quello; il valore resta il suo, che e' scritto a mano.
+        adottate: List[str] = []
+        for riga in senza_riquadro:
+            if not globale:
+                invariate.append({
+                    "name": riga["name"], "text": "",
+                    "reason": "senza riquadro, e la cartella non ne ha uno da prestare",
+                })
+                continue
+            # Il riquadro di cartella cosi' com'e', senza rileggere. Rileggere qui vorrebbe
+            # dire allargare la banda per cercare, e cercando si trova: su NF_40 usciva un
+            # «200» dalla `R:` dell'etichetta accanto, con tanto di riquadro sbagliato. Il
+            # posto del numero lo sa gia' la cartella, e il valore lo ha scritto lei.
+            strette[riga["name"]] = {"box": dict(globale), "from_folder_box": True}
+            adottate.append(riga["name"])
+
         def salva(_project: Project, value: Dict) -> Dict:
             precedenti = dict(value.get("depth_box_reads") or {})
             for nome, lettura in strette.items():
                 riga = per_nome.get(nome) or {}
                 base_lettura = precedenti.get(nome) or {}
                 fusa = {**base_lettura, **lettura}
-                fusa.setdefault("depth_mm", riga.get("depth_mm"))
+                if fusa.get("depth_mm") is None:
+                    fusa["depth_mm"] = riga.get("depth_mm")
                 fusa.setdefault("ocr_text", riga.get("ocr_text") or "")
                 precedenti[nome] = fusa
             value["depth_box_reads"] = precedenti
             value["depth_box_tightened"] = {
                 "tightened": len(strette) - len(ripiegate), "targets": len(lavoro),
-                "folder_box": len(ripiegate), "box": globale,
+                "folder_box": len(ripiegate) + len(adottate), "box": globale,
+                "adopted": len(adottate),
                 "unchanged": invariate[:40], "scope": scope,
                 "at": datetime.now().isoformat(timespec="seconds"),
             }
@@ -5155,9 +5193,10 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
 
         _write_step(project_id, "depth_scale", salva, status="corrected", source="user")
         _job_update(job_id, status="done", stage="fatto",
-                    result={"tightened": len(strette) - len(ripiegate),
-                            "targets": len(lavoro), "folder_box": len(ripiegate),
-                            "unchanged": invariate})
+                    result={"tightened": len(strette) - len(ripiegate) - len(adottate),
+                            "targets": len(lavoro) + len(senza_riquadro),
+                            "folder_box": len(ripiegate) + len(adottate),
+                            "adopted": len(adottate), "unchanged": invariate})
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
