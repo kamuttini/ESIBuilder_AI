@@ -947,6 +947,24 @@ img.depth-crop {
   margin: 8px 0; padding: 9px 12px; border-radius: 8px; font-size: 13px;
   background: rgba(210, 153, 34, .12); border: 1px solid rgba(210, 153, 34, .45);
 }
+/* Lo stringimento dei riquadri sul numero: un blocco suo, come la copertura. */
+.depth-stretto {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 13px;
+}
+.depth-rimaste {
+  margin-top: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .depth-stona { color: var(--warn); margin-top: 4px; }
 /* Il riquadro che l'immagine non ha di suo: e' quello di cartella, prestato. Va detto,
    se no sembra una lettura gia' avvenuta. */

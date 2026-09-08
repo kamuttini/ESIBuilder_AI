@@ -375,6 +375,7 @@ async function createDepthViewer(projectId, sampleSize) {
 
   /* --- quante immagini hanno una depth, perche' le altre no, e la conferma ------------ */
   const coperturaBox = el('div', { class: 'depth-copertura' });
+  const strettoBox = el('div', { class: 'depth-stretto' });
   const coerenzaBox = el('div', { class: 'depth-coerenza' });
   const sospetti = () => ((data.coherence || {}).suspects || {});
   const renderCoerenza = () => {
@@ -414,6 +415,87 @@ async function createDepthViewer(projectId, sampleSize) {
         `${senza.length} da guardare a mano: ` + senza.map(([n]) => n.split('/').pop()).join(', ')));
     }
   };
+  /* Stringere i riquadri sul solo numero, su tutta la cartella.
+
+     Il riquadro che il modulo consegna e' quello di parola dell'OCR: comprende l'unita',
+     le lettere attaccate e la tacca del righello se il numero le sta accanto. Per leggere
+     va bene; per andare a match su un'altra immagine no, perche' quel contorno cambia da
+     un fotogramma all'altro. Il valore non si tocca mai: si verifica che il riquadro
+     stretto legga le stesse cifre, e chi non lo conferma resta com'e'. */
+  const renderStretto = () => {
+    strettoBox.innerHTML = '';
+    const conRiquadro = names.filter((n) => (byName.get(n) || {}).box).length;
+    if (!conRiquadro) { strettoBox.style.display = 'none'; return; }
+    strettoBox.style.display = '';
+    const fatto = data.box_tightened;
+    strettoBox.append(el('strong', {}, 'Riquadri stretti sul solo numero'));
+    strettoBox.append(el('span', { class: 'hint' },
+      ' — via unita\', lettere e tacche: resta il numero, che e\' l\'unica cosa uguale in '
+      + 'tutte le immagini. La depth non cambia: se il riquadro stretto legge cifre diverse, '
+      + 'quell\'immagine resta com\'era.'));
+    const stato = el('span', { class: 'hint' });
+    const via = el('button', { class: 'ghost' },
+      fatto ? `Rifai su ${conRiquadro} riquadri` : `Stringi i ${conRiquadro} riquadri`);
+    via.addEventListener('click', async () => {
+      via.disabled = true;
+      try {
+        const { job_id } = await api(`/projects/${projectId}/depth/tighten`,
+          { body: { scope: ambitoSel.value === 'names' ? 'names' : 'all',
+                    names: ambitoSel.value === 'names' ? visibili() : [] } });
+        const job = await pollJob(job_id, stato);
+        stato.textContent = '';
+        const esito = job.result || {};
+        toast(`${esito.tightened} riquadri su ${esito.targets} stretti sul numero`);
+        await rileggiTutto();
+      } catch (errore) { stato.textContent = errore.message; toast(errore.message, true); }
+      finally { via.disabled = false; }
+    });
+    strettoBox.append(el('div', { class: 'row', style: 'margin-top:6px' }, via, stato));
+    if (fatto) {
+      strettoBox.append(el('div', { class: 'hint' },
+        `${fatto.tightened} su ${fatto.targets} stretti il ${fatto.at.replace('T', ' ')}.`));
+    }
+    // Le immagini rimaste indietro. Spesso non sono un fallimento: il riquadro stretto
+    // legge «3.0» dove la parola larga aveva letto «30cm», cioe' ritrova il punto che si
+    // era perso. Si mostra cosa ha letto, e la correzione resta un gesto suo.
+    const rimaste = (fatto && fatto.unchanged) || [];
+    if (rimaste.length) {
+      strettoBox.append(el('div', { class: 'hint', style: 'margin-top:6px' },
+        `${rimaste.length} non si sono strette — il riquadro stretto legge un altro numero:`));
+      const elenco = el('div', { class: 'depth-rimaste' });
+      for (const riga of rimaste.slice(0, 12)) {
+        const vai = el('button', { class: 'ghost link' }, riga.name.split('/').pop());
+        vai.addEventListener('click', () => {
+          const dove = names.indexOf(riga.name);
+          if (dove >= 0) { index = dove; filtro = ''; rifaiChips(); mostra(); }
+        });
+        const voce = el('div', {}, vai, el('span', { class: 'hint' },
+          ` legge «${riga.text || '—'}»`
+          + (riga.value_mm != null ? ` = ${riga.value_mm} mm` : '')));
+        // Il tasto solo se il valore letto sta nella scala della cartella: su prova_3
+        // un riquadro legge «50» = 500 mm, e offrire di applicarlo sarebbe un tranello.
+        const scala = ((data.coherence || {}).range) || [];
+        const plausibile = riga.value_mm != null && (scala.length !== 2
+          || (riga.value_mm >= scala[0] * 0.9 && riga.value_mm <= scala[1] * 1.1));
+        if (plausibile && riga.value_mm !== (byName.get(riga.name) || {}).depth_mm) {
+          const usa = el('button', { class: 'ghost sq2', style: 'margin-left:6px' },
+            `usa ${riga.value_mm} mm`);
+          usa.addEventListener('click', async () => {
+            try {
+              await api(`/projects/${projectId}/depth/correct`,
+                { body: { name: riga.name, depth_mm: riga.value_mm } });
+              toast('depth corretta');
+              await rileggiTutto();
+            } catch (errore) { toast(errore.message, true); }
+          });
+          voce.append(usa);
+        }
+        elenco.append(voce);
+      }
+      strettoBox.append(elenco);
+    }
+  };
+
   const renderCopertura = () => {
     const c = data.coverage || {};
     coperturaBox.innerHTML = '';
@@ -504,6 +586,7 @@ async function createDepthViewer(projectId, sampleSize) {
     rifaiChips();
     renderCopertura();
     renderCoerenza();
+    renderStretto();
     mostra();
   };
   const renderRiquadro = () => {
@@ -535,6 +618,33 @@ async function createDepthViewer(projectId, sampleSize) {
     }
     const misura = el('span', { class: 'hint' },
       `${bozza.right - bozza.left} x ${bozza.bottom - bozza.top} px`);
+    /* Il riquadro dell'OCR e' quello di *parola*, e la parola comprende cio' che sta
+       attaccato al numero: l'unita', una lettera, la tacca del righello. Qui si toglie,
+       guardando prima com'e' venuto. */
+    const stringi = el('button', { class: 'ghost sq2' }, 'Stringi sul numero');
+    const esitoStretto = el('span', { class: 'hint' });
+    stringi.addEventListener('click', async () => {
+      stringi.disabled = true;
+      esitoStretto.textContent = 'leggo…';
+      try {
+        const q = new URLSearchParams({
+          name: names[index], top: bozza.top, left: bozza.left,
+          bottom: bozza.bottom, right: bozza.right, text: r.ocr_text || '',
+        });
+        if (r.depth_mm != null) q.set('depth_mm', r.depth_mm);
+        const esito = await api(`/projects/${projectId}/depth/tighten?${q}`);
+        if (!esito.ok) { esitoStretto.textContent = esito.reason || 'non si stringe'; return; }
+        const prima = (bozza.right - bozza.left) * (bozza.bottom - bozza.top);
+        bozza = normalizza({ ...esito.box });
+        const dopo = (bozza.right - bozza.left) * (bozza.bottom - bozza.top);
+        esitoStretto.textContent = `letto «${esito.text}» · ${Math.round(100 - 100 * dopo / prima)}% di area in meno`;
+        caricaZoom(names[index], bozza);
+        disegna();
+        disegnaZoom();
+        renderRiquadro();
+      } catch (errore) { esitoStretto.textContent = errore.message; }
+      finally { stringi.disabled = false; }
+    });
     const campi = el('div', { class: 'row' });
     for (const lato of ['left', 'top', 'right', 'bottom']) {
       const campo = el('input', {
@@ -552,7 +662,7 @@ async function createDepthViewer(projectId, sampleSize) {
       el('div', { class: 'hint' },
         'trascina il riquadro o le maniglie per stringerlo sul solo numero: piu\' e\' stretto, '
         + 'piu\' il match tiene su tutte le immagini.'),
-      el('div', { class: 'row' }, misura),
+      el('div', { class: 'row' }, misura, stringi, esitoStretto),
       campi,
       el('div', { class: 'row' }, ambitoSel,
         el('span', { class: 'hint' }, `${totaleCartella} immagini nella cartella, `
@@ -807,6 +917,7 @@ async function createDepthViewer(projectId, sampleSize) {
       + 'secondo il metodo.'),
     coperturaBox,
     coerenzaBox,
+    strettoBox,
     chips,
     el('div', { class: 'row' }, campoCerca,
       el('span', { class: 'hint' }, 'filtra le immagini per nome: serve per applicare un '
@@ -820,6 +931,7 @@ async function createDepthViewer(projectId, sampleSize) {
   riepilogo.style.display = 'none';
   renderCopertura();
   renderCoerenza();
+  renderStretto();
   const daTastiera = (event) => {
     if (vista !== 'singola' || !root.isConnected) return;
     const dove = event.target;

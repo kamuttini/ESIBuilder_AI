@@ -4270,6 +4270,7 @@ def api_depth(project_id: str):
             "rows": righe,
             "box_template": modello,
             "box_applications": valore_step.get("depth_box_applications") or [],
+            "box_tightened": valore_step.get("depth_box_tightened") or None,
             "box_modes": list(DEPTH_BOX_MODES),
             "modes": DEPTH_MODES,
             "by_mode": {m: sum(1 for r in righe if r["mode"] == m) for m in DEPTH_MODES},
@@ -4641,6 +4642,201 @@ def _fattore_unita(testo: str, misura_mm: Optional[float], numero: Optional[floa
         if 8.0 <= rapporto <= 12.5:
             return 10.0
     return 1.0
+
+
+def _cifre_lette(testo: str) -> str:
+    """Il numero dentro a un'etichetta, senza unita' ne' lettere: `3.5 cm` -> `3.5`."""
+    trovato = re.search(r"\d+(?:[.,]\d+)?", str(testo or ""))
+    return trovato.group(0).replace(",", ".") if trovato else ""
+
+
+def _riquadro_stretto(image_path: Path, box: Dict, atteso_testo: str,
+                      atteso_mm: Optional[float], fattore: float) -> Dict:
+    """Il riquadro portato sul **solo numero**, o il motivo per cui si e' lasciato stare.
+
+    Il riquadro che il modulo consegna e' quello di parola dell'OCR, e la parola comprende
+    quello che sta attaccato al numero: l'unita' (`43 *mm`), la lettera di una sigla, la
+    tacca del righello se il numero le sta accanto. Va bene per leggere, non per andare a
+    match su un'altra immagine: quel contesto cambia da un fotogramma all'altro, e il
+    riquadro va stretto sulle cifre.
+
+    Il valore e' il guardiano. Se rileggendo esce un numero diverso da quello che c'era,
+    non e' un riquadro piu' stretto: e' un riquadro finito su un altro numero, e si lascia
+    tutto com'era. Restringere non deve poter cambiare una depth gia' giusta.
+    """
+    letto = _rileggi_nel_riquadro(image_path, box)
+    if letto is None:
+        return {"ok": False, "reason": "in quel riquadro non si legge nessun numero"}
+    stretto = letto["box"]
+    valore = round(float(letto["value"]) * fattore, 2)
+    # Il confronto si fa sulle **cifre**, non sui millimetri: e' l'unita' che stiamo
+    # buttando fuori dal riquadro, e farla entrare nel guardiano vorrebbe dire rifiutare
+    # proprio le etichette in cm. `3.5 cm` e `3.5` sono lo stesso numero letto due volte.
+    atteso_cifre = _cifre_lette(atteso_testo)
+    lette = _cifre_lette(letto["text"])
+    # Due modi di dire la stessa cosa, e ne basta uno. Le stesse cifre: il riquadro sta
+    # sullo stesso numero. Gli stessi millimetri: ci sta pure quando le cifre *migliorano* —
+    # dove stava scritto «30cm» il riquadro stretto legge «3.0», che e' lo stesso 30 mm con
+    # il punto ritrovato, e sarebbe assurdo rifiutarlo.
+    d_accordo = (atteso_mm is not None and abs(valore - float(atteso_mm)) <= 0.01)
+    if not d_accordo and atteso_cifre and lette != atteso_cifre:
+        return {"ok": False, "value_mm": valore, "text": letto["text"],
+                "reason": f"rileggendo esce «{letto['text']}» invece di «{atteso_testo}»: "
+                          "il riquadro non si stringe"}
+    if not d_accordo and not atteso_cifre and atteso_mm is not None:
+        return {"ok": False, "value_mm": valore, "text": letto["text"],
+                "reason": f"rileggendo esce {valore:g} mm invece di {float(atteso_mm):g}: "
+                          "il riquadro non si stringe"}
+    prima = (box["right"] - box["left"]) * (box["bottom"] - box["top"])
+    dopo = (stretto["right"] - stretto["left"]) * (stretto["bottom"] - stretto["top"])
+    return {"ok": True, "box": stretto, "value_mm": valore, "text": letto["text"],
+            "before": box, "shrink": round(1.0 - (dopo / prima), 3) if prima else 0.0}
+
+
+@app.get("/api/projects/<project_id>/depth/tighten")
+def api_depth_tighten_one(project_id: str):
+    """Il riquadro stretto sul numero per una sola immagine, senza salvare niente.
+
+    Serve a farlo vedere prima: si guarda nello zoom, e solo dopo si applica.
+    """
+    project = _project(project_id)
+    nome = (request.args.get("name") or "").strip()
+    base = project.dedup_link_dir() or Path(project.source.get("folder") or "")
+    # Torna None, non solleva: senza questo controllo un nome fuori cartella arrivava a
+    # PIL come percorso vuoto e usciva come «non si legge nessun numero», che e' un'altra
+    # cosa e nasconde l'errore vero.
+    percorso = _immagine_nella_cartella(base, nome)
+    if percorso is None:
+        return jsonify({"error": f"immagine non nella cartella: {nome or '(vuoto)'}"}), 400
+    try:
+        box = {k: int(round(float(request.args.get(k)))) for k in ("top", "left", "bottom", "right")}
+    except (TypeError, ValueError):
+        return jsonify({"error": "serve un riquadro completo (top/left/bottom/right)"}), 400
+    atteso = request.args.get("depth_mm")
+    modello = project.step_value("depth_scale").get("depth_box_template") or {}
+    esito = _riquadro_stretto(percorso, box, request.args.get("text") or "",
+                              float(atteso) if atteso else None,
+                              float(modello.get("unit_factor") or 1.0))
+    return jsonify(esito)
+
+
+@app.post("/api/projects/<project_id>/depth/tighten")
+def api_depth_tighten(project_id: str):
+    """Stringi sul numero i riquadri gia' trovati, su tutta la cartella."""
+    project = _project(project_id)
+    payload = _payload()
+    scope = str(payload.get("scope") or "all")
+    elenco = [str(n) for n in (payload.get("names") or [])]
+    righe, stage = _depth_module_rows(project)
+    if stage is None:
+        return jsonify({"error": "la depth non e' ancora stata calcolata"}), 404
+    return jsonify({"job_id": _start_job(_run_depth_tighten, project_id, scope, elenco)})
+
+
+def _run_depth_tighten(job_id: str, project_id: str, scope: str,
+                       elenco: Sequence[str] = ()) -> None:
+    """Il restringimento sul numero, immagine per immagine, in parallelo.
+
+    Ogni riquadro e' il suo: non c'e' un riquadro di cartella da propagare, si tratta di
+    rifilare quello che ogni immagine ha gia'. Per questo il valore atteso e' quello di
+    quella riga, e chi non lo conferma resta com'e'.
+    """
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    try:
+        project = _project(project_id)
+        base = project.dedup_link_dir() or Path(project.source.get("folder") or "")
+        valore_step = project.step_value("depth_scale")
+        letture_note = dict(valore_step.get("depth_box_reads") or {})
+        # Le correzioni a mano sono il dato piu' forte che c'e': se lei ha scritto 30 mm,
+        # il riquadro che rilegge 30 mm sta sul numero giusto, comunque fosse scritto prima.
+        correzioni = valore_step.get("depth_corrections") or {}
+        modello = valore_step.get("depth_box_template") or {}
+        fattore = float(modello.get("unit_factor") or 1.0)
+
+        righe, _stage = _depth_module_rows(project)
+        per_nome = {r["name"]: r for r in righe}
+        for nome, lettura in letture_note.items():
+            riga = per_nome.setdefault(nome, {"name": nome, "mode": "direct_label"})
+            riga = {**riga, "box": lettura.get("box"), "depth_mm": lettura.get("depth_mm"),
+                    "ocr_text": lettura.get("ocr_text", "")}
+            per_nome[nome] = riga
+
+        if scope == "names":
+            scelti = [per_nome[n] for n in elenco if n in per_nome]
+        elif scope == "run":
+            scelti = [r for r in righe if r.get("box")]
+        else:
+            scelti = list(per_nome.values())
+        # Qui non si guarda il metodo. Propagare un riquadro ha senso solo dove la label
+        # non si sposta; stringerlo no: si lavora sul riquadro che quell'immagine ha gia',
+        # dove si trova. Su prova_3 la depth viene "dalla scala" e i riquadri contengono
+        # comunque `3.5 cm` - 92x25 px di cui il numero e' meno di un terzo.
+        lavoro = [r for r in scelti if r.get("box")]
+        if not lavoro:
+            raise ValueError("nessun riquadro da stringere: la depth non e' ancora stata trovata")
+
+        _job_update(job_id, stage=f"stringo il riquadro su {len(lavoro)} immagini",
+                    total=len(lavoro), done=0)
+
+        fatte = 0
+
+        def stringi(riga: Dict) -> Tuple[str, Dict]:
+            # L'unita' si ricava dalla riga stessa: il numero scritto e i millimetri che
+            # l'app gli ha attribuito. Un `4.3` che vale 43 mm dice cm senza scriverlo.
+            scritto = re.search(r"\d+(?:[.,]\d+)?", str(riga.get("ocr_text") or ""))
+            numero = float(scritto.group(0).replace(",", ".")) if scritto else None
+            fattore_riga = _fattore_unita(riga.get("ocr_text"), riga.get("depth_mm"), numero)
+            if numero is None and not str(riga.get("ocr_text") or ""):
+                fattore_riga = fattore
+            corretta = (correzioni.get(riga["name"]) or {}).get("depth_mm")
+            atteso = corretta if corretta is not None else riga.get("depth_mm")
+            return riga["name"], _riquadro_stretto(
+                base / riga["name"], riga["box"], str(riga.get("ocr_text") or ""),
+                atteso, fattore_riga)
+
+        strette: Dict[str, Dict] = {}
+        invariate: List[Dict] = []
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for nome, esito in pool.map(stringi, lavoro):
+                fatte += 1
+                if fatte % 10 == 0 or fatte == len(lavoro):
+                    _job_update(job_id, done=fatte)
+                if not esito.get("ok"):
+                    # Cosa ha letto il riquadro stretto si dice sempre: spesso e' *meglio*
+                    # di quello che c'era. Su prova_3 dove stava scritto «30cm» il riquadro
+                    # stretto legge «3.0», cioe' ritrova il punto decimale che la parola
+                    # larga aveva perso. Non si applica da soli - si mette sotto gli occhi.
+                    invariate.append({"name": nome, "reason": esito.get("reason", ""),
+                                      "text": esito.get("text", ""),
+                                      "value_mm": esito.get("value_mm")})
+                    continue
+                # La depth resta quella di prima. Il numero e' lo stesso - lo abbiamo
+                # appena verificato cifra per cifra - e riscriverlo con l'unita' ricavata
+                # qui potrebbe cambiare un valore gia' giusto. Si stringe il riquadro.
+                riga = per_nome.get(nome) or {}
+                strette[nome] = {"box": esito["box"],
+                                 "depth_mm": riga.get("depth_mm"),
+                                 "ocr_text": riga.get("ocr_text") or esito.get("text", "")}
+
+        def salva(_project: Project, value: Dict) -> Dict:
+            precedenti = dict(value.get("depth_box_reads") or {})
+            for nome, lettura in strette.items():
+                precedenti[nome] = {**(precedenti.get(nome) or {}), **lettura}
+            value["depth_box_reads"] = precedenti
+            value["depth_box_tightened"] = {
+                "tightened": len(strette), "targets": len(lavoro),
+                "unchanged": invariate[:40], "scope": scope,
+                "at": datetime.now().isoformat(timespec="seconds"),
+            }
+            return value
+
+        _write_step(project_id, "depth_scale", salva, status="corrected", source="user")
+        _job_update(job_id, status="done", stage="fatto",
+                    result={"tightened": len(strette), "targets": len(lavoro),
+                            "unchanged": invariate})
+    except Exception as error:  # noqa: BLE001
+        _job_update(job_id, status="error", stage="errore", error=str(error))
 
 
 @app.post("/api/projects/<project_id>/depth/box")
