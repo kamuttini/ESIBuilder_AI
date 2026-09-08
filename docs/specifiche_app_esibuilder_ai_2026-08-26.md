@@ -2068,3 +2068,15 @@ Aggiunte, per lo stesso motivo:
   di storte rifarle tutte dal passo costa un comando invece di dieci trascinamenti;
 - l'elenco laterale porta ora segnali stretti (`corr`, `prop`, `·`, `~`) invece di parole intere:
   i nomi dei file tornano leggibili per intero — erano diventati «ne…», «A…».
+
+### «0/36» per cinque minuti: un contatore che nessuno riempiva
+
+Lanciando la ricerca della depth su tutte le immagini la barra restava a `0/36` e sembrava
+bloccata. Non lo era — il sottoprocesso girava, 25% di CPU — ma il lavoro dichiarava un totale
+che nessuno aggiornava mai: il modulo depth è un sottoprocesso solo, scrive i suoi CSV alla fine
+e nel frattempo non dice niente.
+
+Un contatore fermo è peggio di nessun contatore: fa credere a un blocco e invita a premere di
+nuovo, che è esattamente quello che è successo (due run sovrapposte sulla stessa cartella). Ora
+il lavoro non dichiara nessun totale e mostra il tempo che passa — «il modulo cerca la depth su 36
+immagini (non riporta avanzamento, solo il tempo) — 2m 14s» — che almeno si muove.

@@ -25,6 +25,7 @@ import statistics
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -4716,6 +4717,35 @@ def api_depth_run(project_id: str):
     return jsonify({"job_id": _start_job(_run_depth_only, project_id, sample)})
 
 
+class _Cronometro:
+    """Tiene vivo l'avanzamento di un lavoro che non sa dire a che punto e'.
+
+    Il modulo depth e' un sottoprocesso solo: scrive i suoi CSV alla fine e nel frattempo non
+    dice niente. Dichiarare un totale che nessuno riempie fa sembrare tutto bloccato — «0/36»
+    per cinque minuti. Meglio nessun contatore e il tempo che passa, che almeno si muove.
+    """
+
+    def __init__(self, job_id: str, testo: str) -> None:
+        self.job_id = job_id
+        self.testo = testo
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._gira, daemon=True)
+
+    def _gira(self) -> None:
+        partenza = time.monotonic()
+        while not self._stop.wait(2.0):
+            passati = int(time.monotonic() - partenza)
+            quanto = f"{passati // 60}m {passati % 60:02d}s" if passati >= 60 else f"{passati}s"
+            _job_update(self.job_id, stage=f"{self.testo} — {quanto}", total=0, done=0)
+
+    def __enter__(self) -> "_Cronometro":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_) -> None:  # noqa: ANN002
+        self._stop.set()
+
+
 def _run_depth_only(job_id: str, project_id: str, sample: int) -> None:
     """Solo la depth, senza rifare marker e scala: e' l'unica che si sta guardando."""
     try:
@@ -4728,20 +4758,23 @@ def _run_depth_only(job_id: str, project_id: str, sample: int) -> None:
         imported = project.step_value("import")
         immagini = len(project.dedup_images())
         quante = sample if sample > 0 else immagini
-        _job_update(job_id, stage=f"depth su {quante} immagini", total=quante)
-        esito = stages_mod.run_depth(
-            folder=project.dedup_link_dir() or folder,
-            output_root=project.root / "stages",
-            python_bin=sys.executable,
-            vendor=((analysis.get("vendor") or {}).get("vendor") or ""),
-            probe_id=str((analysis.get("probe") or {}).get("probe_id") or ""),
-            probe_model=str(project.codes.get("probe_model") or ""),
-            rect=rect,
-            video_size=imported.get("image_sample_size") or [0, 0],
-            rotation=0,  # lo specchio di lavoro le ha gia' raddrizzate
-            max_images=quante,
-            timeout=3600.0,
-        )
+        testo = (f"il modulo cerca la depth su {quante} immagini "
+                 f"(non riporta avanzamento, solo il tempo)")
+        _job_update(job_id, stage=testo, total=0, done=0)
+        with _Cronometro(job_id, testo):
+            esito = stages_mod.run_depth(
+                folder=project.dedup_link_dir() or folder,
+                output_root=project.root / "stages",
+                python_bin=sys.executable,
+                vendor=((analysis.get("vendor") or {}).get("vendor") or ""),
+                probe_id=str((analysis.get("probe") or {}).get("probe_id") or ""),
+                probe_model=str(project.codes.get("probe_model") or ""),
+                rect=rect,
+                video_size=imported.get("image_sample_size") or [0, 0],
+                rotation=0,  # lo specchio di lavoro le ha gia' raddrizzate
+                max_images=quante,
+                timeout=3600.0,
+            )
         if esito.get("status") != "ok":
             raise ValueError(esito.get("error") or "la depth non e' andata a buon fine")
         analisi = dict(project.data.get("analysis") or {})
