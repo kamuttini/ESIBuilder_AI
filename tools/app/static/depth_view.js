@@ -422,6 +422,26 @@ async function createDepthViewer(projectId, sampleSize) {
      va bene; per andare a match su un'altra immagine no, perche' quel contorno cambia da
      un fotogramma all'altro. Il valore non si tocca mai: si verifica che il riquadro
      stretto legga le stesse cifre, e chi non lo conferma resta com'e'. */
+  /* Stringere e' un gesto di cartella, non di immagine: l'etichetta sta nello stesso
+     posto in tutti i fotogrammi, e non ha senso rifilarne uno alla volta. Da qualunque
+     tasto si parta, il lavoro e' lo stesso. */
+  const stringiTutti = async (bottone, stato) => {
+    if (bottone) bottone.disabled = true;
+    try {
+      const { job_id } = await api(`/projects/${projectId}/depth/tighten`,
+        { body: { scope: 'all' } });
+      const job = await pollJob(job_id, stato);
+      if (stato) stato.textContent = '';
+      const esito = job.result || {};
+      toast(`${esito.tightened} riquadri su ${esito.targets} stretti sul numero`
+        + (esito.folder_box ? ` · ${esito.folder_box} col riquadro di cartella` : ''));
+      await rileggiTutto();
+    } catch (errore) {
+      if (stato) stato.textContent = errore.message;
+      toast(errore.message, true);
+    } finally { if (bottone) bottone.disabled = false; }
+  };
+
   const renderStretto = () => {
     strettoBox.innerHTML = '';
     const conRiquadro = names.filter((n) => (byName.get(n) || {}).box).length;
@@ -436,21 +456,7 @@ async function createDepthViewer(projectId, sampleSize) {
     const stato = el('span', { class: 'hint' });
     const via = el('button', { class: 'ghost' },
       fatto ? `Rifai su ${conRiquadro} riquadri` : `Stringi i ${conRiquadro} riquadri`);
-    via.addEventListener('click', async () => {
-      via.disabled = true;
-      try {
-        const { job_id } = await api(`/projects/${projectId}/depth/tighten`,
-          { body: { scope: ambitoSel.value === 'names' ? 'names' : 'all',
-                    names: ambitoSel.value === 'names' ? visibili() : [] } });
-        const job = await pollJob(job_id, stato);
-        stato.textContent = '';
-        const esito = job.result || {};
-        toast(`${esito.tightened} riquadri su ${esito.targets} stretti sul numero`
-          + (esito.folder_box ? ` · ${esito.folder_box} col riquadro di cartella` : ''));
-        await rileggiTutto();
-      } catch (errore) { stato.textContent = errore.message; toast(errore.message, true); }
-      finally { via.disabled = false; }
-    });
+    via.addEventListener('click', () => stringiTutti(via, stato));
     strettoBox.append(el('div', { class: 'row', style: 'margin-top:6px' }, via, stato));
     if (fatto) {
       const b = fatto.box;
@@ -613,6 +619,14 @@ async function createDepthViewer(projectId, sampleSize) {
         riquadro.append(el('div', { class: 'hint' },
           `riquadro di cartella attivo su ${modello.applied} immagini con etichetta.`));
       }
+      // Propagare no, stringere si': il riquadro resta dov'e', gli si toglie il contorno.
+      if (r.box) {
+        const soloNumero = el('button', { class: 'ghost' },
+          'Stringi sul numero, tutte le immagini');
+        const dice = el('span', { class: 'hint' });
+        soloNumero.addEventListener('click', () => stringiTutti(soloNumero, dice));
+        riquadro.append(el('div', { class: 'row' }, soloNumero, dice));
+      }
       return;
     }
     if (!bozza) {
@@ -631,50 +645,18 @@ async function createDepthViewer(projectId, sampleSize) {
     const misura = el('span', { class: 'hint' },
       `${bozza.right - bozza.left} x ${bozza.bottom - bozza.top} px`);
     /* Il riquadro dell'OCR e' quello di *parola*, e la parola comprende cio' che sta
-       attaccato al numero: l'unita', una lettera, la tacca del righello. Qui si toglie,
-       guardando prima com'e' venuto. */
-    const stringi = el('button', { class: 'ghost sq2' }, 'Stringi sul numero');
+       attaccato al numero: l'unita', una sigla, la tacca del righello. Il tasto le fa
+       tutte: l'etichetta e' nello stesso posto in ogni fotogramma, e stringerne una alla
+       volta sarebbe solo fatica. */
+    const stringi = el('button', { class: 'ghost' }, 'Stringi sul numero, tutte le immagini');
     const esitoStretto = el('span', { class: 'hint' });
-    stringi.addEventListener('click', async () => {
-      stringi.disabled = true;
-      esitoStretto.textContent = 'leggo…';
-      try {
-        const q = new URLSearchParams({
-          name: names[index], top: bozza.top, left: bozza.left,
-          bottom: bozza.bottom, right: bozza.right, text: r.ocr_text || '',
-        });
-        if (r.depth_mm != null) q.set('depth_mm', r.depth_mm);
-        const esito = await api(`/projects/${projectId}/depth/tighten?${q}`);
-        if (!esito.ok) { esitoStretto.textContent = esito.reason || 'non si stringe'; return; }
-        const prima = (bozza.right - bozza.left) * (bozza.bottom - bozza.top);
-        bozza = normalizza({ ...esito.box });
-        const dopo = (bozza.right - bozza.left) * (bozza.bottom - bozza.top);
-        esitoStretto.textContent = `letto «${esito.text}» · ${Math.round(100 - 100 * dopo / prima)}% di area in meno`;
-        caricaZoom(names[index], bozza);
-        disegna();
-        disegnaZoom();
-        renderRiquadro();
-      } catch (errore) { esitoStretto.textContent = errore.message; }
-      finally { stringi.disabled = false; }
-    });
-    const campi = el('div', { class: 'row' });
-    for (const lato of ['left', 'top', 'right', 'bottom']) {
-      const campo = el('input', {
-        type: 'number', step: '1', style: 'width:78px', value: String(bozza[lato]),
-      });
-      campo.addEventListener('change', () => {
-        bozza = normalizza({ ...bozza, [lato]: parseInt(campo.value, 10) || 0 });
-        disegna();
-        disegnaZoom();
-        renderRiquadro();
-      });
-      campi.append(el('span', { class: 'hint' }, lato), campo);
-    }
+    stringi.addEventListener('click', () => stringiTutti(stringi, esitoStretto));
     riquadro.append(
       el('div', { class: 'hint' },
         'trascina il riquadro o le maniglie per stringerlo sul solo numero: piu\' e\' stretto, '
         + 'piu\' il match tiene su tutte le immagini.'),
-      el('div', { class: 'row' }, misura, stringi, esitoStretto),
+      el('div', { class: 'row' }, misura),
+      el('div', { class: 'row' }, stringi, esitoStretto),
       campi,
       el('div', { class: 'row' }, ambitoSel,
         el('span', { class: 'hint' }, `${totaleCartella} immagini nella cartella, `
