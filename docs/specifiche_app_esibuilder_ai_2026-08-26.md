@@ -2080,3 +2080,38 @@ Un contatore fermo è peggio di nessun contatore: fa credere a un blocco e invit
 nuovo, che è esattamente quello che è successo (due run sovrapposte sulla stessa cartella). Ora
 il lavoro non dichiara nessun totale e mostra il tempo che passa — «il modulo cerca la depth su 36
 immagini (non riporta avanzamento, solo il tempo) — 2m 14s» — che almeno si muove.
+
+## 8-septvicies. L'unità di misura è di cartella, non di fotogramma
+
+Sul Philips le depth uscivano incoerenti: `3.5 cm` diventava 35 mm, `3.0 cm` letto `30cm`
+diventava 300. Il convertitore cm→mm faceva il suo dovere; era **il testo** a essere sbagliato,
+perché l'OCR perde il punto decimale. Ma l'incoerenza si vede solo guardando la cartella intera,
+ed è lì che va cercata: la macchina scrive la depth sempre allo stesso modo, e chi devia di solito
+non è una depth diversa — è la stessa letta male.
+
+`GET /depth` restituisce ora una lettura di coerenza con due segnali, tenuti distinti perché uno
+permette una proposta e l'altro no.
+
+**Valore fuori scala.** Se diviso dieci cade nella scala della cartella, è un punto decimale
+perso: `30cm` dove le altre dicono `3.0 cm`. Si propone il valore diviso, e la sezione lo applica
+con un comando solo.
+
+**Forma con una cifra in meno.** `5 cm` dove il resto della cartella scrive `d.d cm` ha perso una
+cifra, ma *quale* non si sa: 50 mm è un valore plausibile e nessuna proposta sarebbe onesta. Si
+segnala e si lascia decidere.
+
+Il discrimine fra i due non è la forma dell'etichetta ma **il numero di cifre**: in questa stessa
+cartella `10 cm` non ha la virgola come le altre, eppure vale davvero 100 mm ed è il fondo scala
+della sonda. Ha però lo stesso numero di cifre di `3.5`, mentre `5 cm` ne ha una in meno. La prima
+versione della regola guardava la forma e bocciava tutti i `10 cm`.
+
+**Misura** su `prova 3`, 36 immagini, confronto con i nomi dei file:
+
+| | tornano | no |
+|---|---|---|
+| prima | 29 | 7 |
+| dopo il comando «Correggi i 5 valori fuori scala» | **34** | 2 |
+
+I due che restano sono i `5 cm`, segnalati e lasciati a mano — ed è giusto così: la cifra persa è
+un `3` che nessuna regola può indovinare. La scala della cartella diventa
+`30·35·40·45·50·60·70·80·100 mm`, che è una ladder Philips pulita.

@@ -919,3 +919,16 @@ img.depth-crop {
 .score-row.scala-riga .scala-attesa {
   padding: 0 5px; border: none; font-size: 15px; line-height: 1;
 }
+
+/* Le letture che stonano con il resto della cartella: unita' e forma sono di cartella, non
+   di fotogramma, e chi devia di solito e' la stessa depth letta male. */
+.depth-coerenza {
+  margin: 8px 0; padding: 9px 12px; border-radius: 8px; font-size: 13px;
+  background: rgba(210, 153, 34, .12); border: 1px solid rgba(210, 153, 34, .45);
+}
+.depth-stona { color: var(--warn); margin-top: 4px; }
+.depth-stona-segno {
+  color: var(--warn); font-weight: 700; border: 1px solid rgba(210, 153, 34, .5);
+  border-radius: 50%; width: 16px; height: 16px; line-height: 14px; text-align: center;
+  font-size: 11px; flex: 0 0 auto;
+}

@@ -281,6 +281,24 @@ async function createDepthViewer(projectId, sampleSize) {
       + `${r.candidates ? ` · ${r.candidates} candidati` : ''}`));
     if (m.what) dettaglio.append(el('div', { style: `color:${m.color}` }, m.what));
     if (r.reason) dettaglio.append(el('div', { style: 'color:var(--muted)' }, r.reason));
+    const stona = sospetti()[names[index]];
+    if (stona) {
+      const riga = el('div', { class: 'depth-stona' }, stona.reason);
+      if (stona.suggested_mm != null) {
+        const usa = el('button', { class: 'ghost sq2', style: 'margin-left:8px' },
+          `usa ${stona.suggested_mm} mm`);
+        usa.addEventListener('click', async () => {
+          try {
+            await api(`/projects/${projectId}/depth/correct`,
+              { body: { name: names[index], depth_mm: stona.suggested_mm } });
+            toast('valore corretto');
+            await rileggiTutto();
+          } catch (errore) { toast(errore.message, true); }
+        });
+        riga.append(usa);
+      }
+      dettaglio.append(riga);
+    }
     confronto.innerHTML = '';
     const d = r.direct || {};
     const s2 = r.scale || {};
@@ -324,6 +342,7 @@ async function createDepthViewer(projectId, sampleSize) {
         el('span', { class: 'score-name', title: name }, name.split('/').pop()),
         el('span', { class: 'hint' }, r.score != null ? r.score.toFixed(2) : ''),
         r.corrected ? el('span', { class: 'score-fixed' }, 'corretta') : null,
+        (!r.corrected && sospetti()[name]) ? el('span', { class: 'depth-stona-segno', title: 'lettura che stona' }, '!') : null,
       );
       riga.addEventListener('click', () => { index = names.indexOf(name); mostra(); });
       listBox.append(riga);
@@ -344,6 +363,45 @@ async function createDepthViewer(projectId, sampleSize) {
 
   /* --- quante immagini hanno una depth, perche' le altre no, e la conferma ------------ */
   const coperturaBox = el('div', { class: 'depth-copertura' });
+  const coerenzaBox = el('div', { class: 'depth-coerenza' });
+  const sospetti = () => ((data.coherence || {}).suspects || {});
+  const renderCoerenza = () => {
+    coerenzaBox.innerHTML = '';
+    const c = data.coherence || {};
+    const elenco = Object.entries(c.suspects || {});
+    if (!elenco.length) { coerenzaBox.style.display = 'none'; return; }
+    coerenzaBox.style.display = '';
+    const conProposta = elenco.filter(([, v]) => v.suggested_mm != null);
+    coerenzaBox.append(
+      el('strong', {}, `${elenco.length} letture stonano rispetto alla cartella`),
+      el('span', { class: 'hint' },
+        ` — qui la depth e\' scritta «${c.format}» e va da ${(c.range || [])[0]} a `
+        + `${(c.range || [])[1]} mm. Chi devia di solito e\' la stessa depth letta male.`));
+    if (conProposta.length) {
+      const tutti = el('button', { class: 'ghost' },
+        `Correggi i ${conProposta.length} valori fuori scala`);
+      tutti.addEventListener('click', async () => {
+        tutti.disabled = true;
+        try {
+          for (const [nome, v] of conProposta) {
+            await api(`/projects/${projectId}/depth/correct`,
+              { body: { name: nome, depth_mm: v.suggested_mm } });
+          }
+          toast(`corretti ${conProposta.length} valori`);
+          await rileggiTutto();
+        } catch (errore) { toast(errore.message, true); }
+        finally { tutti.disabled = false; }
+      });
+      coerenzaBox.append(el('div', { class: 'row', style: 'margin-top:6px' }, tutti,
+        el('span', { class: 'hint' },
+          conProposta.map(([n, v]) => `${n.split('/').pop()} → ${v.suggested_mm}`).join(' · '))));
+    }
+    const senza = elenco.filter(([, v]) => v.suggested_mm == null);
+    if (senza.length) {
+      coerenzaBox.append(el('div', { class: 'hint', style: 'margin-top:4px' },
+        `${senza.length} da guardare a mano: ` + senza.map(([n]) => n.split('/').pop()).join(', ')));
+    }
+  };
   const renderCopertura = () => {
     const c = data.coverage || {};
     coperturaBox.innerHTML = '';
@@ -417,10 +475,12 @@ async function createDepthViewer(projectId, sampleSize) {
     index = Math.max(0, names.indexOf(corrente));
     modello = fresca.box_template || null;
     data.coverage = fresca.coverage; data.confirmed = fresca.confirmed;
+    data.coherence = fresca.coherence;
     data.images_total = fresca.images_total;
     conteggi = { by_mode: fresca.by_mode || {}, by_status: fresca.by_status || {} };
     rifaiChips();
     renderCopertura();
+    renderCoerenza();
     mostra();
   };
   const renderRiquadro = () => {
@@ -672,6 +732,7 @@ async function createDepthViewer(projectId, sampleSize) {
       + 'Il riquadro sull\'immagine e\' il posto da cui il numero e\' stato preso, colorato '
       + 'secondo il metodo.'),
     coperturaBox,
+    coerenzaBox,
     chips,
     el('div', { class: 'row' }, campoCerca,
       el('span', { class: 'hint' }, 'filtra le immagini per nome: serve per applicare un '
@@ -684,6 +745,7 @@ async function createDepthViewer(projectId, sampleSize) {
 
   riepilogo.style.display = 'none';
   renderCopertura();
+  renderCoerenza();
   const daTastiera = (event) => {
     if (vista !== 'singola' || !root.isConnected) return;
     const dove = event.target;

@@ -4216,11 +4216,108 @@ def api_depth(project_id: str):
             "values_mm": valori,
             "images_total": len(project.dedup_images()),
             "coverage": _copertura_depth(project, righe),
+            "coherence": _coerenza_depth(righe),
             "confirmed": str((project.steps.get("depth_scale") or {}).get("status") or "")
                          in ("confirmed", "corrected"),
             "stage_dir": str(stage),
         }
     )
+
+
+_FORMATO_OCR = re.compile(r"(\d+)(?:[.,](\d+))?\s*(cm|mm)?", re.I)
+
+
+def _forma_lettura(testo: str) -> str:
+    """La *forma* di un'etichetta: quante cifre, se c'e' la virgola, quale unita'.
+
+    In una cartella la macchina scrive la depth sempre allo stesso modo, e chi devia di solito
+    non e' una depth diversa: e' la stessa letta male. `3.5 cm` e `35cm` sono lo stesso numero,
+    ma il secondo, preso alla lettera, vale dieci volte tanto.
+    """
+    trovato = _FORMATO_OCR.search(str(testo or "").lower())
+    if not trovato:
+        return ""
+    decimali = f".{len(trovato.group(2))}" if trovato.group(2) else ""
+    return f"{len(trovato.group(1))}{decimali}{trovato.group(3) or ''}"
+
+
+def _coerenza_depth(righe: Sequence[Dict]) -> Dict:
+    """Le letture che stonano rispetto al resto della cartella, e cosa proporre al loro posto.
+
+    Due segnali, tenuti distinti perche' uno permette una proposta e l'altro no.
+
+    *Valore fuori scala*: se dividendolo per dieci cade su un valore che la cartella ha gia',
+    e' un punto decimale perso — `30cm` dove le altre dicono `3.0 cm`. Si propone il valore
+    diviso. Attenzione che non basta la forma: in questa stessa cartella `10 cm` ha la stessa
+    forma di `30cm` ma vale davvero 100 mm, ed e' il fondo scala della sonda.
+
+    *Forma diversa dal resto*: `5 cm` dove tutte le altre sono `d.d cm` ha perso una cifra, ma
+    quale non si sa — 50 mm e' un valore plausibile e nessuna proposta sarebbe onesta. Si
+    segnala e basta.
+    """
+    forme = [_forma_lettura(r.get("ocr_text")) for r in righe if r.get("ocr_text")]
+    forme = [f for f in forme if f]
+    dominante = max(set(forme), key=forme.count) if forme else ""
+
+    valori = [float(r["depth_mm"]) for r in righe if r.get("depth_mm")]
+    if not valori:
+        return {"format": dominante, "suspects": {}, "values": []}
+    mediana = statistics.median(valori)
+    normali = sorted({v for v in valori if v <= mediana * 3})
+
+    def vicino(valore: float) -> Optional[float]:
+        for buono in normali:
+            if abs(buono - valore) <= max(1.0, 0.05 * buono):
+                return buono
+        return None
+
+    def cifre(forma: str) -> int:
+        """Quante cifre ha l'etichetta, punto escluso: `3.5` e `10` ne hanno due."""
+        numeri = re.findall(r"\d+", forma.split("c")[0].split("m")[0] or "0")
+        return sum(int(n) for n in numeri) if numeri else 0
+
+    basso, alto = min(normali), max(normali)
+    cifre_attese = cifre(dominante)
+
+    sospetti: Dict[str, Dict] = {}
+    for riga in righe:
+        valore = riga.get("depth_mm")
+        nome = str(riga.get("name") or "")
+        if not valore or not nome:
+            continue
+        if valore > mediana * 3:
+            diviso = valore / 10.0
+            # Basta che il valore diviso stia nella scala della cartella: un `3.0 cm` letto
+            # male su *tutti* i fotogrammi non lascia nessun 30 giusto da cui riconoscerlo.
+            proposto = vicino(diviso)
+            if proposto is None and basso * 0.5 <= diviso <= alto:
+                proposto = round(diviso, 1)
+            if proposto is not None:
+                sospetti[nome] = {
+                    "suggested_mm": proposto,
+                    "reason": (f"{valore:g} mm e' fuori scala per questa cartella "
+                               f"({basso:g}-{alto:g} mm); diviso dieci fa {proposto:g} mm. "
+                               f"Letto «{riga.get('ocr_text')}»: punto decimale perso"),
+                }
+            else:
+                sospetti[nome] = {
+                    "suggested_mm": None,
+                    "reason": f"{valore:g} mm e' fuori scala rispetto al resto della cartella",
+                }
+            continue
+        # La forma da sola non basta: in questa cartella `10 cm` non ha la virgola come le
+        # altre, ma ha lo stesso numero di cifre ed e' il fondo scala della sonda. Conta
+        # quindi se le cifre sono *meno* di quelle attese, cioe' se ne e' persa una.
+        forma = _forma_lettura(riga.get("ocr_text"))
+        if dominante and forma and cifre_attese and cifre(forma) < cifre_attese:
+            sospetti[nome] = {
+                "suggested_mm": None,
+                "reason": (f"letto «{riga.get('ocr_text')}»: {cifre(forma)} cifra dove il resto "
+                           f"della cartella ne ha {cifre_attese} — ne manca una, ma quale non "
+                           f"si puo' indovinare"),
+            }
+    return {"format": dominante, "suspects": sospetti, "values": normali,
+            "range": [basso, alto]}
 
 
 def _copertura_depth(project: Project, righe: Sequence[Dict]) -> Dict:
