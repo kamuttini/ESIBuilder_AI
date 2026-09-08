@@ -651,6 +651,19 @@ async function createDepthViewer(projectId, sampleSize) {
     const stringi = el('button', { class: 'ghost' }, 'Stringi sul numero, tutte le immagini');
     const esitoStretto = el('span', { class: 'hint' });
     stringi.addEventListener('click', () => stringiTutti(stringi, esitoStretto));
+    const campi = el('div', { class: 'row' });
+    for (const lato of ['left', 'top', 'right', 'bottom']) {
+      const campo = el('input', {
+        type: 'number', step: '1', style: 'width:78px', value: String(bozza[lato]),
+      });
+      campo.addEventListener('change', () => {
+        bozza = normalizza({ ...bozza, [lato]: parseInt(campo.value, 10) || 0 });
+        disegna();
+        disegnaZoom();
+        renderRiquadro();
+      });
+      campi.append(el('span', { class: 'hint' }, lato), campo);
+    }
     riquadro.append(
       el('div', { class: 'hint' },
         'trascina il riquadro o le maniglie per stringerlo sul solo numero: piu\' e\' stretto, '
