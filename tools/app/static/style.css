@@ -521,16 +521,29 @@ button.chip:disabled { opacity: 0.35; }
 /* I bordi degli envelope, vista compatta nella barra laterale: una riga per lato,
    cliccabile, col dettaglio completo nel tooltip. */
 .ov-limits {
+  /* Una sola regola di overflow: la `overflow: hidden` che stava qui sotto vinceva sulla
+     `overflow-y: auto` e la scatola non si scorreva, si limitava a tagliare le righe. */
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
-  overflow: hidden;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-height: 92px;
 }
+.ov-limits::-webkit-scrollbar { width: 9px; }
+.ov-limits::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 9px;
+  border: 2px solid var(--panel);
+}
+.ov-limits::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 .ov-limits-head {
   position: sticky;
   top: 0;
+  z-index: 2;
   background: var(--panel);
   display: flex;
   justify-content: space-between;
@@ -538,18 +551,26 @@ button.chip:disabled { opacity: 0.35; }
   gap: 8px;
   padding: 5px 9px;
   font-size: 12px;
+  line-height: 15px;   /* fissa l'altezza a 26px: e' il `top` dei gruppi appiccicati */
   font-weight: 600;
   border-bottom: 1px solid var(--line);
 }
+/* Il gruppo resta appeso sotto l'intestazione mentre si scorre: quattro righe di numeri
+   senza sapere di chi sono non dicono niente. Sfondo pieno, se no ci si legge sotto. */
 .ov-limits-group {
+  position: sticky;
+  top: 26px;
+  z-index: 1;
   display: flex;
   justify-content: space-between;
   gap: 8px;
   padding: 3px 9px 2px;
   font-size: 11.5px;
   font-weight: 600;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--panel-2);
+  border-top: 1px solid var(--line);
 }
+.ov-limits-head + .ov-limits-group { border-top: 0; }
 button.lim-row {
   display: flex;
   align-items: baseline;

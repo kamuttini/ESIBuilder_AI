@@ -131,7 +131,8 @@ async function createOrientationViewer(projectId, sampleSize) {
     if (typeof markCurrentLimits === 'function') markCurrentLimits();
     // l'elenco a destra e' alto come l'immagine: si scorre lui, non la pagina
     if (typeof listBox !== 'undefined' && stage.clientHeight > 120) {
-      limitsSide.style.maxHeight = `${Math.round(stage.clientHeight * 0.46)}px`;
+      limitsSide.style.maxHeight =
+        `${Math.max(150, Math.round(stage.clientHeight * 0.46))}px`;
       listBox.style.maxHeight =
         `${Math.max(160, stage.clientHeight - limitsSide.offsetHeight - 8)}px`;
     }
@@ -823,10 +824,22 @@ async function createOrientationViewer(projectId, sampleSize) {
   const limitRows = [];
   const SIDE_SHORT = { alto: 'alto', basso: 'basso', sinistra: 'sx', destra: 'dx' };
 
+  /* Oltre a evidenziare la riga dell'immagine corrente, la porta sotto gli occhi dentro
+     la scatola. Niente scrollIntoView: quello muoverebbe anche la pagina, e qui si sta
+     scorrendo fra le immagini con le frecce. */
   const markCurrentLimits = () => {
+    let corrente = null;
     for (const { node, image } of limitRows) {
-      node.classList.toggle('here', image === names[index]);
+      const qui = image === names[index];
+      node.classList.toggle('here', qui);
+      if (qui && !corrente) corrente = node;
     }
+    if (!corrente) return;
+    const testa = limitsSide.firstChild && limitsSide.firstChild.offsetHeight || 0;
+    const alto = corrente.offsetTop - testa - 22;
+    const basso = corrente.offsetTop + corrente.offsetHeight - limitsSide.clientHeight + 6;
+    if (limitsSide.scrollTop > alto) limitsSide.scrollTop = Math.max(0, alto);
+    else if (limitsSide.scrollTop < basso) limitsSide.scrollTop = basso;
   };
 
   const renderLimitsSide = () => {
