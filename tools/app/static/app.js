@@ -1853,7 +1853,38 @@ function panelModuleStage(panel, step) {
   }
 
   panel.append(el('h3', {}, 'valore dello step'));
-  panelGeneric(panel, step);
+  valoreDiModulo(panel, step);
+}
+
+/* Il valore di uno step scritto dai moduli si guarda, non si riscrive a mano.
+
+   Il pannello ne tiene una copia di quando e' stato disegnato, e li' dentro vivono la
+   rilettura della depth su tutta la cartella, i riquadri stretti sul numero e le
+   correzioni. Un «Conferma step» che rispedisce quella copia riporta indietro tutto il
+   lavoro fatto nel frattempo — ed e' esattamente quello che succedeva. Qui si conferma lo
+   stato e basta; il valore resta quello che c'e' sul disco. */
+function valoreDiModulo(panel, step) {
+  const stored = (state.project.steps[step.id] || {}).value || {};
+  const testo = JSON.stringify(stored, null, 1);
+  const dettaglio = el('details', {},
+    el('summary', { class: 'hint' }, `il valore com'e' adesso (${testo.length} caratteri)`),
+    el('pre', { class: 'out' }, testo.length > 20000 ? testo.slice(0, 20000) + '\n…' : testo));
+  panel.append(dettaglio);
+  panel.append(el('p', { class: 'hint' },
+    'lo scrivono i moduli: confermare non lo tocca, marca solo lo step come confermato.'));
+  const confermato = (state.project.steps[step.id] || {}).status === 'confirmed';
+  panel.append(el('div', { class: 'row' },
+    confermaInDueTempi(confermato ? 'Togli la conferma' : 'Conferma step',
+      confermato ? 'lo step torna a essere una proposta.'
+        : 'lo step vale come confermato. Il valore non viene toccato.',
+      async () => {
+        try {
+          const esito = await api(`/projects/${state.projectId}/steps/${step.id}/confirm`,
+            { body: confermato ? { reset: true } : {} });
+          toast(esito.confirmed ? 'step confermato' : 'conferma tolta');
+          await reload();
+        } catch (error) { toast(error.message, true); }
+      })));
 }
 
 /* --- step generico: editor del valore --- */
@@ -2040,6 +2071,17 @@ function saveRow(stepId, getValue) {
         let value;
         try { value = getValue(); } catch (error) { return toast('JSON non valido: ' + error.message, true); }
         try {
+          // Il pannello ha in mano una copia di quando e' stato disegnato. Se nel frattempo
+          // qualcosa ha scritto su quello step — un modulo, un job — rispedire la copia lo
+          // riporterebbe indietro senza dirlo. Meglio fermarsi e far ricaricare.
+          const fresco = (await api(`/projects/${state.projectId}`)).project || {};
+          const prima = JSON.stringify(((state.project.steps || {})[stepId] || {}).value || {});
+          const adesso = JSON.stringify(((fresco.steps || {})[stepId] || {}).value || {});
+          if (prima !== adesso) {
+            toast('lo step e\' cambiato mentre era aperto: ricarico, poi riprova', true);
+            await reload();
+            return;
+          }
           const result = await api(`/projects/${state.projectId}/steps/${stepId}`, { body: { value } });
           toast(result.stale.length ? 'salvato · tornati in review: ' + result.stale.join(', ') : 'salvato');
           await reload();

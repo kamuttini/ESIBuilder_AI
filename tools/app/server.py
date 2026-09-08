@@ -1205,6 +1205,26 @@ def api_project_step(project_id: str, step_id: str):
     return jsonify({"stale": stale, "status": project.status_report()})
 
 
+@app.post("/api/projects/<project_id>/steps/<step_id>/confirm")
+def api_step_confirm(project_id: str, step_id: str):
+    """Conferma uno step **senza toccarne il valore**.
+
+    `POST /steps/<id>` sostituisce il valore con quello che il pannello ha in mano, ed e'
+    giusto per gli step che si compilano a mano. Per gli step scritti dai moduli e'
+    un'arma puntata ai piedi: dentro a `depth_scale` vivono la rilettura su tutta la
+    cartella, i riquadri stretti e le correzioni, e il pannello ne ha una copia vecchia di
+    quando e' stato disegnato. Confermare non deve poter cancellare niente.
+    """
+    project = _project(project_id)
+    if step_id not in project.steps:
+        return jsonify({"error": f"step sconosciuto: {step_id}"}), 400
+    annulla = bool(_payload().get("reset"))
+    _write_step(project_id, step_id, lambda _p, v: v,
+                status="proposed" if annulla else "confirmed",
+                source="model" if annulla else "user")
+    return jsonify({"confirmed": not annulla, "status": _project(project_id).status_report()})
+
+
 @app.post("/api/projects/<project_id>/resize_check")
 def api_resize_check(project_id: str):
     """Spec sezione 11: propose a resize only when the rectangle overflows the ESI screen."""
