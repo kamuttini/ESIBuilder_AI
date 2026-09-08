@@ -4188,6 +4188,20 @@ def api_depth(project_id: str):
             "reason": "letta nel riquadro di cartella", "candidates": None,
             "direct": {}, "scale": {}, "from_box": True, "in_run": False,
         })
+    # Le immagini che nessuno ha ancora guardato: fuori dal campione del modulo e senza
+    # riquadro che le abbia coperte. Comparivano solo come "12 su 24" nella riga della
+    # copertura, e non c'era modo di arrivarci per indicare la depth a mano. Ci sono, con
+    # lo stato che dice cosa sono: da qui si filtrano, si aprono e si scrivono.
+    presenti = {r["name"] for r in righe}
+    for nome in project.dedup_names():
+        if nome in presenti:
+            continue
+        righe.append({
+            "name": nome, "status": "missing", "mode": "", "depth_mm": None, "score": None,
+            "box": None, "ocr_text": "", "candidates": None,
+            "reason": "il modulo non l'ha esaminata: la depth si puo' indicare a mano",
+            "direct": {}, "scale": {}, "in_run": False,
+        })
     righe.sort(key=lambda r: r["name"])
     correzioni = valore_step.get("depth_corrections") or {}
     for nome, fix in correzioni.items():
@@ -4211,7 +4225,7 @@ def api_depth(project_id: str):
             "by_mode": {m: sum(1 for r in righe if r["mode"] == m) for m in DEPTH_MODES},
             "by_status": {
                 s: sum(1 for r in righe if r["status"] == s)
-                for s in ("accepted", "review", "reject", "corrected", "box")
+                for s in ("accepted", "review", "reject", "corrected", "box", "missing")
             },
             "values_mm": valori,
             "images_total": len(project.dedup_images()),
@@ -4276,6 +4290,24 @@ def _coerenza_depth(righe: Sequence[Dict]) -> Dict:
         numeri = re.findall(r"\d+", forma.split("c")[0].split("m")[0] or "0")
         return sum(int(n) for n in numeri) if numeri else 0
 
+    def cifra_scambiata(valore: float) -> Optional[float]:
+        """Il valore buono che differisce da questo per **una sola cifra**.
+
+        `411` in una cartella che ha `111` non e' un punto decimale perso: e' un 1 letto 4.
+        Diviso dieci fa 41.1, che non e' un valore di questa cartella - la scala e' fatta di
+        18, 28, 37... Se invece esiste un valore noto, uno solo, che differisce per una cifra
+        sola, quella e' l'ipotesi giusta e si puo' proporre.
+        """
+        letto = f"{valore:g}".replace(".", "")
+        trovati = []
+        for buono in normali:
+            testo = f"{buono:g}".replace(".", "")
+            if len(testo) != len(letto):
+                continue
+            if sum(1 for a, b in zip(testo, letto) if a != b) == 1:
+                trovati.append(buono)
+        return trovati[0] if len(trovati) == 1 else None
+
     basso, alto = min(normali), max(normali)
     cifre_attese = cifre(dominante)
 
@@ -4290,14 +4322,24 @@ def _coerenza_depth(righe: Sequence[Dict]) -> Dict:
             # Basta che il valore diviso stia nella scala della cartella: un `3.0 cm` letto
             # male su *tutti* i fotogrammi non lascia nessun 30 giusto da cui riconoscerlo.
             proposto = vicino(diviso)
+            perche = "punto decimale perso"
+            if proposto is None:
+                # Prima di dare la colpa al punto decimale: una cifra letta male spiega
+                # meglio un valore che, diviso dieci, non cade su niente di questa cartella.
+                scambio = cifra_scambiata(valore)
+                if scambio is not None:
+                    proposto, perche = scambio, "una cifra letta male"
             if proposto is None and basso * 0.5 <= diviso <= alto:
                 proposto = round(diviso, 1)
             if proposto is not None:
+                fatto = (f"diviso dieci fa {proposto:g} mm"
+                         if perche == "punto decimale perso"
+                         else f"la cartella ha {proposto:g} mm, che differisce per una cifra sola")
                 sospetti[nome] = {
                     "suggested_mm": proposto,
                     "reason": (f"{valore:g} mm e' fuori scala per questa cartella "
-                               f"({basso:g}-{alto:g} mm); diviso dieci fa {proposto:g} mm. "
-                               f"Letto «{riga.get('ocr_text')}»: punto decimale perso"),
+                               f"({basso:g}-{alto:g} mm); {fatto}. "
+                               f"Letto «{riga.get('ocr_text')}»: {perche}"),
                 }
             else:
                 sospetti[nome] = {
@@ -4894,25 +4936,33 @@ def api_depth_correct(project_id: str):
     """Correggi a mano la depth di un'immagine."""
     project = _project(project_id)
     payload = _payload()
-    name = (payload.get("name") or "").strip()
-    if not name:
+    # Una o molte: `names` serve per le immagini che il modulo non ha esaminato, dove la
+    # depth e' la stessa e riscriverla una per una sarebbe solo fatica.
+    nomi = [str(n).strip() for n in (payload.get("names") or []) if str(n).strip()]
+    if not nomi:
+        uno = (payload.get("name") or "").strip()
+        nomi = [uno] if uno else []
+    if not nomi:
         return jsonify({"error": "manca l'immagine"}), 400
 
     def mutate(project: Project, value: Dict) -> Dict:
         correzioni = dict(value.get("depth_corrections") or {})
         if payload.get("reset"):
-            correzioni.pop(name, None)
+            for name in nomi:
+                correzioni.pop(name, None)
         else:
             try:
                 valore = float(payload.get("depth_mm"))
             except (TypeError, ValueError):
                 raise ValueError("serve la depth in millimetri")
-            correzioni[name] = {
-                "depth_mm": valore,
-                "note": payload.get("note", ""),
-                "source": "user",
-                "ts": datetime.now().isoformat(timespec="seconds"),
-            }
+            adesso = datetime.now().isoformat(timespec="seconds")
+            for name in nomi:
+                correzioni[name] = {
+                    "depth_mm": valore,
+                    "note": payload.get("note", ""),
+                    "source": "user",
+                    "ts": adesso,
+                }
         value["depth_corrections"] = correzioni
         return value
 
@@ -4920,7 +4970,8 @@ def api_depth_correct(project_id: str):
         value = _write_step(project_id, "depth_scale", mutate, status="corrected", source="user")
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
-    return jsonify({"saved": True, "corrections": len(value.get("depth_corrections") or {})})
+    return jsonify({"saved": True, "applied": len(nomi),
+                    "corrections": len(value.get("depth_corrections") or {})})
 
 
 # -- .fss ------------------------------------------------------------------

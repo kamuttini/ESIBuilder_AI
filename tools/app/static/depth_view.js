@@ -27,7 +27,15 @@ async function createDepthViewer(projectId, sampleSize) {
   let modello = data.box_template || null;
   let conteggi = { by_mode: data.by_mode || {}, by_status: data.by_status || {} };
   let bozza = null;
-  const modificabile = () => modiBox.includes((byName.get(names[index]) || {}).mode);
+  /* Il riquadro si puo' stringere dove la depth sta nell'interfaccia. Un'immagine che il
+     modulo non ha esaminato non ha un metodo, ma la cartella si': se li' la depth e' una
+     label, la label c'e' anche in questa, e il riquadro ci si puo' mettere. */
+  const propagabile = () => !!(data.coverage || {}).can_propagate;
+  const modificabile = () => {
+    const r = byName.get(names[index]) || {};
+    if (modiBox.includes(r.mode)) return true;
+    return r.status === 'missing' && propagabile();
+  };
 
   let cerca = '';
   const passa = (name) => {
@@ -307,8 +315,11 @@ async function createDepthViewer(projectId, sampleSize) {
       + `${d.text ? ` («${d.text}»)` : ''}`
       + ` · scala: ${s2.score != null ? s2.score.toFixed(3) : '—'}`
       + `${s2.value_mm != null ? ` (${s2.value_mm} mm)` : ''}`));
-    bozza = r.box ? { ...r.box } : null;
-    if (r.box) caricaZoom(names[index], r.box); else zoomBox.style.display = 'none';
+    // Senza riquadro proprio si parte da quello di cartella: la label sta nello stesso
+    // posto in ogni fotogramma, quindi e' gia' quasi giusto e basta aggiustarlo.
+    const prestato = (!r.box && r.status === 'missing' && modello && modello.box) ? modello.box : null;
+    bozza = r.box ? { ...r.box } : (prestato ? { ...prestato } : null);
+    if (bozza) caricaZoom(names[index], bozza); else zoomBox.style.display = 'none';
     disegna();
     disegnaZoom();
     aggiornaAmbito();
@@ -342,6 +353,7 @@ async function createDepthViewer(projectId, sampleSize) {
         el('span', { class: 'score-name', title: name }, name.split('/').pop()),
         el('span', { class: 'hint' }, r.score != null ? r.score.toFixed(2) : ''),
         r.corrected ? el('span', { class: 'score-fixed' }, 'corretta') : null,
+        r.status === 'missing' ? el('span', { class: 'hint', title: 'il modulo non l\'ha esaminata' }, 'da fare') : null,
         (!r.corrected && sospetti()[name]) ? el('span', { class: 'depth-stona-segno', title: 'lettura che stona' }, '!') : null,
       );
       riga.addEventListener('click', () => { index = names.indexOf(name); mostra(); });
@@ -411,6 +423,17 @@ async function createDepthViewer(projectId, sampleSize) {
       `${c.with_depth} immagini su ${c.total} hanno una depth`));
     if (c.reason) coperturaBox.append(el('span', { class: 'hint' }, ` — ${c.reason}.`));
     const riga = el('div', { class: 'row', style: 'margin-top:6px' });
+    const mancanti = (conteggi.by_status || {}).missing || 0;
+    if (mancanti) {
+      const vedi = el('button', { class: 'ghost' }, `Vedi le ${mancanti} senza depth`);
+      vedi.addEventListener('click', () => {
+        filtro = 'stato:missing';
+        vista = 'singola';
+        rifaiChips();
+        applicaVista();
+      });
+      riga.append(vedi);
+    }
     if (c.with_depth < c.total && !c.can_propagate) {
       const tutte = el('button', { class: 'ghost' }, `Cerca la depth su tutte le ${c.total}`);
       const stato = el('span', { class: 'hint' }, 'il modulo gira su ogni immagine: qualche minuto');
@@ -497,7 +520,19 @@ async function createDepthViewer(projectId, sampleSize) {
       }
       return;
     }
-    if (!bozza) { riquadro.append(el('p', { class: 'hint' }, 'nessun riquadro su questa immagine')); return; }
+    if (!bozza) {
+      riquadro.append(el('p', { class: 'hint' },
+        r.status === 'missing'
+          ? 'nessun riquadro ancora: stringine uno su un\'immagine dove la depth e\' stata '
+            + 'trovata, e da li\' si applica anche a questa.'
+          : 'nessun riquadro su questa immagine'));
+      return;
+    }
+    if (r.status === 'missing' && !r.box) {
+      riquadro.append(el('div', { class: 'depth-prestito' },
+        `il modulo non ha esaminato questa immagine: il riquadro qui sopra e' quello di `
+        + `cartella, preso da ${modello.from}. Spostalo se serve, poi applicalo.`));
+    }
     const misura = el('span', { class: 'hint' },
       `${bozza.right - bozza.left} x ${bozza.bottom - bozza.top} px`);
     const campi = el('div', { class: 'row' });
@@ -567,8 +602,26 @@ async function createDepthViewer(projectId, sampleSize) {
       type: 'number', step: '0.5', style: 'width:110px',
       value: r.depth_mm != null ? String(r.depth_mm) : '',
     });
-    correzione.append(el('span', { class: 'hint' }, 'depth corretta (mm)'), campo);
-    correzione.append(confermaInDueTempi('Salva la depth', 'vale solo per questa immagine.',
+    const nuova = r.depth_mm == null;
+    correzione.append(
+      el('span', { class: 'hint' }, nuova ? 'depth di questa immagine (mm)' : 'depth corretta (mm)'),
+      campo);
+    // Le depth gia' viste nella cartella: quasi sempre quella giusta e' una di queste, e
+    // sceglierla da un elenco e' piu' svelto e piu' sicuro che riscriverla.
+    const noti = Object.keys(data.values_mm || {})
+      .map(Number).filter((v) => !Number.isNaN(v)).sort((a, b) => a - b);
+    if (nuova && noti.length) {
+      const scorciatoie = el('span', { class: 'row', style: 'gap:4px' },
+        el('span', { class: 'hint' }, 'gia\' nella cartella:'));
+      for (const v of noti.slice(0, 8)) {
+        const b = el('button', { class: 'ghost sq2' }, `${v}`);
+        b.addEventListener('click', () => { campo.value = String(v); campo.dispatchEvent(new Event('input')); });
+        scorciatoie.append(b);
+      }
+      correzione.append(scorciatoie);
+    }
+    correzione.append(confermaInDueTempi(nuova ? 'Indica questa depth' : 'Salva la depth',
+      'vale solo per questa immagine.',
       async () => {
         try {
           await api(`/projects/${projectId}/depth/correct`,
@@ -579,6 +632,27 @@ async function createDepthViewer(projectId, sampleSize) {
           mostra();
         } catch (error) { toast(error.message, true); }
       }));
+    // In blocco sulle immagini che il modulo non ha esaminato: quando la depth e' la
+    // stessa (ed e' il caso normale di una cartella) riscriverla una per una e' solo fatica.
+    const senza = visibili().filter((n) => (byName.get(n) || {}).depth_mm == null);
+    if (senza.length > (nuova ? 1 : 0)) {
+      const altre = nuova ? senza.length - 1 : senza.length;
+      correzione.append(confermaInDueTempi(
+        nuova ? `Assegna anche alle altre ${altre} senza depth`
+              : `Assegna questo valore alle ${altre} senza depth`,
+        `lo stesso valore viene scritto sulle ${senza.length} immagini senza depth fra `
+        + 'quelle elencate ora. Restano correzioni tue: si tolgono una per una.',
+        async () => {
+          const valore = parseFloat(campo.value);
+          if (Number.isNaN(valore)) { toast('scrivi prima la depth in millimetri', true); return; }
+          try {
+            const esito = await api(`/projects/${projectId}/depth/correct`,
+              { body: { names: senza, depth_mm: valore } });
+            toast(`${valore} mm su ${esito.applied} immagini`);
+            await rileggiTutto();
+          } catch (error) { toast(error.message, true); }
+        }));
+    }
     if (r.corrected) {
       correzione.append(confermaInDueTempi('Torna al valore del modulo', 'la correzione viene tolta.',
         async () => {
@@ -598,7 +672,7 @@ async function createDepthViewer(projectId, sampleSize) {
   const chips = el('div', { class: 'ov-chips' });
   const etichetteStato = {
     accepted: 'accettate', review: 'da rivedere', reject: 'scartate',
-    corrected: 'corrette', box: 'dal riquadro',
+    corrected: 'corrette', box: 'dal riquadro', missing: 'senza depth',
   };
   const rifaiChips = () => {
     chips.innerHTML = '';
