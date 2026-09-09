@@ -264,6 +264,13 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
       size: [originalWidth(), originalHeight()],
       boxes: voci,
       caption: scelto ? scelto.label : '',
+      // I box in sola lettura restano tali anche nella lente: il rettangolo col margine e
+      // la proposta della rete sono calcolati, non si trascinano ne' qui ne' li'.
+      onChange: (scelto && !scelto.readonly && boxes[scelto.key]) ? (nuovo) => {
+        boxes[scelto.key] = clampBox({ ...nuovo });
+        paint();
+        if (onChange) onChange(boxes, marginState);
+      } : null,
     };
   }
 

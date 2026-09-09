@@ -249,6 +249,14 @@ async function createDepthViewer(projectId, sampleSize) {
       boxes: box ? [{ box, color: (modes[r.mode] || {}).color || '#3fb950',
                       label: r.depth_mm == null ? 'depth' : `${r.depth_mm} mm` }] : [],
       caption: r.ocr_text ? `letto «${r.ocr_text}»` : '',
+      // Trascinabile solo dove il riquadro si puo' davvero cambiare: sulle immagini dove
+      // la depth viene dalla scala non c'e' un riquadro da spostare.
+      onChange: (box && modificabile()) ? (nuovo) => {
+        bozza = normalizza({ ...nuovo });
+        disegna();
+        disegnaZoom();
+        renderRiquadro();
+      } : null,
     };
   };
 

@@ -38,6 +38,16 @@ const Lente = (() => {
           max-width: 100vw; max-height: calc(100vh - 46px); }
   .riq { position: absolute; border: 2px solid #3fb950; box-sizing: border-box;
          box-shadow: 0 0 0 1px rgba(0,0,0,.75); pointer-events: none; }
+  /* Il riquadro su cui si sta lavorando si trascina anche da qui: e' il posto dove si vede
+     davvero dove cade il bordo, quindi e' il posto dove ha senso spostarlo. */
+  .riq.viva { pointer-events: auto; cursor: move; }
+  .man { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+         border: 2px solid #0d1117; border-radius: 3px; background: #3fb950;
+         pointer-events: auto; }
+  .man.n, .man.s { cursor: ns-resize; }
+  .man.w, .man.e { cursor: ew-resize; }
+  .man.nw, .man.se { cursor: nwse-resize; }
+  .man.ne, .man.sw { cursor: nesw-resize; }
   .riq b { position: absolute; top: -17px; left: -2px; font-size: 11px; font-weight: 600;
            background: #0d1117; padding: 0 3px; white-space: nowrap; }
   #vuoto { padding: 18px; color: #8b949e; }
@@ -89,6 +99,66 @@ const Lente = (() => {
     return [Math.max(0, x0), Math.max(0, y0), Math.min(w, x1), Math.min(h, y1)];
   };
 
+  let trascinando = false;
+  let nodi = [];          // i rettangoli disegnati, in ordine: servono a non rifarli
+
+  /* Il trascinamento dentro alla lente. Il delta si porta in coordinate native dividendo
+     per la scala **misurata**, la stessa con cui il rettangolo e' stato disegnato: se si
+     usasse lo zoom chiesto al server, contro un bordo il riquadro scapperebbe sotto al
+     cursore. Mentre si trascina la finestra del ritaglio non si rifa', se no la striscia
+     si sposterebbe sotto le dita. */
+  const attaccaTrascinamento = (nodo, lato) => {
+    const d = win.document;
+    nodo.addEventListener('pointerdown', (ev) => {
+      if (!ctx || !ctx.onChange) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const img = d.getElementById('crop');
+      const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
+      const partenza = { x: ev.clientX, y: ev.clientY };
+      const box = { ...(ctx.boxes[0] || {}).box };
+      const [w, h] = ctx.size || [0, 0];
+      trascinando = true;
+      nodo.setPointerCapture(ev.pointerId);
+      const muovi = (e) => {
+        const dx = Math.round((e.clientX - partenza.x) / (s || 1));
+        const dy = Math.round((e.clientY - partenza.y) / (s || 1));
+        const n = { ...box };
+        if (lato === 'move') {
+          // Il riquadro si sposta intero: i lati si limitano insieme, se no contro un bordo
+          // si schiaccerebbe invece di fermarsi.
+          const largo = box.right - box.left;
+          const alto = box.bottom - box.top;
+          n.left = Math.max(0, Math.min(box.left + dx, (w || box.right) - largo));
+          n.top = Math.max(0, Math.min(box.top + dy, (h || box.bottom) - alto));
+          n.right = n.left + largo;
+          n.bottom = n.top + alto;
+        } else {
+          if (lato.includes('w')) n.left = Math.min(box.left + dx, box.right - 2);
+          if (lato.includes('e')) n.right = Math.max(box.right + dx, box.left + 2);
+          if (lato.includes('n')) n.top = Math.min(box.top + dy, box.bottom - 2);
+          if (lato.includes('s')) n.bottom = Math.max(box.bottom + dy, box.top + 2);
+          n.left = Math.max(0, n.left);
+          n.top = Math.max(0, n.top);
+          if (w) n.right = Math.min(n.right, w);
+          if (h) n.bottom = Math.min(n.bottom, h);
+        }
+        ctx.onChange({ left: Math.round(n.left), top: Math.round(n.top),
+                       right: Math.round(n.right), bottom: Math.round(n.bottom) });
+      };
+      const molla = () => {
+        trascinando = false;
+        nodo.removeEventListener('pointermove', muovi);
+        nodo.removeEventListener('pointerup', molla);
+        nodo.removeEventListener('pointercancel', molla);
+        disegna();
+      };
+      nodo.addEventListener('pointermove', muovi);
+      nodo.addEventListener('pointerup', molla);
+      nodo.addEventListener('pointercancel', molla);
+    });
+  };
+
   const fuoriFinestra = (box) => !finestra
     || box.left < finestra[0] + 1 || box.right > finestra[2] - 1
     || box.top < finestra[1] + 1 || box.bottom > finestra[3] - 1;
@@ -109,7 +179,9 @@ const Lente = (() => {
     scena.style.display = ''; vuoto.style.display = 'none';
     const size = ctx.size || [img.naturalWidth || 1, img.naturalHeight || 1];
 
-    if (nomeInFinestra !== ctx.name || fuoriFinestra(principale.box)) {
+    // Mentre si trascina la finestra resta ferma: rifarla farebbe scappare la striscia
+    // sotto al cursore. Fuori dal trascinamento si insegue il riquadro come prima.
+    if (!trascinando && (nomeInFinestra !== ctx.name || fuoriFinestra(principale.box))) {
       finestra = nuovaFinestra(principale.box, size);
       nomeInFinestra = ctx.name;
       const largo = Math.max(1, finestra[2] - finestra[0]);
@@ -129,30 +201,64 @@ const Lente = (() => {
     const larghezzaVista = img.clientWidth || 0;
     if (larghezzaVista < 4) return;   // si ridisegna da solo al `load`
     const s = larghezzaVista / Math.max(1, finestra[2] - finestra[0]);
+    const dentro = (ctx.boxes || []).filter((v) => v.box);
+
+    const posiziona = (nodo, box) => {
+      nodo.style.left = `${(box.left - finestra[0]) * s}px`;
+      nodo.style.top = `${(box.top - finestra[1]) * s}px`;
+      nodo.style.width = `${(box.right - box.left) * s}px`;
+      nodo.style.height = `${(box.bottom - box.top) * s}px`;
+    };
+
+    // Mentre si trascina i rettangoli si spostano, non si rifanno: rifarli butterebbe via
+    // il nodo che ha la presa del puntatore, e il trascinamento morirebbe al primo pixel.
+    if (trascinando && nodi.length === dentro.length) {
+      dentro.forEach((voce, k) => posiziona(nodi[k], voce.box));
+      scrividettaglio(d, principale.box);
+      return;
+    }
+
     for (const vecchio of [...scena.querySelectorAll('.riq')]) vecchio.remove();
-    for (const voce of (ctx.boxes || [])) {
-      if (!voce.box) continue;
+    nodi = [];
+    for (const voce of dentro) {
+      const primo = voce === principale;
       const n = d.createElement('div');
-      n.className = 'riq';
+      n.className = 'riq' + (primo && ctx.onChange ? ' viva' : '');
       n.style.borderColor = voce.color || '#3fb950';
-      n.style.left = `${(voce.box.left - finestra[0]) * s}px`;
-      n.style.top = `${(voce.box.top - finestra[1]) * s}px`;
-      n.style.width = `${(voce.box.right - voce.box.left) * s}px`;
-      n.style.height = `${(voce.box.bottom - voce.box.top) * s}px`;
+      posiziona(n, voce.box);
       if (voce.label) {
         const b = d.createElement('b');
         b.textContent = voce.label;
         b.style.color = voce.color || '#3fb950';
         n.append(b);
       }
+      if (primo && ctx.onChange) {
+        attaccaTrascinamento(n, 'move');
+        for (const [lato, sx, sy] of [['nw', 0, 0], ['n', 0.5, 0], ['ne', 1, 0],
+                                      ['w', 0, 0.5], ['e', 1, 0.5],
+                                      ['sw', 0, 1], ['s', 0.5, 1], ['se', 1, 1]]) {
+          const m = d.createElement('div');
+          m.className = `man ${lato}`;
+          m.style.left = `${sx * 100}%`;
+          m.style.top = `${sy * 100}%`;
+          m.style.background = voce.color || '#3fb950';
+          attaccaTrascinamento(m, lato);
+          n.append(m);
+        }
+      }
       scena.append(n);
+      nodi.push(n);
     }
-    const b = principale.box;
     d.getElementById('titolo').textContent = (ctx.name || '').split('/').pop();
+    scrividettaglio(d, principale.box);
+  };
+
+  const scrividettaglio = (d, b) => {
     d.getElementById('dettaglio').textContent =
       `${b.right - b.left} x ${b.bottom - b.top} px · top ${b.top} left ${b.left} `
       + `bottom ${b.bottom} right ${b.right}`
-      + (ctx.caption ? ` · ${ctx.caption}` : '');
+      + (ctx.caption ? ` · ${ctx.caption}` : '')
+      + (ctx.onChange ? ' · trascinabile da qui' : '');
   };
 
   const aggiorna = (nuovo) => { ctx = nuovo; disegna(); };
