@@ -1052,6 +1052,14 @@ img.depth-crop {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+/* L'anteprima grande al passaggio del mouse sulle strisce L/T. */
+.piani-lente {
+  position: fixed; z-index: 60; pointer-events: none;
+  border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+  background: #000; box-shadow: 0 10px 30px rgba(0, 0, 0, .55);
+}
+.piani-lente img { display: block; width: 420px; max-height: 320px; object-fit: contain; }
+
 /* Il passo del righello e la sua verifica con la depth confermata. */
 .scala-passo {
   margin: 6px 0;

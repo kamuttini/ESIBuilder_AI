@@ -159,6 +159,9 @@ function renderPanel() {
   // La lente appartiene alla sezione che la usa: cambiando pannello quella di prima non c'e'
   // piu', e continuare a trascinarci dentro vorrebbe dire scrivere su un pannello morto.
   if (typeof Lente !== 'undefined') Lente.sospendi();
+  // L'anteprima al passaggio del mouse vive attaccata al body: cambiando sezione va tolta,
+  // se no resta appesa sopra a una pagina che non la riguarda piu'.
+  document.querySelectorAll('.piani-lente').forEach((n) => n.remove());
   panel.innerHTML = '';
   const step = state.status.find((s) => s.id === state.step);
   if (!step) return;
@@ -515,6 +518,33 @@ function panelImport(panel) {
           renderPiani();
         } catch (errore) { toast(errore.message, true); }
       };
+      /* L'anteprima grande al passaggio del mouse. I francobolli servono a vedere quante
+         sono e in che fila stanno; per giudicare *se* una e' L o T serve guardarla, e
+         aprirla ogni volta sarebbe un giro lungo per una domanda di un secondo. */
+      // Uno solo, riusato: `renderPiani` gira a ogni correzione, e crearne uno ogni volta
+      // ne lasciava una pila attaccata al body.
+      const lente = document.querySelector('.piani-lente')
+        || document.body.appendChild(el('div', { class: 'piani-lente' }, el('img', { alt: '' })));
+      lente.style.display = 'none';
+      const mostraLente = (nome, evento) => {
+        const img = lente.querySelector('img');
+        const voluta = `/api/projects/${state.projectId}/image`
+          + `?name=${encodeURIComponent(nome)}&w=760`;
+        if (img.getAttribute('src') !== voluta) img.setAttribute('src', voluta);
+        lente.style.display = 'block';
+        // Si mette accanto al cursore, e si sposta dall'altra parte se sborderebbe: una
+        // anteprima tagliata dal bordo dello schermo non fa vedere proprio la parte che
+        // interessa.
+        const largo = 420, alto = 320;
+        let x = evento.clientX + 18;
+        let y = evento.clientY + 18;
+        if (x + largo > window.innerWidth) x = evento.clientX - largo - 18;
+        if (y + alto > window.innerHeight) y = Math.max(8, window.innerHeight - alto - 8);
+        lente.style.left = `${Math.max(8, x)}px`;
+        lente.style.top = `${y}px`;
+      };
+      const nascondiLente = () => { lente.style.display = 'none'; };
+
       const fila = (piano) => {
         const nomi = tutte.filter((n) => dettoDa(n) === piano).sort();
         const box = el('div', { class: 'piani-fila' });
@@ -533,6 +563,9 @@ function panelImport(panel) {
           }));
           cella.append(el('span', {}, nome.split('/').pop()));
           cella.addEventListener('click', () => sposta(nome, altro));
+          cella.addEventListener('mouseenter', (e) => mostraLente(nome, e));
+          cella.addEventListener('mousemove', (e) => mostraLente(nome, e));
+          cella.addEventListener('mouseleave', nascondiLente);
           strip.append(cella);
         }
         box.append(strip);
