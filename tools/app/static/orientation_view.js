@@ -155,6 +155,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     if (busta) voci.push({ box: busta, color: GROUP_COLORS[gruppo] || '#8b949e',
                            label: `envelope ${gruppo}` });
     return {
+      source: 'orientamento',
       projectId, name: names[index], size: [size[0] || 0, size[1] || 0], boxes: voci,
       caption: modificaMarker ? 'stringilo sul glifo'
         : (row ? `score ${row.score}` : 'nessun marker'),

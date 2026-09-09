@@ -245,6 +245,7 @@ async function createDepthViewer(projectId, sampleSize) {
     const r = byName.get(names[index]) || {};
     const box = (modificabile() ? bozza : r.box) || r.box;
     return {
+      source: 'depth',
       projectId, name: names[index], size: nativo(),
       boxes: box ? [{ box, color: (modes[r.mode] || {}).color || '#3fb950',
                       label: r.depth_mm == null ? 'depth' : `${r.depth_mm} mm` }] : [],

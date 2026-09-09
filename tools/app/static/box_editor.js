@@ -264,6 +264,7 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
       voci.push({ box: boxes[spec.key], color: spec.color, label: spec.label });
     }
     return {
+      source: `box:${imageName || ''}`,
       projectId, name: imageName,
       size: [originalWidth(), originalHeight()],
       boxes: voci,

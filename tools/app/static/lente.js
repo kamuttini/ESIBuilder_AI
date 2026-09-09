@@ -23,7 +23,14 @@ const Lente = (() => {
   let finestraManuale = false;  // la vista l'ha spostata lei: non inseguire piu' la mira
   let latoScelto = null;        // il bordo che le frecce muovono
   let miraScelta = '';          // quale bersaglio della barra e' acceso
+  let padrone = '';             // quale sezione la sta usando
+  let sospesa = false;          // la sezione e' cambiata e la nuova non si e' ancora fatta viva
+  let ritaglioRotto = '';       // il ritaglio che non si e' caricato, per non ridisegnarci sopra
   let zoomServito = 0;      // l'ingrandimento gia' chiesto al server, per non richiederlo
+
+  const NOMI_LATO = { n: 'bordo alto', s: 'bordo basso', w: 'bordo sx', e: 'bordo dx',
+                      nw: 'angolo ↖', ne: 'angolo ↗', sw: 'angolo ↙', se: 'angolo ↘',
+                      move: 'tutto il riquadro' };
 
   const viva = () => !!(win && !win.closed && win.document && win.document.getElementById('crop'));
 
@@ -93,7 +100,16 @@ const Lente = (() => {
                       font-size: 11px; font-weight: 600; color: #0d1117;
                       background: currentColor; padding: 0 3px; white-space: nowrap; }
   #vuoto { padding: 18px; color: #8b949e; }
+  /* La sezione e' cambiata: quello che si vede e' di prima. Dirlo e' meglio che lasciare
+     credere che si stia guardando la sezione nuova - e nel frattempo si smette di poterci
+     lavorare, se no si scriverebbe su un pannello che non c'e' piu'. */
+  #sospeso { display: none; padding: 7px 10px; background: rgba(210, 153, 34, .14);
+             border-bottom: 1px solid #d29922; color: #d29922; font-size: 12px; }
+  body.sospesa #scena { opacity: .45; pointer-events: none; }
+  body.sospesa #sospeso { display: block; }
 </style></head><body>
+<div id="sospeso">questa e' la sezione di prima: apri la lente dalla sezione in cui stai
+lavorando, oppure torna indietro.</div>
 <div id="mire"></div>
 <div id="testa"><span id="titolo">lente</span>
   <span id="zoombar"><button id="meno" title="rimpicciolisci (rotella)">\u2212</button>
@@ -199,7 +215,7 @@ const Lente = (() => {
      rifinitura: si guarda ingrandito e si aggiusta senza trascinare. */
   const attaccaTasti = (d) => {
     d.addEventListener('keydown', (ev) => {
-      if (!ctx || !ctx.onChange || !latoScelto) return;
+      if (!ctx || !ctx.onChange || !latoScelto || sospesa) return;
       const passo = ev.shiftKey ? 10 : 1;
       const delta = { ArrowLeft: [-passo, 0], ArrowRight: [passo, 0],
                       ArrowUp: [0, -passo], ArrowDown: [0, passo] }[ev.key];
@@ -240,7 +256,7 @@ const Lente = (() => {
     // La finestra puo' essere ridimensionata o spostata su un altro schermo: il ritaglio
     // si rifa' per riempirla, se no si resta con l'ingrandimento della vecchia dimensione.
     win.addEventListener('resize', () => { finestra = null; disegna(); });
-    win.addEventListener('unload', () => { win = null; });
+    win.addEventListener('unload', () => { win = null; sincronizzaBottoni(); });
     const d = win.document;
     attaccaSpostamento(d.getElementById('scena'));
     attaccaCoordinate(d.getElementById('scena'));
@@ -299,7 +315,7 @@ const Lente = (() => {
   const attaccaTrascinamento = (nodo, lato) => {
     const d = win.document;
     nodo.addEventListener('pointerdown', (ev) => {
-      if (!ctx || !ctx.onChange) return;
+      if (!ctx || !ctx.onChange || sospesa) return;
       ev.preventDefault();
       ev.stopPropagation();
       const img = d.getElementById('crop');
@@ -358,7 +374,6 @@ const Lente = (() => {
     const d = win.document;
     const img = d.getElementById('crop');
     const scena = d.getElementById('scena');
-    const vuoto = d.getElementById('vuoto');
     const principale = (ctx.boxes || []).find((b) => b.box) || null;
     // Cosa inquadrare: di solito il riquadro, ma chi chiama puo' dire un'altra zona. Sul
     // rettangolo ecografico il riquadro e' mezzo schermo - inquadrarlo sarebbe non
@@ -366,12 +381,27 @@ const Lente = (() => {
     // la corda del ventaglio.
     const mira = ctx.focus || (principale && principale.box) || null;
     if (!mira) {
-      scena.style.display = 'none'; vuoto.style.display = '';
+      scena.style.display = 'none';
+      const v = d.getElementById('vuoto');
+      v.style.display = '';
+      v.textContent = 'niente da ingrandire: scegli un riquadro nella pagina principale.';
       d.getElementById('titolo').textContent = ctx.name || 'lente';
       d.getElementById('dettaglio').textContent = '';
       return;
     }
-    scena.style.display = ''; vuoto.style.display = 'none';
+    // Un ritaglio che non e' arrivato: si dice, e non si disegna niente sopra. Rimettere
+    // la scena a ogni ridisegno lasciava i rettangoli appoggiati sul vuoto.
+    if (ritaglioRotto && ritaglioRotto === ctx.name) {
+      scena.style.display = 'none';
+      const v = d.getElementById('vuoto');
+      v.style.display = '';
+      v.textContent = `non riesco a caricare ${ritaglioRotto.split('/').pop()}: l'immagine `
+        + 'non e\' raggiungibile (disco scollegato o cartella spostata).';
+      d.getElementById('titolo').textContent = (ctx.name || '').split('/').pop();
+      return;
+    }
+    scena.style.display = '';
+    d.getElementById('vuoto').style.display = 'none';
     const size = ctx.size || [img.naturalWidth || 1, img.naturalHeight || 1];
 
     // Mentre si trascina la finestra resta ferma: rifarla farebbe scappare la striscia
@@ -388,6 +418,7 @@ const Lente = (() => {
     if (!trascinando && !finestraManuale
         && (nomeInFinestra !== ctx.name || miraCambiata || fuoriFinestra(mira))) {
       finestra = nuovaFinestra(mira, size);
+      if (nomeInFinestra !== ctx.name) ritaglioRotto = '';
       nomeInFinestra = ctx.name;
       miraInFinestra = { ...mira };
       zoomServito = 0;
@@ -403,7 +434,10 @@ const Lente = (() => {
       zoomServito = dalServer;
       // Il ridisegno dopo il caricamento si aggancia una volta sola, qui: metterlo nel
       // ramo "non ho ancora una larghezza" ne accumulava uno per ogni trascinamento.
-      img.onload = () => disegna();
+      img.onload = () => { ritaglioRotto = ''; disegna(); };
+      // Un ritaglio che non arriva (immagine spostata, volume scollegato) lasciava i
+      // rettangoli disegnati sul nulla: sembrava tutto a posto e non lo era.
+      img.onerror = () => { ritaglioRotto = ctx.name || '?'; disegna(); };
       img.src = `/api/projects/${ctx.projectId}/crop?name=${encodeURIComponent(ctx.name)}`
         + `&raw=1&zoom=${dalServer}&x0=${finestra[0]}&y0=${finestra[1]}`
         + `&x1=${finestra[2]}&y1=${finestra[3]}`;
@@ -520,7 +554,14 @@ const Lente = (() => {
   const disegnaMire = (d) => {
     const barra = d.getElementById('mire');
     const elenco = ctx.targets || [];
-    if (!elenco.length) { barra.style.display = 'none'; return; }
+    if (!elenco.length) {
+      // Svuotarla, non solo nasconderla: i bersagli di una sezione non devono restare
+      // appesi dentro a un'altra, nemmeno invisibili.
+      barra.style.display = 'none';
+      barra.innerHTML = '';
+      barra.dataset.firma = '';
+      return;
+    }
     barra.style.display = '';
     const firma = elenco.map((v) => v.id).join('|') + '#' + miraScelta;
     if (barra.dataset.firma === firma) return;
@@ -536,6 +577,9 @@ const Lente = (() => {
         latoScelto = voce.side || null;
         miraInFinestra = null;      // costringe a rifare la finestra su questo bersaglio
         if (ctx.onTarget) ctx.onTarget(voce);
+        // Il fuoco resterebbe sul chip, e le frecce scorrerebbero la finestra invece di
+        // muovere il lato.
+        d.body.focus();
         disegna(true);
       });
       barra.append(b);
@@ -547,25 +591,81 @@ const Lente = (() => {
       `${b.right - b.left} x ${b.bottom - b.top} px · top ${b.top} left ${b.left} `
       + `bottom ${b.bottom} right ${b.right}`
       + (ctx.caption ? ` · ${ctx.caption}` : '')
-      + (ctx.onChange ? ' · trascinabile da qui' : '');
+      + (ctx.onChange
+        ? (latoScelto
+          ? ` · frecce: ${NOMI_LATO[latoScelto] || latoScelto} (shift = 10 px)`
+          : ' · trascina un lato per muoverlo, poi le frecce')
+        : '');
   };
 
-  const aggiorna = (nuovo) => { ctx = nuovo; disegna(); };
+  /* Il contesto arriva da una sezione, e ogni sezione ha il suo `source`. Cambiandolo si
+     riparte da zero: la vista di prima inquadrava un'altra cosa, il bersaglio acceso non
+     esiste piu', il lato scelto nemmeno. Tenerli era il motivo per cui la lente, passando
+     da una sezione all'altra, restava a meta' fra le due. */
+  const aggiorna = (nuovo) => {
+    const chi = (nuovo && nuovo.source) || '';
+    if (chi !== padrone) {
+      padrone = chi;
+      finestra = null;
+      miraInFinestra = null;
+      nomeInFinestra = '';
+      miraScelta = '';
+      latoScelto = null;
+      finestraManuale = false;
+      zoomServito = 0;
+      nodi = [];
+      const d = viva() ? win.document : null;
+      if (d) d.getElementById('mire').dataset.firma = '';
+    }
+    sospesa = false;
+    if (viva()) win.document.body.classList.remove('sospesa');
+    ctx = nuovo;
+    disegna();
+  };
+
+  /* La pagina ha cambiato sezione. Non si sa ancora se la nuova usera' la lente, quindi non
+     si chiude niente: si smette di poterci lavorare e lo si dice. Se la nuova sezione la
+     usa, il suo primo disegno toglie l'avviso da solo. */
+  const sospendi = () => {
+    if (!ctx) return;
+    sospesa = true;
+    if (viva()) win.document.body.classList.add('sospesa');
+  };
 
   /* Il tasto che la apre. `window.open` vuole un gesto dell'utente: da qui in poi gli
      aggiornamenti arrivano da soli. */
+  /* I tasti che l'hanno aperta: la loro scritta deve dire com'e' adesso. Restava «Lente
+     aperta» anche dopo averla chiusa, e allora il tasto sembrava non fare piu' niente. */
+  const bottoni = [];
+  const sincronizzaBottoni = () => {
+    const aperta = viva();
+    for (const [b, testo] of bottoni) {
+      if (!b.isConnected) continue;
+      b.textContent = aperta ? 'Lente aperta — portala sull\'altro schermo' : testo;
+    }
+  };
+
   const bottone = (dammiContesto, etichetta) => {
-    const b = el('button', { class: 'ghost' }, etichetta || 'Lente su un\'altra finestra');
+    const testo = etichetta || 'Lente su un\'altra finestra';
+    const b = el('button', { class: 'ghost' }, testo);
     b.addEventListener('click', () => {
       ctx = dammiContesto();
+      padrone = (ctx && ctx.source) || '';
       if (!apri()) {
         toast('il browser ha bloccato la finestra: permetti i popup per questo sito', true);
         return;
       }
-      b.textContent = 'Lente aperta — portala sull\'altro schermo';
+      sincronizzaBottoni();
     });
+    bottoni.push([b, testo]);
+    // I tasti di pannelli chiusi non servono piu': si tengono solo quelli ancora in pagina.
+    if (bottoni.length > 24) {
+      const vivi = bottoni.filter(([n]) => n.isConnected);
+      bottoni.length = 0;
+      bottoni.push(...vivi);
+    }
     return b;
   };
 
-  return { apri, chiudi, aggiorna, viva, bottone };
+  return { apri, chiudi, aggiorna, sospendi, viva, bottone };
 })();

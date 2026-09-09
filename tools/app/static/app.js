@@ -156,6 +156,9 @@ const BLOCK_HINT = `un blocco e' {"top":6,"left":23,"bottom":49,"right":166,"che
 
 function renderPanel() {
   const panel = $('#panel');
+  // La lente appartiene alla sezione che la usa: cambiando pannello quella di prima non c'e'
+  // piu', e continuare a trascinarci dentro vorrebbe dire scrivere su un pannello morto.
+  if (typeof Lente !== 'undefined') Lente.sospendi();
   panel.innerHTML = '';
   const step = state.status.find((s) => s.id === state.step);
   if (!step) return;
@@ -932,6 +935,7 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     if (corde) bersagli.push({ id: 'corde', label: `corda ${corrente}`, box: corde });
 
     return {
+      source: 'rect',
       projectId: state.projectId,
       name: image.title || '',
       size: [(size && size[0]) || 0, (size && size[1]) || 0],
