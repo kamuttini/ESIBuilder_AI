@@ -539,16 +539,22 @@ function panelImport(panel) {
     const dettoDa = (nome) => correzioni[nome] || (piani[nome] || {}).plane || '?';
     const tutte = Object.keys(piani);
     if (tutte.length) {
-      const sposta = async (nome, verso) => {
+      const ricontaEDisegna = () => {
+        const c = { L: 0, T: 0, '?': 0 };
+        for (const n of tutte) c[dettoDa(n)] = (c[dettoDa(n)] || 0) + 1;
+        value.plane_counts = c;
+        renderPiani();
+      };
+      const sposta = async (nomi, verso) => {
+        const elenco = Array.isArray(nomi) ? nomi : [nomi];
+        if (!elenco.length) return;
         try {
           await api(`/projects/${state.projectId}/planes/correct`,
-            { body: { name: nome, plane: verso } });
-          correzioni[nome] = verso;
+            { body: { names: elenco, plane: verso } });
+          for (const n of elenco) correzioni[n] = verso;
           value.plane_corrections = correzioni;
-          const c = { L: 0, T: 0, '?': 0 };
-          for (const n of tutte) c[dettoDa(n)] = (c[dettoDa(n)] || 0) + 1;
-          value.plane_counts = c;
-          renderPiani();
+          scelte.clear();
+          ricontaEDisegna();
         } catch (errore) { toast(errore.message, true); }
       };
       /* L'anteprima grande al passaggio del mouse. I francobolli servono a vedere quante
@@ -578,24 +584,65 @@ function panelImport(panel) {
       };
       const nascondiLente = () => { lente.style.display = 'none'; };
 
+      /* La selezione. Clic sceglie, shift+clic prende tutto quello che sta in mezzo: quando
+         un'acquisizione intera e' finita dalla parte sbagliata sono venti immagini di
+         fila, e prenderle una per una e' venti volte lo stesso gesto. Il perno e' l'ultima
+         toccata, come in qualunque elenco. */
+      const scelte = state.__pianiScelte || (state.__pianiScelte = new Set());
+      let perno = state.__pianiPerno || null;
+      const clicCella = (nome, ordineFila, evento) => {
+        if (evento.shiftKey && perno && ordineFila.includes(perno)) {
+          const da = ordineFila.indexOf(perno);
+          const a2 = ordineFila.indexOf(nome);
+          for (const n of ordineFila.slice(Math.min(da, a2), Math.max(da, a2) + 1)) scelte.add(n);
+        } else if (scelte.has(nome)) {
+          scelte.delete(nome);
+        } else {
+          scelte.add(nome);
+        }
+        perno = nome;
+        state.__pianiPerno = nome;
+        renderPiani();
+      };
+
       const fila = (piano) => {
         const nomi = tutte.filter((n) => dettoDa(n) === piano).sort();
+        const altro = piano === 'T' ? 'L' : 'T';
         const box = el('div', { class: 'piani-fila' });
-        box.append(el('div', { class: 'hint' },
+        const scelteQui = nomi.filter((n) => scelte.has(n));
+        const testa = el('div', { class: 'row', style: 'margin:0 0 2px' });
+        testa.append(el('span', { class: 'hint' },
           `${piano === '?' ? 'senza piano' : piano} — ${nomi.length} immagini`
           + (piano === '?' ? ' (restano con la L)' : '')));
+        if (nomi.length) {
+          const tutta = el('button', { class: 'ghost sq2' },
+            scelteQui.length === nomi.length ? 'deseleziona la fila' : 'seleziona la fila');
+          tutta.addEventListener('click', () => {
+            if (scelteQui.length === nomi.length) for (const n of nomi) scelte.delete(n);
+            else for (const n of nomi) scelte.add(n);
+            renderPiani();
+          });
+          testa.append(tutta);
+        }
+        box.append(testa);
         const strip = el('div', { class: 'piani-strip' });
         for (const nome of nomi) {
-          const altro = piano === 'T' ? 'L' : 'T';
-          const cella = el('div', { class: 'piani-cella' + (correzioni[nome] ? ' corretta' : '') });
+          const cella = el('div', { class: 'piani-cella'
+            + (correzioni[nome] ? ' corretta' : '') + (scelte.has(nome) ? ' scelta' : '') });
           cella.append(el('img', {
             loading: 'lazy',
             src: `/api/projects/${state.projectId}/image`
               + `?name=${encodeURIComponent(nome)}&w=150`,
-            alt: nome, title: `${nome}\nclicca per spostarla in ${altro}`,
+            alt: nome,
+            title: `${nome}\nclic: scegli · shift+clic: fino a qui · doppio clic: grande`,
           }));
+          // Il pulsantino sposta questa e basta, senza passare dalla selezione: per una
+          // sola immagine e' il gesto piu' corto.
+          const flip = el('button', { class: 'piani-flip', title: `porta in ${altro}` }, `→${altro}`);
+          flip.addEventListener('click', (ev) => { ev.stopPropagation(); sposta(nome, altro); });
+          cella.append(flip);
           cella.append(el('span', {}, nome.split('/').pop()));
-          cella.addEventListener('click', () => sposta(nome, altro));
+          cella.addEventListener('click', (ev) => clicCella(nome, nomi, ev));
           cella.addEventListener('dblclick', (ev) => { ev.preventDefault(); aSchermoIntero(nome); });
           cella.addEventListener('mouseenter', (e) => mostraLente(nome, e));
           cella.addEventListener('mousemove', (e) => mostraLente(nome, e));
@@ -684,11 +731,24 @@ function panelImport(panel) {
       }
       const aperturaPiena = el('button', { class: 'ghost' }, 'Guardale a tutto schermo');
       aperturaPiena.addEventListener('click', () => aSchermoIntero(tutte[0]));
-      pianiBox.append(el('div', { class: 'row', style: 'margin-top:10px' }, aperturaPiena,
-        el('span', { class: 'hint' },
-          'un clic sposta l\'immagine nell\'altro piano, doppio clic la apre grande. '
-          + 'A tutto schermo: frecce per scorrere, L e T per assegnare, Esc per chiudere. '
-          + 'Le corrette hanno il bordo azzurro e comandano sullo sdoppiamento.')));
+      const comandi = el('div', { class: 'row', style: 'margin-top:10px' }, aperturaPiena);
+      if (scelte.size) {
+        const quante = scelte.size;
+        for (const verso of ['L', 'T']) {
+          const b2 = el('button', {}, `Porta le ${quante} scelte in ${verso}`);
+          b2.addEventListener('click', () => sposta([...scelte], verso));
+          comandi.append(b2);
+        }
+        const via = el('button', { class: 'ghost' }, 'deseleziona');
+        via.addEventListener('click', () => { scelte.clear(); renderPiani(); });
+        comandi.append(via);
+      }
+      pianiBox.append(comandi);
+      pianiBox.append(el('p', { class: 'hint', style: 'margin:4px 0 0' },
+        'un clic sceglie, shift+clic prende tutto quello che sta in mezzo, «→L»/«→T» '
+        + 'sposta la singola, doppio clic la apre grande. A tutto schermo: frecce per '
+        + 'scorrere, L e T per assegnare, Esc per chiudere. Le corrette hanno il bordo '
+        + 'azzurro e comandano sullo sdoppiamento.'));
       pianiBox.append(gallerie);
     }
   };

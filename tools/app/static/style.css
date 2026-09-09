@@ -1052,8 +1052,22 @@ img.depth-crop {
   flex: 0 0 auto; width: 118px; cursor: pointer; border: 2px solid transparent;
   border-radius: 6px; padding: 2px; text-align: center;
 }
+.piani-cella { position: relative; }
 .piani-cella:hover { border-color: var(--accent); background: var(--panel-2); }
 .piani-cella.corretta { border-color: #40d0ff; }
+/* Scelta: si vede da lontano, perche' si lavora a colpo d'occhio su file di venti. */
+.piani-cella.scelta { border-color: #1f6feb; background: rgba(31, 111, 235, .22); }
+.piani-cella.scelta::after {
+  content: '✓'; position: absolute; top: 4px; left: 6px; font-size: 12px; font-weight: 700;
+  color: #fff; text-shadow: 0 0 3px #000;
+}
+.piani-flip {
+  position: absolute; top: 3px; right: 4px; padding: 0 5px; font-size: 10.5px;
+  background: rgba(13, 17, 23, .82); color: var(--muted); border: 1px solid var(--line);
+  border-radius: 4px; cursor: pointer; opacity: 0;
+}
+.piani-cella:hover .piani-flip { opacity: 1; }
+.piani-flip:hover { color: var(--text); border-color: var(--accent); }
 .piani-cella img { width: 100%; display: block; border-radius: 4px; }
 .piani-cella span {
   display: block; font-size: 10.5px; color: var(--muted);

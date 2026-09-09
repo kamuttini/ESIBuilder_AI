@@ -1408,27 +1408,35 @@ def _run_planes(job_id: str, project_id: str) -> None:
 
 @app.post("/api/projects/<project_id>/planes/correct")
 def api_planes_correct(project_id: str):
-    """Correggi a mano il piano di un'immagine."""
+    """Correggi a mano il piano di una o piu' immagini.
+
+    Quando la divisione sbaglia, di solito sbaglia in blocco - un'acquisizione intera
+    finita dalla parte storta - e correggerle una per una e' N volte lo stesso gesto.
+    """
     _project(project_id)
     payload = _payload()
-    nome = str(payload.get("name") or "").strip()
+    nomi = [str(n).strip() for n in (payload.get("names") or []) if str(n).strip()]
+    if not nomi:
+        uno = str(payload.get("name") or "").strip()
+        nomi = [uno] if uno else []
     piano = str(payload.get("plane") or "").strip().upper()
-    if not nome:
+    if not nomi:
         return jsonify({"error": "manca l'immagine"}), 400
     if not payload.get("reset") and piano not in ("L", "T"):
         return jsonify({"error": "il piano puo' essere L o T"}), 400
 
     def mutate(_p: Project, value: Dict) -> Dict:
         fatte = dict(value.get("plane_corrections") or {})
-        if payload.get("reset"):
-            fatte.pop(nome, None)
-        else:
-            fatte[nome] = piano
+        for nome in nomi:
+            if payload.get("reset"):
+                fatte.pop(nome, None)
+            else:
+                fatte[nome] = piano
         value["plane_corrections"] = fatte
         return value
 
     _write_step(project_id, "import", mutate, status="corrected", source="user")
-    return jsonify({"saved": True})
+    return jsonify({"saved": True, "count": len(nomi)})
 
 
 @app.post("/api/projects/<project_id>/split")
