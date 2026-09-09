@@ -554,6 +554,11 @@ function panelImport(panel) {
           for (const n of elenco) correzioni[n] = verso;
           value.plane_corrections = correzioni;
           scelte.clear();
+          // La correzione e' gia' scritta nel progetto: dirlo evita di cercare un tasto
+          // «salva» che non c'e', e di non fidarsi di quello che si e' appena fatto.
+          toast(elenco.length === 1
+            ? `salvata: ${elenco[0].split('/').pop()} in ${verso}`
+            : `salvate: ${elenco.length} immagini in ${verso}`);
           ricontaEDisegna();
         } catch (errore) { toast(errore.message, true); }
       };
@@ -747,8 +752,18 @@ function panelImport(panel) {
       pianiBox.append(el('p', { class: 'hint', style: 'margin:4px 0 0' },
         'un clic sceglie, shift+clic prende tutto quello che sta in mezzo, «→L»/«→T» '
         + 'sposta la singola, doppio clic la apre grande. A tutto schermo: frecce per '
-        + 'scorrere, L e T per assegnare, Esc per chiudere. Le corrette hanno il bordo '
-        + 'azzurro e comandano sullo sdoppiamento.'));
+        + 'scorrere, L e T per assegnare, Esc per chiudere.'));
+      // Due cose diverse, e confonderle fa cercare un tasto «salva» che non esiste.
+      const quante = Object.keys(correzioni).length;
+      pianiBox.append(el('p', { class: 'hint', style: 'margin:2px 0 0' },
+        quante
+          ? `le tue ${quante} correzioni sono gia' salvate nel progetto (bordo azzurro). `
+          : 'ogni correzione si salva da sola nel momento in cui la fai. '));
+      pianiBox.append(el('p', { class: 'hint', style: 'margin:2px 0 0' },
+        gia
+          ? 'Per portarle nei due progetti premi «Conferma la divisione» qui sopra: '
+            + 'senza quello, i progetti restano com\'erano.'
+          : 'Per creare i due progetti premi «Sdoppia» qui sopra.'));
       pianiBox.append(gallerie);
     }
   };
