@@ -599,11 +599,32 @@ def _marker_vendor_exclusion(project: Project, margin_fraction: float = 0.75) ->
     }
 
 
+MODULI_AVANZATI = ("orientamento", "depth", "scala")
+
+
+def _righe_depth_dal_disco(project: Project) -> List[Dict]:
+    """Le righe del modulo depth come le ha lasciate l'ultima volta che e' girato."""
+    stage = _depth_stage_dir(project)
+    if stage is None:
+        return []
+    import csv as _csv
+
+    percorso = stage / "rect_depth_autonomous_predictions.csv"
+    if not percorso.is_file():
+        return []
+    with percorso.open("r", encoding="utf-8", newline="") as handle:
+        return list(_csv.DictReader(handle))
+
+
 def _run_advanced_stages(
     job_id: str, project_id: str, sample: int, marker_min_score: float = 0.55,
     base_result: Optional[Dict] = None,
+    quali: Sequence[str] = MODULI_AVANZATI,
 ) -> None:
-    """Orientation marker, depth and scale: the three modules, run as the pipeline runs them."""
+    """Orientation marker, depth and scale, run as the pipeline runs them - one at a time.
+
+    `quali` dice quali far girare: ognuno ha il suo comando nella sua sezione, e quello che
+    non gira resta com'era, artefatti e valore dello step compresi."""
     try:
         project = _project(project_id)
         piano_bloccato = _advanced_stages_block_reason(project)
@@ -634,6 +655,7 @@ def _run_advanced_stages(
 
         out_root = project.root / "stages"
         python_bin = sys.executable
+        gia_fatti: Dict = dict((project.data.get("analysis") or {}).get("stages") or {})
         results: Dict = {}
         # The subprocess modules scan a folder: they get the mirror with only unique frames.
         scan_folder_for_modules = project.dedup_link_dir() or folder
@@ -644,379 +666,405 @@ def _run_advanced_stages(
             "unique_images": len(project.dedup_names()),
         }
 
-        # The marker runs on EVERY deduplicated image, not on a sample: the envelope of a
-        # group is only as good as the markers it saw, and the viewer must be able to show a
-        # box on any image the user scrolls to.
-        unique_count = len(project.dedup_names())
-        _job_update(
-            job_id,
-            stage=f"orientamento: marker su tutte le {unique_count or '?'} immagini",
-        )
-        artifacts = _models_dir().parents[1]
-        marker = stages_mod.run_marker_envelopes(
-            folder=scan_folder_for_modules, output_root=out_root, python_bin=python_bin,
-            bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
-            library_root=_models_dir() / "lr_marker_vendor_template_library",
-            vendor=vendor, exclusion_rect=marker_exclusion, max_images=0, timeout=3600.0,
-        )
-        results["marker"] = {k: marker.get(k) for k in ("status", "error", "output_dir")}
-        if marker.get("rows"):
-            # Il lavoro umano si legge subito: correzioni e ritagli dei suggerimenti
-            # servono sia per gli envelope sia per la validazione, che vengono prima della
-            # costruzione del nuovo valore dello step.
-            previous = project.step_value("orientation")
-            corrections_before = dict(previous.get("corrections") or {})
-            # --- SCOPERTA: le detection della banca costruiscono gli envelope. Conta il
-            # richiamo: se il box non contiene il marker, ESI non lo trovera' mai.
-            # Tenute per nome: una riga per immagine, cosi' una correzione la sostituisce
-            # invece di aggiungersi (altrimenti la posizione vecchia resta nell'unione e il
-            # box non si stringe).
-            rows_by_name: Dict[str, Dict] = {
-                row["name"]: {"group": row["group"], "box": row["box"]}
-                for row in _marker_rows(Path(marker["output_dir"]))
-                if row.get("box") and str(row.get("status") or "").lower() == "ok"
-            }
-
-            # --- RITAGLIO: il glifo di questa cartella, scelto per copertura e non per
-            # punteggio singolo. E' il file che andra' in DB_echo, quindi e' quello che ESI
-            # usera' davvero.
-            _job_update(job_id, stage="orientamento: ritaglio del marker della cartella")
-            useful = [
-                path for path in scan_folder(scan_folder_for_modules)
-                if not re.search(r"Thumbs\.db|Software Release|System Info|proibite",
-                                 str(path), re.IGNORECASE)
-            ]
-            useful_names = {
-                str(path.relative_to(scan_folder_for_modules)) for path in useful
-            }
-            rows_by_name = {
-                name: row for name, row in rows_by_name.items() if name in useful_names
-            }
-            template_info: Dict = {}
-            override = previous.get("marker_override") or {}
-            override_rows: Dict[str, Dict] = {}
-            if override.get("path") and Path(override["path"]).is_file():
-                # L'utente ha indicato il marker a mano: il ricalcolo non torna alla banca,
-                # che su questa cartella aveva scelto il glifo sbagliato. Le posizioni, i
-                # gruppi e gli envelope si rifanno tutti dal suo ritaglio.
-                _job_update(job_id, stage="orientamento: uso il marker che hai indicato")
-                soglia = float(marker_min_score)
-                template_info = {
-                    **{k: override[k] for k in ("path", "size", "source_image") if k in override},
-                    "from_user_marker": True,
-                }
-                own = om.match_all(
-                    images=useful, folder=scan_folder_for_modules,
-                    template_path=Path(override["path"]), rect=final_rect,
-                    bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
-                    min_score=soglia, search_margin=60,
-                    exclusion_rect=marker_exclusion,
-                )
-                agganciate = [
-                    row for row in own["rows"]
-                    if row.get("box") and (row.get("score") or 0) >= soglia
-                ]
-                rows_by_name = {
+        # I tre moduli si lanciano uno per uno: ognuno ha il suo comando nella sua
+        # sezione. Rifare l'orientamento non deve costringere a rifare anche la scala,
+        # che sono minuti di lavoro su cose che non sono cambiate.
+        if "orientamento" in quali:
+            # The marker runs on EVERY deduplicated image, not on a sample: the envelope of a
+            # group is only as good as the markers it saw, and the viewer must be able to show a
+            # box on any image the user scrolls to.
+            unique_count = len(project.dedup_names())
+            _job_update(
+                job_id,
+                stage=f"orientamento: marker su tutte le {unique_count or '?'} immagini",
+            )
+            artifacts = _models_dir().parents[1]
+            marker = stages_mod.run_marker_envelopes(
+                folder=scan_folder_for_modules, output_root=out_root, python_bin=python_bin,
+                bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
+                library_root=_models_dir() / "lr_marker_vendor_template_library",
+                vendor=vendor, exclusion_rect=marker_exclusion, max_images=0, timeout=3600.0,
+            )
+            results["marker"] = {k: marker.get(k) for k in ("status", "error", "output_dir")}
+            if marker.get("rows"):
+                # Il lavoro umano si legge subito: correzioni e ritagli dei suggerimenti
+                # servono sia per gli envelope sia per la validazione, che vengono prima della
+                # costruzione del nuovo valore dello step.
+                previous = project.step_value("orientation")
+                corrections_before = dict(previous.get("corrections") or {})
+                # --- SCOPERTA: le detection della banca costruiscono gli envelope. Conta il
+                # richiamo: se il box non contiene il marker, ESI non lo trovera' mai.
+                # Tenute per nome: una riga per immagine, cosi' una correzione la sostituisce
+                # invece di aggiungersi (altrimenti la posizione vecchia resta nell'unione e il
+                # box non si stringe).
+                rows_by_name: Dict[str, Dict] = {
                     row["name"]: {"group": row["group"], "box": row["box"]}
-                    for row in agganciate
+                    for row in _marker_rows(Path(marker["output_dir"]))
+                    if row.get("box") and str(row.get("status") or "").lower() == "ok"
                 }
-                override_rows = {
-                    row["name"]: {"score": row["score"], "group": row["group"],
-                                  "box": row["box"]}
-                    for row in agganciate
+
+                # --- RITAGLIO: il glifo di questa cartella, scelto per copertura e non per
+                # punteggio singolo. E' il file che andra' in DB_echo, quindi e' quello che ESI
+                # usera' davvero.
+                _job_update(job_id, stage="orientamento: ritaglio del marker della cartella")
+                useful = [
+                    path for path in scan_folder(scan_folder_for_modules)
+                    if not re.search(r"Thumbs\.db|Software Release|System Info|proibite",
+                                     str(path), re.IGNORECASE)
+                ]
+                useful_names = {
+                    str(path.relative_to(scan_folder_for_modules)) for path in useful
                 }
-            else:
-                try:
-                    candidates = om.candidate_crops(
-                        images=useful, bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
-                        library_root=_models_dir() / "lr_marker_vendor_template_library",
-                        vendor=vendor, rect=final_rect,
-                        exclusion_rect=marker_exclusion,
-                        out_dir=project.root / "templates" / "candidates", seed_images=6,
-                    )
-                    chosen = om.choose_by_coverage(
-                        candidates=candidates, images=useful, folder=scan_folder_for_modules,
-                        rect=final_rect, exclusion_rect=marker_exclusion,
+                rows_by_name = {
+                    name: row for name, row in rows_by_name.items() if name in useful_names
+                }
+                template_info: Dict = {}
+                override = previous.get("marker_override") or {}
+                override_rows: Dict[str, Dict] = {}
+                if override.get("path") and Path(override["path"]).is_file():
+                    # L'utente ha indicato il marker a mano: il ricalcolo non torna alla banca,
+                    # che su questa cartella aveva scelto il glifo sbagliato. Le posizioni, i
+                    # gruppi e gli envelope si rifanno tutti dal suo ritaglio.
+                    _job_update(job_id, stage="orientamento: uso il marker che hai indicato")
+                    soglia = float(marker_min_score)
+                    template_info = {
+                        **{k: override[k] for k in ("path", "size", "source_image") if k in override},
+                        "from_user_marker": True,
+                    }
+                    own = om.match_all(
+                        images=useful, folder=scan_folder_for_modules,
+                        template_path=Path(override["path"]), rect=final_rect,
                         bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
-                        sample=40,
+                        min_score=soglia, search_margin=60,
+                        exclusion_rect=marker_exclusion,
                     )
-                    if "chosen" in chosen:
-                        source = Path(chosen["chosen"]["path"])
-                        final = project.root / "templates" / "orientation_marker.png"
-                        final.parent.mkdir(parents=True, exist_ok=True)
-                        final.write_bytes(source.read_bytes())
-                        template_info = {**chosen["chosen"], "path": str(final)}
-                        # le detection del ritaglio allargano l'envelope dove la banca non arriva
-                        own = om.match_all(
-                            images=useful, folder=scan_folder_for_modules,
-                            template_path=final, rect=final_rect,
-                            bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
-                            min_score=0.85, search_margin=40,
+                    agganciate = [
+                        row for row in own["rows"]
+                        if row.get("box") and (row.get("score") or 0) >= soglia
+                    ]
+                    rows_by_name = {
+                        row["name"]: {"group": row["group"], "box": row["box"]}
+                        for row in agganciate
+                    }
+                    override_rows = {
+                        row["name"]: {"score": row["score"], "group": row["group"],
+                                      "box": row["box"]}
+                        for row in agganciate
+                    }
+                else:
+                    try:
+                        candidates = om.candidate_crops(
+                            images=useful, bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
+                            library_root=_models_dir() / "lr_marker_vendor_template_library",
+                            vendor=vendor, rect=final_rect,
                             exclusion_rect=marker_exclusion,
+                            out_dir=project.root / "templates" / "candidates", seed_images=6,
                         )
-                        for row in own["rows"]:
-                            if row.get("box") and row["score"] >= 0.85:
-                                # riempie i buchi: dove la banca non e' arrivata ci mette la
-                                # sua detection, dove c'e' gia' non aggiunge un secondo box
-                                # per la stessa immagine
-                                rows_by_name.setdefault(
-                                    row["name"], {"group": row["group"], "box": row["box"]}
-                                )
-                except (FileNotFoundError, ImportError) as error:
-                    template_info = {"error": str(error)}
+                        chosen = om.choose_by_coverage(
+                            candidates=candidates, images=useful, folder=scan_folder_for_modules,
+                            rect=final_rect, exclusion_rect=marker_exclusion,
+                            bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
+                            sample=40,
+                        )
+                        if "chosen" in chosen:
+                            source = Path(chosen["chosen"]["path"])
+                            final = project.root / "templates" / "orientation_marker.png"
+                            final.parent.mkdir(parents=True, exist_ok=True)
+                            final.write_bytes(source.read_bytes())
+                            template_info = {**chosen["chosen"], "path": str(final)}
+                            # le detection del ritaglio allargano l'envelope dove la banca non arriva
+                            own = om.match_all(
+                                images=useful, folder=scan_folder_for_modules,
+                                template_path=final, rect=final_rect,
+                                bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
+                                min_score=0.85, search_margin=40,
+                                exclusion_rect=marker_exclusion,
+                            )
+                            for row in own["rows"]:
+                                if row.get("box") and row["score"] >= 0.85:
+                                    # riempie i buchi: dove la banca non e' arrivata ci mette la
+                                    # sua detection, dove c'e' gia' non aggiunge un secondo box
+                                    # per la stessa immagine
+                                    rows_by_name.setdefault(
+                                        row["name"], {"group": row["group"], "box": row["box"]}
+                                    )
+                    except (FileNotFoundError, ImportError) as error:
+                        template_info = {"error": str(error)}
 
-            # le correzioni umane vincono sull'immagine corrispondente, anche dopo un
-            # ricalcolo: sostituiscono la detection del modulo, non le si affiancano
-            for name, fixed in corrections_before.items():
-                if name in useful_names and fixed.get("box") and fixed.get("group"):
-                    rows_by_name[name] = {"group": fixed["group"], "box": fixed["box"]}
-            group_of_image = {name: row["group"] for name, row in rows_by_name.items()}
-            groups = om.envelopes(
-                [{"group": row["group"], "box": row["box"], "score": 1.0}
-                 for row in rows_by_name.values()],
-                min_score=0.0,
-            )
+                # le correzioni umane vincono sull'immagine corrispondente, anche dopo un
+                # ricalcolo: sostituiscono la detection del modulo, non le si affiancano
+                for name, fixed in corrections_before.items():
+                    if name in useful_names and fixed.get("box") and fixed.get("group"):
+                        rows_by_name[name] = {"group": fixed["group"], "box": fixed["box"]}
+                group_of_image = {name: row["group"] for name, row in rows_by_name.items()}
+                groups = om.envelopes(
+                    [{"group": row["group"], "box": row["box"], "score": 1.0}
+                     for row in rows_by_name.values()],
+                    min_score=0.0,
+                )
 
-            # --- VALIDAZIONE: il ritaglio consegnato, cercato DENTRO ogni envelope. E' la
-            # previsione di cosa fara' ESI, e da qui esce la copertura per gruppo.
-            validation: Dict = {}
-            if template_info.get("path") and groups:
-                _job_update(job_id, stage="orientamento: validazione del ritaglio negli envelope")
-                validation = om.validate_in_envelopes(
-                    images=useful, folder=scan_folder_for_modules,
-                    template_path=Path(template_info["path"]), groups=groups,
-                    group_of_image=group_of_image,
-                    bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
-                    exclusion_rect=marker_exclusion,
-                    min_score=float(marker_min_score),
-                    extra_templates=[
-                        Path(path) for name, path in (previous.get("hint_paths") or {}).items()
-                        if name in useful_names and Path(path).is_file()
+                # --- VALIDAZIONE: il ritaglio consegnato, cercato DENTRO ogni envelope. E' la
+                # previsione di cosa fara' ESI, e da qui esce la copertura per gruppo.
+                validation: Dict = {}
+                if template_info.get("path") and groups:
+                    _job_update(job_id, stage="orientamento: validazione del ritaglio negli envelope")
+                    validation = om.validate_in_envelopes(
+                        images=useful, folder=scan_folder_for_modules,
+                        template_path=Path(template_info["path"]), groups=groups,
+                        group_of_image=group_of_image,
+                        bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
+                        exclusion_rect=marker_exclusion,
+                        min_score=float(marker_min_score),
+                        extra_templates=[
+                            Path(path) for name, path in (previous.get("hint_paths") or {}).items()
+                            if name in useful_names and Path(path).is_file()
+                        ],
+                    )
+
+                order = marker_refine.GROUP_ORDER
+                found = [g for g in order if g in groups]
+                missing = [g for g in order if g not in groups]
+                # Il ricalcolo non deve cancellare il lavoro umano: correzioni e ritagli dei
+                # suggerimenti sopravvivono al rifacimento dello stadio.
+                orientation_value: Dict = {
+                    "corrections": corrections_before,
+                    "marker_override": override,
+                    "marker_rows_override": override_rows,
+                    # La diagnosi "questo marker non si muove" e' l'unico modo automatico di
+                    # accorgersi che la banca ha scelto un elemento fisso dell'interfaccia.
+                    "marker_warning": _marker_warning(
+                        list(override_rows.values()) if override_rows
+                        else [r for r in _marker_rows(Path(marker["output_dir"]))
+                              if str(r.get("status") or "").lower() == "ok"],
+                        groups,
+                    ),
+                    "hint_paths": {
+                        name: path for name, path in (previous.get("hint_paths") or {}).items()
+                        if name in corrections_before and Path(path).is_file()
+                    },
+                    "hint_templates": [
+                        path for name, path in (previous.get("hint_paths") or {}).items()
+                        if name in corrections_before and Path(path).is_file()
                     ],
+                    "group_orientation": project.codes.get("group_orientation") or 4,
+                    "groups": groups,
+                    "found_groups": found,
+                    "missing_groups": missing,
+                    "orientation_available": {g: g in groups for g in order},
+                    "folder_template": template_info,
+                    "validation": {
+                        k: validation.get(k) for k in ("coverage", "coverage_by_group", "images", "min_score")
+                    },
+                    "validation_rows": {
+                        row["name"]: {"score": row["score"], "group": row["group"], "box": row["box"]}
+                        for row in (validation.get("rows") or [])
+                    },
+                }
+                if found:
+                    donor = found[0]
+                    filled, blocks = [], []
+                    for g in order:
+                        source_box = groups.get(g)
+                        if source_box is None:
+                            source_box = groups[donor]
+                            filled.append(g)
+                        blocks.append({k: source_box[k] for k in ("top", "left", "bottom", "right", "check", "params")})
+                    orientation_value["blocks"] = blocks
+                    orientation_value["filled_groups"] = filled
+                    orientation_value["filled_from"] = donor if filled else ""
+
+                results["marker"]["groups"] = found
+                results["marker"]["missing_groups"] = missing
+                results["marker"]["filled_groups"] = orientation_value.get("filled_groups") or []
+                results["marker"]["filled_from"] = orientation_value.get("filled_from") or ""
+                results["marker"]["folder_template"] = template_info
+                results["marker"]["validation"] = orientation_value["validation"]
+
+                project = _project(project_id)
+                if orientation_value["orientation_available"]:
+                    project.codes["orientation_available"] = orientation_value["orientation_available"]
+                    results["marker"]["orientation_available"] = orientation_value["orientation_available"]
+                project.set_step(
+                    "orientation", orientation_value,
+                    status="proposed" if orientation_value.get("blocks") else "blocked",
+                    source="model",
                 )
+                project.save()
 
-            order = marker_refine.GROUP_ORDER
-            found = [g for g in order if g in groups]
-            missing = [g for g in order if g not in groups]
-            # Il ricalcolo non deve cancellare il lavoro umano: correzioni e ritagli dei
-            # suggerimenti sopravvivono al rifacimento dello stadio.
-            orientation_value: Dict = {
-                "corrections": corrections_before,
-                "marker_override": override,
-                "marker_rows_override": override_rows,
-                # La diagnosi "questo marker non si muove" e' l'unico modo automatico di
-                # accorgersi che la banca ha scelto un elemento fisso dell'interfaccia.
-                "marker_warning": _marker_warning(
-                    list(override_rows.values()) if override_rows
-                    else [r for r in _marker_rows(Path(marker["output_dir"]))
-                          if str(r.get("status") or "").lower() == "ok"],
-                    groups,
-                ),
-                "hint_paths": {
-                    name: path for name, path in (previous.get("hint_paths") or {}).items()
-                    if name in corrections_before and Path(path).is_file()
-                },
-                "hint_templates": [
-                    path for name, path in (previous.get("hint_paths") or {}).items()
-                    if name in corrections_before and Path(path).is_file()
-                ],
-                "group_orientation": project.codes.get("group_orientation") or 4,
-                "groups": groups,
-                "found_groups": found,
-                "missing_groups": missing,
-                "orientation_available": {g: g in groups for g in order},
-                "folder_template": template_info,
-                "validation": {
-                    k: validation.get(k) for k in ("coverage", "coverage_by_group", "images", "min_score")
-                },
-                "validation_rows": {
-                    row["name"]: {"score": row["score"], "group": row["group"], "box": row["box"]}
-                    for row in (validation.get("rows") or [])
-                },
-            }
-            if found:
-                donor = found[0]
-                filled, blocks = [], []
-                for g in order:
-                    source_box = groups.get(g)
-                    if source_box is None:
-                        source_box = groups[donor]
-                        filled.append(g)
-                    blocks.append({k: source_box[k] for k in ("top", "left", "bottom", "right", "check", "params")})
-                orientation_value["blocks"] = blocks
-                orientation_value["filled_groups"] = filled
-                orientation_value["filled_from"] = donor if filled else ""
-
-            results["marker"]["groups"] = found
-            results["marker"]["missing_groups"] = missing
-            results["marker"]["filled_groups"] = orientation_value.get("filled_groups") or []
-            results["marker"]["filled_from"] = orientation_value.get("filled_from") or ""
-            results["marker"]["folder_template"] = template_info
-            results["marker"]["validation"] = orientation_value["validation"]
-
-            project = _project(project_id)
-            if orientation_value["orientation_available"]:
-                project.codes["orientation_available"] = orientation_value["orientation_available"]
-                results["marker"]["orientation_available"] = orientation_value["orientation_available"]
-            project.set_step(
-                "orientation", orientation_value,
-                status="proposed" if orientation_value.get("blocks") else "blocked",
-                source="model",
+            # I due giri della catena che dipendono solo dall'orientamento appena fatto. Non
+            # applicano niente: propongono, e la scelta resta sua. Ma se non girano qui, la
+            # sezione del rettangolo resta vuota finche' qualcuno non preme un tasto - ed e'
+            # proprio quello che non deve succedere.
+            results["rect_chain"] = _giri_rettangolo(job_id, project_id)
+        if "depth" in quali:
+            _job_update(job_id, stage="depth: lettura dalla scala ecografica")
+            depth = stages_mod.run_depth(
+                folder=scan_folder_for_modules, output_root=out_root, python_bin=python_bin,
+                vendor=vendor, probe_id=str(probe_id or ""),
+                probe_model=str(project.codes.get("probe_model") or ""), rect=final_rect,
+                video_size=video_size, rotation=rotation, max_images=sample,
             )
-            project.save()
-
-        # I due giri della catena che dipendono solo dall'orientamento appena fatto. Non
-        # applicano niente: propongono, e la scelta resta sua. Ma se non girano qui, la
-        # sezione del rettangolo resta vuota finche' qualcuno non preme un tasto - ed e'
-        # proprio quello che non deve succedere.
-        results["rect_chain"] = _giri_rettangolo(job_id, project_id)
-
-        _job_update(job_id, stage="depth: lettura dalla scala ecografica")
-        depth = stages_mod.run_depth(
-            folder=scan_folder_for_modules, output_root=out_root, python_bin=python_bin,
-            vendor=vendor, probe_id=str(probe_id or ""),
-            probe_model=str(project.codes.get("probe_model") or ""), rect=final_rect,
-            video_size=video_size, rotation=rotation, max_images=sample,
-        )
-        results["depth"] = {
-            k: depth.get(k)
-            for k in ("status", "error", "images", "accepted", "acceptance_ratio", "depths_mm",
-                      "output_dir", "ranker_model", "folder_strategy")
-        }
-
-        # --- la depth su tutta la cartella, che e' cio' di cui la scala ha bisogno ------
-        # Il modulo della scala misura il righello *per valore di depth*, e per accettare un
-        # valore vuole vedere piu' fotogrammi che concordano. Con un campione piatto ogni
-        # depth compariva una volta sola e ogni riga usciva `setup_too_small_for_consensus`.
-        # Rileggere la depth dentro al riquadro gia' trovato costa 0.4 s per immagine, contro
-        # i minuti della generazione dei candidati: si fa su tutta la cartella, e poi la
-        # scala riceve piu' fotogrammi per ogni depth.
-        righe_depth = list(depth.get("rows") or [])
-        letture: Dict[str, Dict] = {}
-        riferimento = _riquadro_depth_di_riferimento(_righe_depth_per_nome(project, righe_depth))
-        if riferimento is not None:
-            nome_rif, box_rif, testo_rif, valore_rif = riferimento
-            numero = _rileggi_nel_riquadro(base_moduli / nome_rif, box_rif)
-            if numero is not None:
-                fattore = _fattore_unita(testo_rif, valore_rif, numero["value"])
-                tutti = list(project.dedup_names())
-                _job_update(job_id, stage=f"depth: la stessa etichetta su {len(tutti)} immagini",
-                            done=0, total=len(tutti))
-                letture, falliti = _leggi_riquadro_su(
-                    base_moduli, box_rif, fattore, tutti,
-                    progress=lambda fatte, quante: _job_update(job_id, done=fatte),
-                )
-                if letture:
-                    def salva_letture(_p: Project, value: Dict) -> Dict:
-                        value["depth_box_template"] = {
-                            "box": box_rif, "from": nome_rif, "unit_factor": fattore,
-                            "scope": "auto", "applied": len(letture), "targets": len(tutti),
-                            "failed": falliti,
-                            "at": datetime.now().isoformat(timespec="seconds"),
-                        }
-                        value["depth_box_reads"] = letture
-                        return value
-
-                    _write_step(project_id, "depth_scale", salva_letture,
-                                status="proposed", source="model")
-                    results["depth"]["box_reads"] = len(letture)
-                    results["depth"]["box_failed"] = len(falliti)
-
-        _job_update(job_id, stage="scala: righello e righe #18-#21")
-        engine = _inference_engine()
-        # Same base as the depth module: the scale stage joins su/giu and depth rows by path,
-        # so both must see the images through the same folder (the deduplicated mirror).
-        images, righe_depth = _fotogrammi_per_depth(
-            project, base_moduli, letture, righe_depth, sample
-        )
-        su_giu = engine.predict_su_giu(images, final_rect)
-        results["su_giu"] = {
-            k: su_giu.get(k) for k in ("counts", "majority", "images", "mean_confidence")
-        }
-        frames = stages_mod.build_scale_frames(
-            images=images, su_giu_rows=su_giu.get("rows") or [],
-            depth_rows=righe_depth, rect=final_rect,
-        )
-        gruppi_immagine = _groups_of_images(project)
-        per_nome = {}
-        for gruppo, elenco in (gruppi_immagine or {}).items():
-            for nome in elenco:
-                per_nome[nome] = gruppo
-        for frame in frames:
-            try:
-                nome = str(Path(frame["image_path"]).relative_to(base_moduli))
-            except ValueError:
-                nome = Path(frame["image_path"]).name
-            # L'orientamento e' il dato che dice alla scala da che parte guardare: era
-            # sempre vuoto, benche' il marker fosse gia' girato.
-            frame["orientation_group"] = per_nome.get(nome, "")
-        scale = stages_mod.run_scale(
-            folder=scan_folder_for_modules, output_root=out_root, python_bin=python_bin,
-            vendor=vendor, vendor_confidence=vendor_conf, probe_id=str(probe_id or ""),
-            rect=final_rect, video_size=video_size, frames=frames, max_frames=len(frames),
-            rotation=rotation,
-        )
-        results["scale"] = {
-            k: scale.get(k)
-            for k in ("status", "error", "depths_total", "depths_accepted", "acceptance_ratio",
-                      "review_reasons", "profile", "output_dir", "lines")
-        }
-
-        # Lo studio del righello: modulo autonomo, non ha bisogno della depth. Gira sullo
-        # stesso contesto dello stadio, cosi' i due guardano gli stessi fotogrammi ed e'
-        # possibile confrontarli tacca per tacca.
-        if scale.get("output_dir"):
-            _job_update(job_id, stage="scala: studio del righello, tacca per tacca")
-            studio = stages_mod.run_scale_study(
-                context_dir=Path(scale["output_dir"]), python_bin=python_bin,
-                vendor=vendor, max_images=max(14, sample),
-                corrections=_write_scale_corrections(_project(project_id)),
-            )
-            results["scale_study"] = {
-                k: studio.get(k)
-                for k in ("status", "error", "frames", "by_status", "vendor", "zone",
-                          "output_dir", "data_json")
+            results["depth"] = {
+                k: depth.get(k)
+                for k in ("status", "error", "images", "accepted", "acceptance_ratio", "depths_mm",
+                          "output_dir", "ranker_model", "folder_strategy")
             }
 
-        parsed = stages_mod.parse_scale_lines(scale.get("lines") or {})
-        if parsed.get("depths"):
-            complete = bool(parsed["pixel_ratio_x"] and parsed["pixel_ratio_y"] and parsed["scale_lines"])
+            # --- la depth su tutta la cartella, che e' cio' di cui la scala ha bisogno ------
+            # Il modulo della scala misura il righello *per valore di depth*, e per accettare un
+            # valore vuole vedere piu' fotogrammi che concordano. Con un campione piatto ogni
+            # depth compariva una volta sola e ogni riga usciva `setup_too_small_for_consensus`.
+            # Rileggere la depth dentro al riquadro gia' trovato costa 0.4 s per immagine, contro
+            # i minuti della generazione dei candidati: si fa su tutta la cartella, e poi la
+            # scala riceve piu' fotogrammi per ogni depth.
+            righe_depth = list(depth.get("rows") or [])
+            letture: Dict[str, Dict] = {}
+            riferimento = _riquadro_depth_di_riferimento(_righe_depth_per_nome(project, righe_depth))
+            if riferimento is not None:
+                nome_rif, box_rif, testo_rif, valore_rif = riferimento
+                numero = _rileggi_nel_riquadro(base_moduli / nome_rif, box_rif)
+                if numero is not None:
+                    fattore = _fattore_unita(testo_rif, valore_rif, numero["value"])
+                    tutti = list(project.dedup_names())
+                    _job_update(job_id, stage=f"depth: la stessa etichetta su {len(tutti)} immagini",
+                                done=0, total=len(tutti))
+                    letture, falliti = _leggi_riquadro_su(
+                        base_moduli, box_rif, fattore, tutti,
+                        progress=lambda fatte, quante: _job_update(job_id, done=fatte),
+                    )
+                    if letture:
+                        def salva_letture(_p: Project, value: Dict) -> Dict:
+                            value["depth_box_template"] = {
+                                "box": box_rif, "from": nome_rif, "unit_factor": fattore,
+                                "scope": "auto", "applied": len(letture), "targets": len(tutti),
+                                "failed": falliti,
+                                "at": datetime.now().isoformat(timespec="seconds"),
+                            }
+                            value["depth_box_reads"] = letture
+                            return value
 
-            def scrivi_scala(_p: Project, value: Dict) -> Dict:
-                # Si **aggiorna**, non si sostituisce: nello stesso step vivono anche la
-                # rilettura della depth su tutta la cartella e le correzioni dell'utente, e
-                # riscrivendo il valore per intero sparivano — la depth tornava alle dodici
-                # immagini del campione appena finiva lo stadio della scala.
-                value.update({**parsed, "depth_module": results["depth"],
-                              "scale_module": results["scale"]})
-                return value
+                        _write_step(project_id, "depth_scale", salva_letture,
+                                    status="proposed", source="model")
+                        results["depth"]["box_reads"] = len(letture)
+                        results["depth"]["box_failed"] = len(falliti)
 
-            _write_step(project_id, "depth_scale", scrivi_scala,
-                        status="proposed" if complete else "blocked", source="model")
+        if "scala" in quali:
+            if "depth" not in quali:
+                # La scala vive di cio' che la depth ha letto. Lanciata da sola se le
+                # riprende dal progetto - sono le stesse letture che si vedono nella
+                # sezione, correzioni comprese - invece di rifare la depth da capo.
+                letture = dict(
+                    project.step_value("depth_scale").get("depth_box_reads") or {})
+                righe_depth = _righe_depth_dal_disco(project)
+                if not letture and not righe_depth:
+                    raise ValueError(
+                        "la scala ha bisogno della depth: lanciala prima dalla sua sezione")
+            _job_update(job_id, stage="scala: righello e righe #18-#21")
+            engine = _inference_engine()
+            # Same base as the depth module: the scale stage joins su/giu and depth rows by path,
+            # so both must see the images through the same folder (the deduplicated mirror).
+            images, righe_depth = _fotogrammi_per_depth(
+                project, base_moduli, letture, righe_depth, sample
+            )
+            su_giu = engine.predict_su_giu(images, final_rect)
+            results["su_giu"] = {
+                k: su_giu.get(k) for k in ("counts", "majority", "images", "mean_confidence")
+            }
+            frames = stages_mod.build_scale_frames(
+                images=images, su_giu_rows=su_giu.get("rows") or [],
+                depth_rows=righe_depth, rect=final_rect,
+            )
+            gruppi_immagine = _groups_of_images(project)
+            per_nome = {}
+            for gruppo, elenco in (gruppi_immagine or {}).items():
+                for nome in elenco:
+                    per_nome[nome] = gruppo
+            for frame in frames:
+                try:
+                    nome = str(Path(frame["image_path"]).relative_to(base_moduli))
+                except ValueError:
+                    nome = Path(frame["image_path"]).name
+                # L'orientamento e' il dato che dice alla scala da che parte guardare: era
+                # sempre vuoto, benche' il marker fosse gia' girato.
+                frame["orientation_group"] = per_nome.get(nome, "")
+            scale = stages_mod.run_scale(
+                folder=scan_folder_for_modules, output_root=out_root, python_bin=python_bin,
+                vendor=vendor, vendor_confidence=vendor_conf, probe_id=str(probe_id or ""),
+                rect=final_rect, video_size=video_size, frames=frames, max_frames=len(frames),
+                rotation=rotation,
+            )
+            results["scale"] = {
+                k: scale.get(k)
+                for k in ("status", "error", "depths_total", "depths_accepted", "acceptance_ratio",
+                          "review_reasons", "profile", "output_dir", "lines")
+            }
+
+            # Lo studio del righello: modulo autonomo, non ha bisogno della depth. Gira sullo
+            # stesso contesto dello stadio, cosi' i due guardano gli stessi fotogrammi ed e'
+            # possibile confrontarli tacca per tacca.
+            if scale.get("output_dir"):
+                _job_update(job_id, stage="scala: studio del righello, tacca per tacca")
+                studio = stages_mod.run_scale_study(
+                    context_dir=Path(scale["output_dir"]), python_bin=python_bin,
+                    vendor=vendor, max_images=max(14, sample),
+                    corrections=_write_scale_corrections(_project(project_id)),
+                )
+                results["scale_study"] = {
+                    k: studio.get(k)
+                    for k in ("status", "error", "frames", "by_status", "vendor", "zone",
+                              "output_dir", "data_json")
+                }
+
+            parsed = stages_mod.parse_scale_lines(scale.get("lines") or {})
+            if parsed.get("depths"):
+                complete = bool(parsed["pixel_ratio_x"] and parsed["pixel_ratio_y"] and parsed["scale_lines"])
+
+                def scrivi_scala(_p: Project, value: Dict) -> Dict:
+                    # Si **aggiorna**, non si sostituisce: nello stesso step vivono anche la
+                    # rilettura della depth su tutta la cartella e le correzioni dell'utente, e
+                    # riscrivendo il valore per intero sparivano — la depth tornava alle dodici
+                    # immagini del campione appena finiva lo stadio della scala.
+                    # La depth puo' essere di un giro precedente: lanciata da sola, la
+                    # scala non l'ha rifatta e il suo esito e' quello gia' registrato.
+                    value.update({**parsed,
+                                  "depth_module": results.get("depth") or gia_fatti.get("depth"),
+                                  "scale_module": results["scale"]})
+                    return value
+
+                _write_step(project_id, "depth_scale", scrivi_scala,
+                            status="proposed" if complete else "blocked", source="model")
 
         project = _project(project_id)
-        project.data.setdefault("analysis", {})["stages"] = results
+        # Si **aggiunge** a quello che c'era: chi ha rifatto solo l'orientamento deve
+        # ritrovare intatti gli esiti di depth e scala, non un riquadro vuoto al loro posto.
+        stages = {**gia_fatti, **results}
+        project.data.setdefault("analysis", {})["stages"] = stages
         project.save()
         _job_update(job_id, status="done", stage="fatto",
-                    result={**(base_result or {}), "stages": results})
+                    result={**(base_result or {}), "stages": stages})
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
 
 @app.post("/api/projects/<project_id>/analyze_stages")
 def api_analyze_stages(project_id: str):
-    """Run orientation, depth and scale only after resolving the project's plane."""
+    """Run one of the three modules - or all of them - once the plane is resolved."""
     project = _project(project_id)
     piano_bloccato = _advanced_stages_block_reason(project)
     if piano_bloccato:
         return jsonify({"error": piano_bloccato}), 409
     payload = _payload()
+    # Ogni modulo si lancia dalla sua sezione. Senza indicazioni girano tutti, com'era.
+    quali = [str(nome) for nome in (payload.get("stages") or MODULI_AVANZATI)]
+    sconosciuti = [nome for nome in quali if nome not in MODULI_AVANZATI]
+    if sconosciuti or not quali:
+        return jsonify({"error": f"moduli sconosciuti: {', '.join(sconosciuti) or 'nessuno'}"}), 400
     sample = int(payload.get("sample") or 12)
     # Soglia della validazione: la tolleranza legacy e' molto piu' lenta di quanto sembri
     # (fino a 0.368 di correlazione in setup_53), quindi 0.85 escluderebbe match buoni.
     min_score = float(payload.get("marker_min_score") or 0.55)
     return jsonify(
-        {"job_id": _start_job(_run_advanced_stages, project_id, sample, min_score)}
+        {"job_id": _start_job(_run_advanced_stages, project_id, sample, min_score, None, quali)}
     )
 
 
@@ -1803,7 +1851,7 @@ def api_orientation(project_id: str):
     project = _project(project_id)
     stage = _marker_stage_dir(project)
     if stage is None:
-        return jsonify({"error": "lancia prima i moduli dallo step Orientamento"}), 400
+        return jsonify({"error": "lancia prima l'orientamento dal suo step"}), 400
 
     def read(name: str) -> List[Dict[str, str]]:
         path = stage / name
@@ -5250,7 +5298,7 @@ def _run_scale_study_only(job_id: str, project_id: str, max_images: int) -> None
         stadi = ((project.data.get("analysis") or {}).get("stages") or {})
         contesto = str((stadi.get("scale") or {}).get("output_dir") or "")
         if not contesto or not (Path(contesto) / "pipeline_context.json").is_file():
-            raise ValueError("serve prima lo stadio della scala: rifai i tre moduli")
+            raise ValueError("serve prima lo stadio della scala: lancia «Calcola la scala»")
         correzioni = _write_scale_corrections(project)
         # Lo stato di prima, per poter dire dopo quali fotogrammi sono cambiati grazie alle
         # correzioni: senza questo confronto "rifai lo studio" e' un salto nel buio.

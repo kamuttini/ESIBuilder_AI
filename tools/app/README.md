@@ -60,7 +60,7 @@ assente (0 su 426 percorsi risolve).
 
 Non ancora agganciati: soglie e linee guida — quegli step accettano il valore in JSON, nella
 forma che il writer si aspetta. Orientamento, depth e scala girano dai rispettivi moduli
-(bottone "Calcola con i moduli" nei due step), con gli artefatti in `<progetto>/stages/`. Il rettangolo `#11` e il template `#13` si correggono trascinando sull'immagine (anche a schermo
+(un bottone per modulo: "Calcola l'orientamento", "Calcola la depth", "Calcola la scala"), con gli artefatti in `<progetto>/stages/`. Il rettangolo `#11` e il template `#13` si correggono trascinando sull'immagine (anche a schermo
 intero, scorrendo la cartella); il tracciamento a mano da zero degli altri box non c'e' ancora.
 
 I checkpoint vengono da `artifacts/10_active_pipeline/pipeline_fss_head/models` (e

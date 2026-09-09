@@ -2335,7 +2335,7 @@ function panelModuleStage(panel, step) {
   const rect = (state.project.steps.rect || {}).value || {};
   const stagesGate = state.advancedStages || { ready: true, blocked_reason: '' };
 
-  // Lo studio del righello ha una schermata tutta sua: niente comando dei tre moduli sopra,
+  // Lo studio del righello ha una schermata tutta sua: niente comandi dei moduli sopra,
   // ha il suo «rifai lo studio» che ci rimette dentro le correzioni.
   if (step.id === 'scale_study') {
     const host = el('div', {});
@@ -2373,35 +2373,45 @@ function panelModuleStage(panel, step) {
     return;
   }
 
-  const giaFatti = Object.keys(stages).length > 0;
-  panel.append(el('p', { class: 'hint' },
-    'marker di orientamento, depth e scala girano come i moduli della pipeline, in '
-    + 'sottoprocesso: stesso codice, stessi artefatti su disco. '
-    + (giaFatti
-      ? 'Qui si rifanno dopo aver corretto qualcosa da cui dipendono, prima fra tutte il '
-        + 'rettangolo ecografico.'
-      : 'Questo e\' il secondo tempo: partono qui, dopo aver controllato e separato i piani.')));
+  // Ogni modulo si lancia per conto suo, dalla sezione che lo riguarda. Un comando solo
+  // per tutti e tre voleva dire rifare la scala - minuti - per una correzione al marker.
+  const moduli = step.id === 'orientation'
+    ? [{ chiave: 'orientamento', titolo: 'orientamento', nome: 'l\'orientamento',
+         fatto: !!stages.marker,
+         attesa: 'il marker gira su tutte le immagini uniche: qualche minuto' }]
+    : [{ chiave: 'depth', titolo: 'depth', nome: 'la depth', fatto: !!stages.depth,
+         attesa: 'legge la scala ecografica su un campione di immagini' },
+       { chiave: 'scala', titolo: 'scala', nome: 'la scala', fatto: !!stages.scale,
+         attesa: 'righello e righe #18-#21: parte dalle depth gia\' lette' }];
 
-  const status = el('span', { class: 'hint' },
-    stagesGate.blocked_reason || (rect.rect_echo
-      ? 'il marker gira su tutte le immagini uniche, depth e scala su un campione: richiede qualche minuto'
-      : 'serve prima il rettangolo ecografico'));
-  const run = el('button', { class: giaFatti ? 'ghost' : '' });
-  run.textContent = giaFatti ? 'Rifai i tre moduli' : 'Calcola con i moduli';
-  run.disabled = !rect.rect_echo || !stagesGate.ready;
-  run.addEventListener('click', async () => {
-    run.disabled = true;
-    try {
-      const { job_id } = await api(`/projects/${state.projectId}/analyze_stages`, { body: { sample: 12 } });
-      await pollJob(job_id, status);
-      toast('moduli completati');
-      await reload();
-    } catch (error) {
-      toast(error.message, true);
-      status.textContent = error.message;
-    } finally { run.disabled = false; }
-  });
-  panel.append(el('div', { class: 'row' }, run, status));
+  panel.append(el('p', { class: 'hint' },
+    'girano come i moduli della pipeline, in sottoprocesso: stesso codice, stessi '
+    + 'artefatti su disco. Uno alla volta: quello che non lanci resta com\'e\', '
+    + 'con i suoi risultati.'));
+
+  for (const modulo of moduli) {
+    const status = el('span', { class: 'hint' },
+      stagesGate.blocked_reason || (rect.rect_echo
+        ? modulo.attesa
+        : 'serve prima il rettangolo ecografico'));
+    const run = el('button', { class: modulo.fatto ? 'ghost' : '' },
+      `${modulo.fatto ? 'Rifai' : 'Calcola'} ${modulo.nome}`);
+    run.disabled = !rect.rect_echo || !stagesGate.ready;
+    run.addEventListener('click', async () => {
+      run.disabled = true;
+      try {
+        const { job_id } = await api(`/projects/${state.projectId}/analyze_stages`,
+          { body: { sample: 12, stages: [modulo.chiave] } });
+        await pollJob(job_id, status);
+        toast(`${modulo.titolo}: fatto`);
+        await reload();
+      } catch (error) {
+        toast(error.message, true);
+        status.textContent = error.message;
+      } finally { run.disabled = false; }
+    });
+    panel.append(el('div', { class: 'row' }, run, status));
+  }
 
   const card = (title, rows) => {
     const box = el('div', { class: 'card' });
