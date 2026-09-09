@@ -968,6 +968,27 @@ img.depth-crop {
   flex-direction: column;
   gap: 2px;
 }
+/* Il rettangolo ecografico: immagine a sinistra, tutto il resto a destra.
+
+   L'immagine e' il punto fermo del lavoro - si sposta un bordo guardando dove cade sulla
+   corda - quindi non deve scorrere via mentre si legge un numero o si tira un margine. La
+   colonna sinistra sta appiccicata in alto, la destra scorre. Sotto i 1100 px si torna a
+   una colonna sola: schiacciarle su uno schermo stretto le rende illeggibili entrambe. */
+.rect-due {
+  display: grid;
+  grid-template-columns: minmax(380px, 1.35fr) minmax(300px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.rect-immagine { position: sticky; top: 8px; }
+.rect-lato { min-width: 0; }
+.rect-lato .proposta { margin-top: 8px; }
+.rect-lato h3 { font-size: 14px; }
+@media (max-width: 1100px) {
+  .rect-due { grid-template-columns: 1fr; }
+  .rect-immagine { position: static; }
+}
+
 /* Il passo del righello e la sua verifica con la depth confermata. */
 .scala-passo {
   margin: 6px 0;

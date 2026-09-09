@@ -18,6 +18,7 @@ const Lente = (() => {
   let ctx = null;         // {projectId, name, size, boxes:[{box,color,label}], caption}
   let finestra = null;    // [x0, y0, x1, y1] in coordinate native
   let nomeInFinestra = '';
+  let miraInFinestra = null;   // la zona inquadrata l'ultima volta che si e' rifatta
   let zoomManuale = null;   // null = si adatta alla finestra
   let zoomServito = 0;      // l'ingrandimento gia' chiesto al server, per non richiederlo
 
@@ -57,6 +58,18 @@ const Lente = (() => {
   .man.ne, .man.sw { cursor: nesw-resize; }
   .riq b { position: absolute; top: -17px; left: -2px; font-size: 11px; font-weight: 600;
            background: #0d1117; padding: 0 3px; white-space: nowrap; }
+  /* Assi e corde: la lente non serve solo ai riquadri. Sul rettangolo ecografico quello
+     che si guarda e' dove cade il bordo rispetto alla corda del ventaglio, e senza la
+     corda disegnata dentro non c'e' niente da confrontare. */
+  .asse { position: absolute; pointer-events: none; }
+  .asse.v { top: 0; bottom: 0; width: 0; border-left: 1px dashed currentColor; }
+  .asse.o { left: 0; right: 0; height: 0; border-top: 1px dashed currentColor; }
+  .corda { position: absolute; height: 0; border-top: 3px solid currentColor;
+           pointer-events: none; }
+  .corda.tratteggio { border-top-style: dashed; }
+  .corda i, .asse i { position: absolute; top: -16px; left: 0; font-style: normal;
+                      font-size: 11px; font-weight: 600; color: #0d1117;
+                      background: currentColor; padding: 0 3px; white-space: nowrap; }
   #vuoto { padding: 18px; color: #8b949e; }
 </style></head><body>
 <div id="testa"><span id="titolo">lente</span>
@@ -222,7 +235,12 @@ const Lente = (() => {
     const scena = d.getElementById('scena');
     const vuoto = d.getElementById('vuoto');
     const principale = (ctx.boxes || []).find((b) => b.box) || null;
-    if (!principale) {
+    // Cosa inquadrare: di solito il riquadro, ma chi chiama puo' dire un'altra zona. Sul
+    // rettangolo ecografico il riquadro e' mezzo schermo - inquadrarlo sarebbe non
+    // ingrandire niente - mentre quello che si guarda e' l'angolo che si sta spostando, o
+    // la corda del ventaglio.
+    const mira = ctx.focus || (principale && principale.box) || null;
+    if (!mira) {
       scena.style.display = 'none'; vuoto.style.display = '';
       d.getElementById('titolo').textContent = ctx.name || 'lente';
       d.getElementById('dettaglio').textContent = '';
@@ -233,9 +251,19 @@ const Lente = (() => {
 
     // Mentre si trascina la finestra resta ferma: rifarla farebbe scappare la striscia
     // sotto al cursore. Fuori dal trascinamento si insegue il riquadro come prima.
-    if (!trascinando && (nomeInFinestra !== ctx.name || fuoriFinestra(principale.box))) {
-      finestra = nuovaFinestra(principale.box, size);
+    // La zona da inquadrare puo' cambiare senza che il riquadro esca dalla finestra (e'
+    // quello che succede passando da un angolo all'altro): allora la finestra si rifa'
+    // lo stesso. Mentre si trascina no, se no la striscia scappa sotto al cursore.
+    const miraCambiata = !miraInFinestra
+      || Math.abs(miraInFinestra.left - mira.left) > 2
+      || Math.abs(miraInFinestra.top - mira.top) > 2
+      || Math.abs(miraInFinestra.right - mira.right) > 2
+      || Math.abs(miraInFinestra.bottom - mira.bottom) > 2;
+    if (!trascinando
+        && (nomeInFinestra !== ctx.name || miraCambiata || fuoriFinestra(mira))) {
+      finestra = nuovaFinestra(mira, size);
       nomeInFinestra = ctx.name;
+      miraInFinestra = { ...mira };
       zoomServito = 0;
     }
 
@@ -274,12 +302,42 @@ const Lente = (() => {
     // il nodo che ha la presa del puntatore, e il trascinamento morirebbe al primo pixel.
     if (trascinando && nodi.length === dentro.length) {
       dentro.forEach((voce, k) => posiziona(nodi[k], voce.box));
-      scrividettaglio(d, principale.box);
+      scrividettaglio(d, principale ? principale.box : mira);
       return;
     }
 
-    for (const vecchio of [...scena.querySelectorAll('.riq')]) vecchio.remove();
+    for (const vecchio of [...scena.querySelectorAll('.riq, .asse, .corda')]) vecchio.remove();
     nodi = [];
+
+    // Prima assi e corde, che stanno sotto ai riquadri: sono il contesto, non il soggetto.
+    for (const linea of (ctx.lines || [])) {
+      const n = d.createElement('div');
+      const verticale = linea.x != null;
+      n.className = `asse ${verticale ? 'v' : 'o'}`;
+      n.style.color = linea.color || '#3fb950';
+      if (verticale) n.style.left = `${(linea.x - finestra[0]) * s}px`;
+      else n.style.top = `${(linea.y - finestra[1]) * s}px`;
+      if (linea.label) {
+        const b = d.createElement('i');
+        b.textContent = linea.label;
+        n.append(b);
+      }
+      scena.append(n);
+    }
+    for (const seg of (ctx.segments || [])) {
+      const n = d.createElement('div');
+      n.className = 'corda' + (seg.dashed ? ' tratteggio' : '');
+      n.style.color = seg.color || '#ff6040';
+      n.style.left = `${(seg.x1 - finestra[0]) * s}px`;
+      n.style.top = `${(seg.y - finestra[1]) * s}px`;
+      n.style.width = `${(seg.x2 - seg.x1) * s}px`;
+      if (seg.label) {
+        const b = d.createElement('i');
+        b.textContent = seg.label;
+        n.append(b);
+      }
+      scena.append(n);
+    }
     for (const voce of dentro) {
       const primo = voce === principale;
       const n = d.createElement('div');
@@ -310,12 +368,12 @@ const Lente = (() => {
       nodi.push(n);
     }
     d.getElementById('titolo').textContent = (ctx.name || '').split('/').pop();
-    scrividettaglio(d, principale.box);
+    scrividettaglio(d, principale ? principale.box : mira);
     // Dopo un cambio di zoom il riquadro resta al centro: se no ingrandire lo fa uscire
     // dallo schermo, ed e' proprio quello che si stava guardando.
     if (centra) {
-      const cx = (principale.box.left + principale.box.right) / 2 - finestra[0];
-      const cy = (principale.box.top + principale.box.bottom) / 2 - finestra[1];
+      const cx = (mira.left + mira.right) / 2 - finestra[0];
+      const cy = (mira.top + mira.bottom) / 2 - finestra[1];
       win.scrollTo(Math.max(0, cx * s - win.innerWidth / 2),
                    Math.max(0, cy * s - (win.innerHeight - 46) / 2));
     }

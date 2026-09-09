@@ -812,13 +812,15 @@ function rectStudyCard(panel, chainIniziale, ganci) {
   card.append(layers);
   const size = study ? study.image_size : null;
   let axesData = null;
-  /* Cosa si vede aprendo: il rettangolo di adesso, le due corde della coppia e l'asse che
-     ne esce. Sono lo studio, non un livello facoltativo - questa sezione serve a guardare
+  /* Cosa si vede aprendo: il rettangolo di adesso, la corda dell'orientamento scelto e
+     l'asse che ne esce. Una corda alla volta - si cambia col chip del gruppo, e cosi' si
+     guarda una cosa per volta invece di due sovrapposte. La speculare resta un livello,
+     per quando serve il confronto della coppia. Sono lo studio, non un livello facoltativo - questa sezione serve a guardare
      quelli. Il resto (rettangolo del gruppo, assi dai marker, centro immagine, marker)
      resta materiale di indagine e si accende quando serve: prima erano dieci disegni
      insieme e non si capiva piu' a cosa si riferissero. */
   const attivi = {
-    attuale: true, gruppo: false, corde: true, speculare: true,
+    attuale: true, gruppo: false, corde: true, speculare: false,
     assi_corde: true, assi_marker: false, assi_immagine: false, marker: false,
     candidato: '',
   };
@@ -841,6 +843,84 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     if (label) node.append(el('span', { class: 'study-tag', style: `background:${color}` }, label));
     return node;
   };
+  /* Cosa vede la lente: la stessa immagine e gli stessi disegni di qui sotto - rettangolo,
+     corde, assi - perche' la domanda che si fa ingrandendo e' sempre la stessa: questo
+     bordo dove cade rispetto alla corda?
+
+     E soprattutto **dove** guarda. Il rettangolo ecografico e' mezzo schermo: inquadrarlo
+     vorrebbe dire non ingrandire niente. La mira e' quindi il pezzo che si sta toccando -
+     l'angolo sotto le dita mentre lo si trascina - e a riposo la zona delle corde, che e'
+     quello che questa sezione studia. */
+  let miraLente = null;   // {left, top, right, bottom} in pixel immagine, o null
+
+  const zonaCorde = () => {
+    const m = study && study.per_group[corrente];
+    if (!m || !m.segment) return null;
+    const px = bozza || segPx(m.segment);
+    const altro = study.per_group[PARTNER[corrente]];
+    const ys = [px.y];
+    const xs = [px.x1, px.x2];
+    if (altro && altro.segment && attivi.speculare) {
+      const q = segPx(altro.segment);
+      ys.push(q.y); xs.push(q.x1, q.x2);
+    }
+    const margine = 40;
+    return {
+      left: Math.max(0, Math.min(...xs) - margine),
+      right: Math.min((size ? size[0] : 1e9), Math.max(...xs) + margine),
+      top: Math.max(0, Math.min(...ys) - margine),
+      bottom: Math.min((size ? size[1] : 1e9), Math.max(...ys) + margine),
+    };
+  };
+
+  /* L'angolo che si sta trascinando, come quadratino attorno. `move` non ha un angolo: li'
+     si sposta tutto, e la cosa da guardare torna a essere la corda. */
+  const zonaAngolo = (box, lato) => {
+    if (!lato || lato === 'move') return null;
+    const raggio = 90;
+    const x = lato.includes('w') ? box.left : lato.includes('e') ? box.right
+      : (box.left + box.right) / 2;
+    const y = lato.includes('n') ? box.top : lato.includes('s') ? box.bottom
+      : (box.top + box.bottom) / 2;
+    return { left: x - raggio, top: y - raggio, right: x + raggio, bottom: y + raggio };
+  };
+
+  const contestoLente = () => {
+    const m = study && study.per_group[corrente];
+    const rect = gancio.leggiRect ? gancio.leggiRect() : chain.rect;
+    const linee = [];
+    const segmenti = [];
+    if (axesData && attivi.assi_corde) {
+      const a = axesData.axes;
+      if (a.corde_x != null) linee.push({ x: a.corde_x, color: '#3fb950', label: 'asse sx↔dx' });
+      if (a.corde_y != null) linee.push({ y: a.corde_y, color: '#3fb950', label: 'asse su↔giu' });
+    }
+    if (m && m.segment && attivi.corde) {
+      const px = bozza || segPx(m.segment);
+      segmenti.push({ x1: Math.min(px.x1, px.x2), x2: Math.max(px.x1, px.x2), y: px.y,
+                      color: GROUP_COLORS_RECT[corrente],
+                      label: `corda ${corrente} ${Math.round(Math.abs(px.x2 - px.x1))} px` });
+    }
+    const altro = study && study.per_group[PARTNER[corrente]];
+    if (altro && altro.segment && attivi.speculare) {
+      const q = segPx(altro.segment);
+      segmenti.push({ x1: Math.min(q.x1, q.x2), x2: Math.max(q.x1, q.x2), y: q.y,
+                      color: GROUP_COLORS_RECT[PARTNER[corrente]], dashed: true,
+                      label: `corda ${PARTNER[corrente]}` });
+    }
+    return {
+      projectId: state.projectId,
+      name: image.title || '',
+      size: [(size && size[0]) || 0, (size && size[1]) || 0],
+      boxes: rect ? [{ box: rect, color: '#ffffff', label: 'rettangolo (#11)' }] : [],
+      lines: linee,
+      segments: segmenti,
+      focus: miraLente || zonaCorde() || rect || null,
+      caption: miraLente ? 'angolo che stai spostando' : 'zona delle corde',
+      onChange: gancio.scriviRect ? (nuovo) => { gancio.scriviRect(nuovo); draw(); } : null,
+    };
+  };
+
   /* Il rettangolo di adesso, trascinabile: otto maniglie e il corpo. E' lo stesso gesto che
      stava nell'altro editor, portato sull'immagine dove ci sono anche le corde - che e' il
      motivo per cui lo si sposta: si vede subito se il bordo taglia il ventaglio. */
@@ -871,6 +951,8 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     event.stopPropagation();
     const partenza = { x: event.clientX, y: event.clientY };
     const box = { ...gancio.leggiRect() };
+    // La lente segue l'angolo sotto le dita: e' il senso di averla aperta.
+    miraLente = zonaAngolo(box, lato);
     const s = scala();
     const [W, H] = [(size && size[0]) || 0, (size && size[1]) || 0];
     const bersaglio = event.currentTarget;
@@ -895,14 +977,17 @@ function rectStudyCard(panel, chainIniziale, ganci) {
         if (W) n.right = Math.min(n.right, W);
         if (H) n.bottom = Math.min(n.bottom, H);
       }
-      gancio.scriviRect({ left: Math.round(n.left), top: Math.round(n.top),
-                          right: Math.round(n.right), bottom: Math.round(n.bottom) });
+      const finale = { left: Math.round(n.left), top: Math.round(n.top),
+                       right: Math.round(n.right), bottom: Math.round(n.bottom) };
+      miraLente = zonaAngolo(finale, lato) || miraLente;
+      gancio.scriviRect(finale);
       draw();
     };
     const molla = () => {
       bersaglio.removeEventListener('pointermove', muovi);
       bersaglio.removeEventListener('pointerup', molla);
       bersaglio.removeEventListener('pointercancel', molla);
+      draw();
     };
     bersaglio.addEventListener('pointermove', muovi);
     bersaglio.addEventListener('pointerup', molla);
@@ -949,6 +1034,10 @@ function rectStudyCard(panel, chainIniziale, ganci) {
       event.stopPropagation();
       trascino = quale;
       selezionata = quale;
+      // Anche la corda porta la lente con se': e' l'altra cosa che si trascina qui, e
+      // guardare dove si ferma il suo estremo e' esattamente il genere di cosa da
+      // ingrandire.
+      miraLente = { left: x - 90, top: y - 90, right: x + 90, bottom: y + 90 };
       draw();
       renderCorrezione();
     });
@@ -1093,6 +1182,7 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     } else {
       info.textContent = 'per questo gruppo non c\'e\' ancora lo studio delle corde: lancia il giro 3';
     }
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
   };
   // Il pannello puo' chiedere di ridisegnare: succede quando si cambia un numero sotto.
   if (ganci) ganci.ridisegna = draw;
@@ -1195,6 +1285,9 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     draw();
     renderCorrezione();
   });
+  // La mira resta dov'era anche dopo aver mollato: dopo aver sistemato un bordo si vuole
+  // continuare a guardarlo mentre lo si rifinisce coi numeri o con le frecce. Si torna alla
+  // veduta d'insieme col tasto «inquadra le corde».
   const fineTrascino = () => { trascino = null; };
   stage.addEventListener('mouseup', fineTrascino);
   stage.addEventListener('mouseleave', fineTrascino);
@@ -1284,6 +1377,14 @@ function rectStudyCard(panel, chainIniziale, ganci) {
   };
 
   card.append(navRow, stage, legenda, info);
+  // Va nell'elenco di `replaceChildren` in fondo, che e' chi decide l'ordine della scheda:
+  // appenderla qui e basta non serve a niente, perche' quella composizione ricomincia da capo.
+  const inquadraCorde = el('button', { class: 'ghost sq2' }, 'inquadra le corde');
+  inquadraCorde.addEventListener('click', () => { miraLente = null; draw(); });
+  const rigaLente = el('div', { class: 'row' }, Lente.bottone(contestoLente), inquadraCorde,
+    el('span', { class: 'hint' }, 'la lente segue quello che fai: ingrandisce la zona delle '
+      + 'corde, e mentre trascini un angolo del rettangolo va a quell\'angolo. Il rettangolo '
+      + 'si sposta anche da li\'.'));
 
   /* Solo i disegni dello studio delle corde. Gli altri - il rettangolo visto nel gruppo,
      gli assi dai marker, il centro dell'immagine, i marker - venivano da studi che questa
@@ -1530,18 +1631,32 @@ function rectStudyCard(panel, chainIniziale, ganci) {
   /* L'ordine della scheda si decide qui, per intero: prima si sceglie il gruppo e
      l'immagine, poi si guarda, poi si legge, poi si sceglie. Comporlo a pezzi sparsi lo
      aveva gia' fatto uscire mescolato. */
-  card.replaceChildren(
-    titolo,          // cos'e' questa scheda
+  /* Due colonne: l'immagine a sinistra, tutto il resto a destra. Prima era una colonna
+     sola, e per guardare l'immagine mentre si leggeva un numero - o si spostava un
+     margine - bisognava scorrere su e giu'. La colonna dell'immagine sta appiccicata in
+     alto mentre la destra scorre: e' l'immagine il punto fermo del lavoro. */
+  const colonnaSinistra = el('div', { class: 'rect-immagine' },
     chips,           // quale orientamento
     navRow,          // quale immagine di quell'orientamento
     stage,           // l'immagine con le elaborazioni
     legenda,         // che colore e' cosa
+  );
+  const colonnaDestra = el('div', { class: 'rect-lato' },
     info,            // i numeri di questo gruppo
     correzione,      // correggere la corda che si sta guardando
     spiegaAssi,      // cosa sono gli assi accesi
     layers,          // cosa mostrare sull'immagine
+    rigaLente,       // la stessa cosa ingrandita, su un'altra finestra
     candidati,       // quale rettangolo consegnare
   );
+  card.replaceChildren(titolo, el('div', { class: 'rect-due' }, colonnaSinistra, colonnaDestra));
+  // Il pannello ci mette i suoi comandi (numeri, margini, salvataggio): stanno a destra
+  // anche loro, se no si torna a scorrere per raggiungerli.
+  if (ganci) {
+    ganci.colonnaDestra = colonnaDestra;
+    for (const nodo of (ganci.inAttesa || [])) colonnaDestra.append(nodo);
+    ganci.inAttesa = [];
+  }
 
   image.addEventListener('load', draw);
   window.addEventListener('resize', draw);
@@ -1582,12 +1697,20 @@ function panelRect(panel, step) {
     // Lo studio ci mette dentro il suo `draw`: cosi' cambiando un numero si muove anche
     // il rettangolo sull'immagine, che e' l'altro verso dello stesso legame.
     ridisegna: null,
+    // I comandi del pannello vanno nella colonna destra dello studio, che pero' nasce
+    // dopo (la catena si carica in asincrono): fino ad allora si mettono in coda.
+    colonnaDestra: null,
+    inAttesa: [],
+  };
+  const aDestra = (nodo) => {
+    if (ganciRect.colonnaDestra) ganciRect.colonnaDestra.append(nodo);
+    else ganciRect.inAttesa.push(nodo);
   };
   rectChainCard(panel, ganciRect);
 
-  panel.append(el('h3', {}, 'Il rettangolo in numeri (#11)'));
-  panel.append(el('p', { class: 'hint' },
-    'i bordi si trascinano sull\'immagine qui sopra, dove ci sono anche le corde. Qui ci '
+  aDestra(el('h3', { style: 'margin:14px 0 4px' }, 'Il rettangolo in numeri (#11)'));
+  aDestra(el('p', { class: 'hint' },
+    'i bordi si trascinano sull\'immagine a sinistra, dove ci sono anche le corde. Qui ci '
     + 'sono i numeri e i margini, che si aggiungono attorno in percentuale: a zero il '
     + 'salvato coincide col rettangolo.'));
 
@@ -1671,13 +1794,12 @@ function panelRect(panel, step) {
       soloControlli: true,
     });
     editorRef = editor;
-    panel.append(editor.root);
-    panel.append(el('div', { class: 'row' },
-      el('button', { class: 'ghost', onclick: () => openFullscreen() }, 'Schermo intero'),
-      Lente.bottone(editor.contestoLente),
-      el('span', { class: 'hint' }, 'la lente: una finestra a parte col riquadro ingrandito, '
-        + 'da tenere sul secondo schermo')));
-    panel.append(el('div', { class: 'row' },
+    aDestra(editor.root);
+    // La lente sta con l'immagine, sopra: qui non c'e' piu' un'immagine a cui riferirsi,
+    // e un secondo tasto che apre la stessa finestra su un contesto diverso confonderebbe.
+    aDestra(el('div', { class: 'row' },
+      el('button', { class: 'ghost', onclick: () => openFullscreen() }, 'Schermo intero')));
+    aDestra(el('div', { class: 'row' },
       el('button', { onclick: saveBoxes }, 'Salva il rettangolo'),
       dirtyBadge,
       el('button', {
@@ -1716,18 +1838,18 @@ function panelRect(panel, step) {
       }, 'Verifica limite ESI'),
     ));
   } else {
-    panel.append(el('p', { class: 'hint' }, 'nessuna anteprima: lancia prima l\'analisi.'));
+    aDestra(el('p', { class: 'hint' }, 'nessuna anteprima: lancia prima l\'analisi.'));
     const setRect = (key) => (raw) => { value.rect_echo[key] = parseInt(raw || '0', 10) || 0; readout(); };
-    panel.append(el('div', { class: 'grid' },
+    aDestra(el('div', { class: 'grid' },
       field('top', value.rect_echo.top, setRect('top'), 'number'),
       field('left', value.rect_echo.left, setRect('left'), 'number'),
       field('bottom', value.rect_echo.bottom, setRect('bottom'), 'number'),
       field('right', value.rect_echo.right, setRect('right'), 'number'),
     ));
   }
-  panel.append(rectSize);
+  aDestra(rectSize);
   readout();
-  panel.append(saveRow(step.id, () => value));
+  aDestra(saveRow(step.id, () => value));
 }
 
 /* --- orientamento e depth/scala: i moduli girano come sottoprocessi --- */
