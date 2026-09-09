@@ -63,6 +63,7 @@ def refine_from_click(
     library_root: Path,
     vendor: str,
     preferred_template: str = "",
+    exclusion_rect: Optional[Dict[str, int]] = None,
     window: int = 70,
     match_max_side: int = 560,
     scales: Sequence[float] = SCALES,
@@ -92,6 +93,15 @@ def refine_from_click(
         templates.sort(key=lambda t: 0 if Path(str(t.path)).name == preferred_template else 1)
 
     width, height, gray = detector._load_gray_cached(Path(image_path))
+    if exclusion_rect:
+        clipped_exclusion = detector._clip_rect(
+            tuple(int(exclusion_rect[k]) for k in ("top", "left", "bottom", "right")),
+            width=width, height=height,
+        )
+        if clipped_exclusion is not None:
+            gray = gray.copy()
+            top, left, bottom, right = clipped_exclusion
+            gray[top : bottom + 1, left : right + 1] = 0
     x, y = int(click[0]), int(click[1])
     search_rect = detector._clip_rect(
         (y - window, x - window, y + window, x + window), width=width, height=height

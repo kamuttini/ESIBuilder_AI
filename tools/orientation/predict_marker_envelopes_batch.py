@@ -143,6 +143,8 @@ def main() -> int:
                         help="CHAINED mode: consume official_stages_batch.py outputs. Per image: rect crop + "
                              "SU/GIU prior; per folder: #13 exclusion. Search follows the designed chain: "
                              "predicted half -> other half (flags sugiu_corrected_by_marker) -> expansion.")
+    parser.add_argument("--exclusion-rect", type=str, default="",
+                        help="Explicit already-expanded #13 exclusion as top|left|bottom|right.")
     parser.add_argument("--exclusion-margin-frac", type=float, default=0.75,
                         help="Expansion of the #13 exclusion rect (vendor logo often sits just outside it).")
     parser.add_argument("--resume", action="store_true")
@@ -268,7 +270,10 @@ def main() -> int:
 
         # CHAINED step 1: exclusion zone from the vendor-template box (#13) + margin.
         exclusion_rects: Tuple[Tuple[int, int, int, int], ...] = ()
-        if chained:
+        explicit_exclusion = _tlbr(args.exclusion_rect)
+        if explicit_exclusion:
+            exclusion_rects = (explicit_exclusion,)
+        elif chained:
             box13 = _tlbr(official_fold.get(folder.name, {}).get("line13_text", ""))
             if box13:
                 top13, left13, bottom13, right13 = box13

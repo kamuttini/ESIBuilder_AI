@@ -153,15 +153,7 @@ def _box_nel_fotogramma(box: Dict, size: Sequence[int]) -> bool:
         return False
 
 
-def _campione_stadi(payload: Dict) -> int:
-    """Quante immagini per i tre moduli in coda all'import. `stages: false` li salta."""
-    if payload.get("stages") is False:
-        return 0
-    return int(payload.get("sample_stages") or 12)
-
-
-def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int,
-                         sample_stadi: int = 12) -> None:
+def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int) -> None:
     """Step 0: dedup, rotation, vendor, probe, rect and L/T, before the user sees anything."""
     try:
         project = _project(project_id)
@@ -418,18 +410,16 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int,
         project.steps["import"]["status"] = "confirmed"
         project.save()
 
-        esito = {"import": imported, "analysis": analysis, "codes_filled": filled}
-        if sample_stadi and box:
-            # Un solo comando porta fino in fondo: i tre moduli girano di seguito, senza che
-            # l'utente debba premere «calcola» in ogni sezione. Il rettangolo appena trovato
-            # e' la loro precondizione; se manca ci si ferma qui, dicendolo.
-            _run_advanced_stages(job_id, project_id, sample_stadi, base_result=esito)
-            return
-        if sample_stadi and not box:
-            esito["stages_skipped"] = (
-                "senza rettangolo ecografico i moduli non possono girare: sistemalo nella "
-                "sezione «Rettangolo ecografico», poi ricalcola"
-            )
+        # Qui finisce apposta il primo tempo. Orientamento, depth e scala non devono vedere
+        # una cartella che contiene ancora insieme L e T: prima si controlla il piano di
+        # ogni immagine e, quando sono presenti entrambi, si sdoppia il progetto. I moduli
+        # partiranno poi dal loro comando, separatamente in ciascun progetto.
+        esito = {
+            "import": imported,
+            "analysis": analysis,
+            "codes_filled": filled,
+            "next": "controlla il piano L/T, poi calcola orientamento, depth e scala",
+        }
         _job_update(job_id, status="done", stage="fatto", result=esito)
     except Exception as error:  # noqa: BLE001 - surfaced to the user as job error
         _job_update(job_id, status="error", stage="errore", error=str(error))
@@ -570,6 +560,45 @@ def _fotogrammi_per_depth(
     return [base / nome for nome in scelti], righe
 
 
+def _advanced_stages_block_reason(project: Project) -> str:
+    """Perche' i moduli devono ancora aspettare la verifica o la divisione del piano."""
+    # Dopo lo sdoppiamento ciascuna meta' dichiara il proprio piano ed e' pronta. Vale sia
+    # per la L rimasta nel progetto originale sia per la T derivata.
+    if str(project.source.get("plane") or "") in ("L", "T"):
+        return ""
+
+    conteggi = (project.step_value("import").get("plane_counts") or {})
+    if int(conteggi.get("L") or 0) and int(conteggi.get("T") or 0):
+        return (
+            "prima dividi le immagini L e T in due progetti: orientamento, depth e scala "
+            "devono girare separatamente"
+        )
+    if project.is_biplane and not conteggi:
+        return (
+            "prima riconosci e controlla il piano L/T di ogni immagine nella sezione Import"
+        )
+    return ""
+
+
+def _marker_vendor_exclusion(project: Project, margin_fraction: float = 0.75) -> Optional[Dict]:
+    """Il template ecografo #13 non puo' mai essere scambiato per il marker."""
+    box = project.step_value("vendor").get("rect_name_echo") or {}
+    try:
+        top, left = int(box["top"]), int(box["left"])
+        bottom, right = int(box["bottom"]), int(box["right"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    width, height = project.step_value("import").get("image_sample_size") or [0, 0]
+    dx = int(round((right - left + 1) * float(margin_fraction)))
+    dy = int(round((bottom - top + 1) * float(margin_fraction)))
+    return {
+        "top": max(0, top - dy),
+        "left": max(0, left - dx),
+        "bottom": min(int(height) - 1, bottom + dy) if height else bottom + dy,
+        "right": min(int(width) - 1, right + dx) if width else right + dx,
+    }
+
+
 def _run_advanced_stages(
     job_id: str, project_id: str, sample: int, marker_min_score: float = 0.55,
     base_result: Optional[Dict] = None,
@@ -577,6 +606,9 @@ def _run_advanced_stages(
     """Orientation marker, depth and scale: the three modules, run as the pipeline runs them."""
     try:
         project = _project(project_id)
+        piano_bloccato = _advanced_stages_block_reason(project)
+        if piano_bloccato:
+            raise ValueError(piano_bloccato)
         folder = _require_folder(project)
         rect = project.step_value("rect").get("rect_echo")
         if not rect:
@@ -598,6 +630,7 @@ def _run_advanced_stages(
             rect, project.step_value("rect").get("margin_percent"),
             width=video_size[0], height=video_size[1],
         )
+        marker_exclusion = _marker_vendor_exclusion(project)
 
         out_root = project.root / "stages"
         python_bin = sys.executable
@@ -624,7 +657,7 @@ def _run_advanced_stages(
             folder=scan_folder_for_modules, output_root=out_root, python_bin=python_bin,
             bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
             library_root=_models_dir() / "lr_marker_vendor_template_library",
-            vendor=vendor, max_images=0, timeout=3600.0,
+            vendor=vendor, exclusion_rect=marker_exclusion, max_images=0, timeout=3600.0,
         )
         results["marker"] = {k: marker.get(k) for k in ("status", "error", "output_dir")}
         if marker.get("rows"):
@@ -653,6 +686,12 @@ def _run_advanced_stages(
                 if not re.search(r"Thumbs\.db|Software Release|System Info|proibite",
                                  str(path), re.IGNORECASE)
             ]
+            useful_names = {
+                str(path.relative_to(scan_folder_for_modules)) for path in useful
+            }
+            rows_by_name = {
+                name: row for name, row in rows_by_name.items() if name in useful_names
+            }
             template_info: Dict = {}
             override = previous.get("marker_override") or {}
             override_rows: Dict[str, Dict] = {}
@@ -671,6 +710,7 @@ def _run_advanced_stages(
                     template_path=Path(override["path"]), rect=final_rect,
                     bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
                     min_score=soglia, search_margin=60,
+                    exclusion_rect=marker_exclusion,
                 )
                 agganciate = [
                     row for row in own["rows"]
@@ -691,11 +731,13 @@ def _run_advanced_stages(
                         images=useful, bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
                         library_root=_models_dir() / "lr_marker_vendor_template_library",
                         vendor=vendor, rect=final_rect,
+                        exclusion_rect=marker_exclusion,
                         out_dir=project.root / "templates" / "candidates", seed_images=6,
                     )
                     chosen = om.choose_by_coverage(
                         candidates=candidates, images=useful, folder=scan_folder_for_modules,
-                        rect=final_rect, bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
+                        rect=final_rect, exclusion_rect=marker_exclusion,
+                        bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
                         sample=40,
                     )
                     if "chosen" in chosen:
@@ -710,6 +752,7 @@ def _run_advanced_stages(
                             template_path=final, rect=final_rect,
                             bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
                             min_score=0.85, search_margin=40,
+                            exclusion_rect=marker_exclusion,
                         )
                         for row in own["rows"]:
                             if row.get("box") and row["score"] >= 0.85:
@@ -725,7 +768,7 @@ def _run_advanced_stages(
             # le correzioni umane vincono sull'immagine corrispondente, anche dopo un
             # ricalcolo: sostituiscono la detection del modulo, non le si affiancano
             for name, fixed in corrections_before.items():
-                if fixed.get("box") and fixed.get("group"):
+                if name in useful_names and fixed.get("box") and fixed.get("group"):
                     rows_by_name[name] = {"group": fixed["group"], "box": fixed["box"]}
             group_of_image = {name: row["group"] for name, row in rows_by_name.items()}
             groups = om.envelopes(
@@ -744,10 +787,11 @@ def _run_advanced_stages(
                     template_path=Path(template_info["path"]), groups=groups,
                     group_of_image=group_of_image,
                     bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
+                    exclusion_rect=marker_exclusion,
                     min_score=float(marker_min_score),
                     extra_templates=[
-                        Path(h) for h in (previous.get("hint_paths") or {}).values()
-                        if Path(h).is_file()
+                        Path(path) for name, path in (previous.get("hint_paths") or {}).items()
+                        if name in useful_names and Path(path).is_file()
                     ],
                 )
 
@@ -961,8 +1005,11 @@ def _run_advanced_stages(
 
 @app.post("/api/projects/<project_id>/analyze_stages")
 def api_analyze_stages(project_id: str):
-    """Run the orientation, depth and scale modules on the imported folder."""
-    _project(project_id)
+    """Run orientation, depth and scale only after resolving the project's plane."""
+    project = _project(project_id)
+    piano_bloccato = _advanced_stages_block_reason(project)
+    if piano_bloccato:
+        return jsonify({"error": piano_bloccato}), 409
     payload = _payload()
     sample = int(payload.get("sample") or 12)
     # Soglia della validazione: la tolleranza legacy e' molto piu' lenta di quanto sembri
@@ -983,15 +1030,14 @@ def _start_job(target, *args) -> str:
 
 @app.post("/api/projects/<project_id>/analyze")
 def api_analyze(project_id: str):
-    """Re-run step 0 on the folder already imported."""
+    """Re-run the initial analysis, stopping before orientation, depth and scale."""
     project = _project(project_id)
     folder = project.source.get("folder") or ""
     if not folder:
         return jsonify({"error": "importa prima una cartella"}), 400
     payload = _payload()
     sample = int(payload.get("sample") or 24)
-    return jsonify({"job_id": _start_job(_run_import_analysis, project_id, folder, sample,
-                                         _campione_stadi(payload))})
+    return jsonify({"job_id": _start_job(_run_import_analysis, project_id, folder, sample)})
 
 
 @app.get("/api/jobs/<job_id>")
@@ -1147,11 +1193,16 @@ def api_project_create():
 @app.get("/api/projects/<project_id>")
 def api_project(project_id: str):
     project = _project(project_id)
+    stages_blocked_reason = _advanced_stages_block_reason(project)
     return jsonify(
         {
             "project": project.data,
             "status": project.status_report(),
             "is_biplane": project.is_biplane,
+            "advanced_stages": {
+                "ready": not stages_blocked_reason,
+                "blocked_reason": stages_blocked_reason,
+            },
             "fss_path": str(project.fss_path()),
         }
     )
@@ -1284,7 +1335,7 @@ def api_browse():
 
 @app.post("/api/projects/<project_id>/import")
 def api_project_import(project_id: str):
-    """Step 0: import plus the whole recognition chain, as one background job."""
+    """Initial analysis through the rough rectangle and L/T proposal."""
     _project(project_id)
     payload = _payload()
     folder = (payload.get("folder") or "").strip()
@@ -1293,8 +1344,7 @@ def api_project_import(project_id: str):
     if not Path(folder).expanduser().is_dir():
         return jsonify({"error": f"cartella non valida: {folder}"}), 400
     sample = int(payload.get("sample") or 24)
-    return jsonify({"job_id": _start_job(_run_import_analysis, project_id, folder, sample,
-                                         _campione_stadi(payload))})
+    return jsonify({"job_id": _start_job(_run_import_analysis, project_id, folder, sample)})
 
 
 @app.post("/api/projects/<project_id>/steps/<step_id>")
@@ -1972,6 +2022,7 @@ def api_orientation_refine(project_id: str):
             library_root=_models_dir() / "lr_marker_vendor_template_library",
             vendor=vendor,
             preferred_template=(current or {}).get("template", ""),
+            exclusion_rect=_marker_vendor_exclusion(project),
             window=int(payload.get("window") or 70),
         )
     except (FileNotFoundError, ImportError) as error:
@@ -2071,6 +2122,7 @@ def _marker_context(project: Project) -> Dict:
         "stage": stage,
         "folder": _require_folder(project),
         "rect": rect,
+        "exclusion": _marker_vendor_exclusion(project),
         "vendor": ((analysis.get("vendor") or {}).get("vendor") or ""),
         "bundle": _models_dir().parents[1] / "41_orientation_marker_detector_bundle",
     }
@@ -2102,6 +2154,7 @@ def _refine_click(project: Project, name: str, click: Dict, window: int) -> Dict
         library_root=_models_dir() / "lr_marker_vendor_template_library",
         vendor=ctx["vendor"],
         preferred_template=(current_row or {}).get("template", ""),
+        exclusion_rect=ctx["exclusion"],
         window=window,
         own_templates=propri,
     )
@@ -2237,6 +2290,7 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
             images=useful, folder=probe_folder,
             template_path=Path(template_info["path"]), groups=groups,
             group_of_image=rebuilt["group_of_image"], bundle_dir=ctx["bundle"],
+            exclusion_rect=ctx["exclusion"],
             min_score=min_score, extra_templates=hints,
             progress=lambda done, total: progress(label, done, total),
         )
@@ -2509,7 +2563,7 @@ def _run_marker_override(
         found = om.match_all(
             images=useful, folder=probe_folder, template_path=Path(crop["path"]),
             rect=ctx["rect"], bundle_dir=ctx["bundle"], min_score=min_score,
-            search_margin=60,
+            search_margin=60, exclusion_rect=ctx["exclusion"],
             progress=lambda done, total: _job_update(
                 job_id, stage=f"2/4 lo cerco su tutte le {total} immagini",
                 done=done, total=total),
@@ -2542,6 +2596,7 @@ def _run_marker_override(
         validation = om.validate_in_envelopes(
             images=useful, folder=probe_folder, template_path=Path(crop["path"]),
             groups=groups_liberi, group_of_image={}, bundle_dir=ctx["bundle"],
+            exclusion_rect=ctx["exclusion"],
             min_score=min_score,
             progress=lambda done, total: _job_update(
                 job_id, stage="4/5 riassegno i gruppi cercando dentro i quattro envelope",

@@ -19,6 +19,7 @@ import csv
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -424,6 +425,7 @@ def run_marker_envelopes(
     bundle_dir: Optional[Path] = None,
     library_root: Optional[Path] = None,
     vendor: str = "",
+    exclusion_rect: Optional[Dict] = None,
     max_images: int = 0,
     timeout: float = 1200.0,
 ) -> Dict:
@@ -439,6 +441,12 @@ def run_marker_envelopes(
 
     folder = Path(folder)
     target = stage_dir(output_root, "orientation_marker", folder)
+    # Il runner scrive CSV incrementali per poter riprendere i batch con ``--resume``.
+    # Dall'app, pero', «Rifai» significa una misura nuova: riusare la stessa directory
+    # accodava ogni giro ai precedenti. Dopo una divisione L/T restavano perfino le righe
+    # dell'altro piano, e gli envelope venivano calcolati sull'unione delle due run.
+    shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
     cmd = [
         python_bin, MARKER_SCRIPT.as_posix(),
         "--dataset-root", folder.parent.as_posix(),
@@ -454,6 +462,8 @@ def run_marker_envelopes(
     if vendor:
         # The vendor comes from the classifier, not from the folder name.
         cmd += ["--vendor", str(vendor)]
+    if exclusion_rect:
+        cmd += ["--exclusion-rect", rect_to_line11(exclusion_rect)]
     code, error = _run(cmd, target / "pipeline_subprocess.log", timeout)
 
     envelopes = _read_csv(target / "marker_envelopes.csv")

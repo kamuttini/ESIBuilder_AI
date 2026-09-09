@@ -126,6 +126,14 @@ async function createOrientationViewer(projectId, sampleSize) {
 
   const caption = el('div', { class: 'hint' });
   const detail = el('div', { class: 'hint' });
+  // Il progresso deve restare visibile mentre si guarda l'immagine: nella didascalia
+  // sotto la tavola era facile perderlo, soprattutto sulle immagini alte.
+  const imageCounter = el('strong', {
+    class: 'ov-image-counter',
+    title: 'immagine corrente sul totale',
+    'aria-live': 'polite',
+    'aria-atomic': 'true',
+  }, '0 / 0');
 
   const scaleX = () => image.clientWidth / ((size[0] || image.naturalWidth) || 1);
   const scaleY = () => image.clientHeight / ((size[1] || image.naturalHeight) || 1);
@@ -206,10 +214,16 @@ async function createOrientationViewer(projectId, sampleSize) {
   const show = () => {
     const list = visible();
     if (!list.length) {
+      imageCounter.textContent = '0 / 0';
+      imageCounter.title = 'nessuna immagine nel gruppo selezionato';
       caption.textContent = 'nessuna immagine in questo gruppo';
       return;
     }
     const position = Math.max(0, list.indexOf(names[index]));
+    imageCounter.textContent = `${position + 1} / ${list.length}`;
+    imageCounter.title = filter
+      ? `immagine ${position + 1} di ${list.length} nel filtro selezionato (${names.length} totali)`
+      : `immagine ${position + 1} di ${list.length}`;
     const score = scoreOf(names[index]);
     caption.innerHTML = '';
     caption.append(
@@ -1382,6 +1396,7 @@ async function createOrientationViewer(projectId, sampleSize) {
   const navRow = el('div', { class: 'ov-nav' },
     el('button', { class: 'ghost sq', title: 'immagine precedente (freccia sinistra)',
       onclick: () => step(-1) }, '‹'),
+    imageCounter,
     el('button', { class: 'ghost sq', title: 'immagine successiva (freccia destra)',
       onclick: () => step(1) }, '›'),
     el('button', { class: 'ghost', title: 'salta alla prossima immagine con un marker trovato',

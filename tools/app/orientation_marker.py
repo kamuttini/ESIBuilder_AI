@@ -56,6 +56,23 @@ def group_of(box: Dict[str, int], rect: Dict[str, int], detector) -> Tuple[str, 
     return side, vertical, detector._group_from_side_vertical(side, vertical)
 
 
+def without_exclusion(gray, exclusion_rect: Optional[Dict[str, int]], detector):  # noqa: ANN001
+    """Oscura il box #13: nessuna ricerca automatica puo' usarlo come marker."""
+    if not exclusion_rect:
+        return gray
+    height, width = gray.shape[:2]
+    clipped = detector._clip_rect(
+        tuple(int(exclusion_rect[k]) for k in ("top", "left", "bottom", "right")),
+        width=width, height=height,
+    )
+    if clipped is None:
+        return gray
+    clean = gray.copy()
+    top, left, bottom, right = clipped
+    clean[top : bottom + 1, left : right + 1] = 0
+    return clean
+
+
 # --- fase 1+2: innesco sulla banca e taglio del marker della cartella -----
 def cut_folder_template(
     *,
@@ -154,6 +171,7 @@ def match_all(
     bundle_dir: Path,
     min_score: float = 0.55,
     search_margin: Optional[int] = 40,
+    exclusion_rect: Optional[Dict[str, int]] = None,
     scales: Sequence[float] = (1.0,),
     progress=None,
 ) -> Dict:
@@ -176,6 +194,7 @@ def match_all(
             width, height, gray = detector._load_gray_cached(Path(image_path))
         except Exception:
             continue
+        gray = without_exclusion(gray, exclusion_rect, detector)
         if search_margin is None:
             area = (0, 0, height - 1, width - 1)
         else:
@@ -264,6 +283,7 @@ def candidate_crops(
     library_root: Path,
     vendor: str,
     rect: Dict[str, int],
+    exclusion_rect: Optional[Dict[str, int]],
     out_dir: Path,
     seed_images: int = 8,
     scales: Sequence[float] = SEED_SCALES,
@@ -284,6 +304,7 @@ def candidate_crops(
             width, height, gray = detector._load_gray_cached(Path(image_path))
         except Exception:
             continue
+        gray = without_exclusion(gray, exclusion_rect, detector)
         area = detector._clip_rect(
             (rect["top"] - 40, rect["left"] - 40, rect["bottom"] + 40, rect["right"] + 40),
             width=width, height=height,
@@ -325,6 +346,7 @@ def choose_by_coverage(
     images: Sequence[Path],
     folder: Path,
     rect: Dict[str, int],
+    exclusion_rect: Optional[Dict[str, int]],
     bundle_dir: Path,
     sample: int = 60,
     min_score: float = 0.85,
@@ -339,6 +361,7 @@ def choose_by_coverage(
         result = match_all(
             images=probe, folder=folder, template_path=Path(candidate["path"]),
             rect=rect, bundle_dir=bundle_dir, min_score=min_score, search_margin=40,
+            exclusion_rect=exclusion_rect,
         )
         rows = [row for row in result["rows"] if row["score"] >= 0]
         if not rows:
@@ -367,6 +390,7 @@ def validate_in_envelopes(
     groups: Dict[str, Dict],
     group_of_image: Dict[str, str],
     bundle_dir: Path,
+    exclusion_rect: Optional[Dict[str, int]] = None,
     min_score: float = 0.85,
     near_px: int = 12,
     reference: Optional[Dict[str, Dict]] = None,
@@ -416,6 +440,7 @@ def validate_in_envelopes(
             width, height, gray = detector._load_gray_cached(Path(image_path))
         except Exception:
             continue
+        gray = without_exclusion(gray, exclusion_rect, detector)
         match = None
         winner = ""
         won = candidates[0][0]
@@ -492,6 +517,7 @@ def coverage_of(
     rect: Dict[str, int],
     bundle_dir: Path,
     min_score: float,
+    exclusion_rect: Optional[Dict[str, int]] = None,
     sample: int = 40,
 ) -> Dict:
     """Copertura di un ritaglio su un campione: serve a confrontare due candidati."""
@@ -500,6 +526,7 @@ def coverage_of(
     result = match_all(
         images=probe, folder=folder, template_path=Path(template_path), rect=rect,
         bundle_dir=bundle_dir, min_score=min_score, search_margin=40,
+        exclusion_rect=exclusion_rect,
     )
     rows = [row for row in result["rows"] if row["score"] >= 0]
     if not rows:

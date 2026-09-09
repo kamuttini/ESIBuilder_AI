@@ -109,12 +109,22 @@ gira ancora dentro l'analisi iniziale, cioe' *prima* della divisione. E' il pros
 - **Eliminazione progetto**: `DELETE /api/projects/<id>`, con conferma scrivendo l'id.
   Cancella lo studio, mai la cartella delle immagini; scioglie il legame dell'altra meta'
   di uno sdoppiamento.
+- **Ricalcolo pulito dell'orientamento**: il batch del marker usa CSV incrementali, ma il
+  comando «Rifai i tre moduli» ora azzera la sola directory derivata del marker prima di
+  ripartire. Gli envelope usano inoltre soltanto immagini del piano del progetto corrente;
+  righe e correzioni dell'altra meta' di uno sdoppiamento non possono piu' contaminarli.
+- **Il template ecografo #13 e' una zona vietata al marker**: il box definito nella sezione
+  Ecografo viene allargato del 75% come nella pipeline ufficiale e passato a ogni ricerca
+  automatica del marker (batch, scelta del ritaglio, rimatch, validazione e correzione).
+  Viene oscurato prima del template matching: il logo o nome del vendor non puo' diventare
+  un falso marker di orientamento.
 
 ## 7. Cosa resta aperto
 
-1. **Spezzare la catena dei moduli in due tempi.** Oggi `_run_advanced_stages` fa
-   orientamento + depth + scala dentro l'analisi iniziale. Dovrebbe fermarsi al punto 6
-   dell'ordine, e orientamento/depth/scala partire **dopo** la divisione L/T, per progetto.
+1. **Fatto il 9 settembre — catena dei moduli spezzata in due tempi.** L'analisi iniziale
+   si ferma dopo l'abbozzo del rettangolo e la proposta L/T. Orientamento, depth e scala si
+   avviano dalla loro sezione, dopo il controllo dei piani; il server li blocca finche' una
+   cartella biplana non e' stata classificata e, se contiene entrambi i piani, sdoppiata.
 2. **Il rettangolo grossolano si calcola su un campione che mescola L e T.** Per l'abbozzo
    va bene; dopo la divisione andrebbe rifatto per progetto, e oggi non succede da solo.
 3. `feedback/inbox.jsonl` non viene ancora alimentato dall'app (richiesta vecchia, mai

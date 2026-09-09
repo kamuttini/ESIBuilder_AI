@@ -451,6 +451,18 @@ button.chip:disabled { opacity: 0.35; }
 .ov-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
 .ov-nav button { padding: 3px 9px; font-size: 12px; }
 .ov-nav button.sq { padding: 3px 10px; font-weight: 700; }
+.ov-image-counter {
+  min-width: 72px;
+  padding: 3px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
 .ov-nav select {
   padding: 3px 6px;
   font-size: 12px;

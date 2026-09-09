@@ -1228,6 +1228,10 @@ Due cose imparate agganciando:
    rete: l'app non dipende più da come è nominata la cartella.
 2. **I moduli devono vedere il rettangolo con il margine**, non quello base: è il box che ESI
    disegnerà, ed è quello dentro cui vanno cercati righello e depth.
+3. **Il box del template ecografo #13 e' escluso dalla ricerca del marker.** L'app ora usa
+   la stessa regola della pipeline ufficiale: allarga quel box del 75% e oscura la zona in
+   ogni ricerca automatica. Il nome o logo del vendor e' fisso sullo schermo e non deve mai
+   poter essere scelto come marker di orientamento.
 
 ### Cosa manca ancora al passo zero, e perché
 
@@ -1642,6 +1646,12 @@ immagini è 0.9757, quindi la rete è coerente con sé stessa: la domanda è qua
 si aspetta di trovare in `#13`.
 
 ## 8-novodecies. I moduli girano da soli, l'utente corregge
+
+> Aggiornamento 9 settembre 2026: questo comportamento e' stato sostituito dal flusso in
+> due tempi. L'import non lancia piu' i tre moduli: prima si controllano i piani L/T e si
+> sdoppia la cartella quando li contiene entrambi; solo dopo orientamento, depth e scala
+> partono separatamente per progetto. L'endpoint dei moduli rifiuta una cartella biplana
+> non ancora classificata o ancora mista.
 
 L'import faceva dedup, rotazione e le reti — ecografo, sonda, rettangolo, piano L/T — e si
 fermava lì. Orientamento, depth e scala restavano da lanciare a mano, con un «Calcola con i

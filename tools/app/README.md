@@ -50,6 +50,10 @@ del modello macchina quando l'anagrafica e' ambigua; rettangolo proposto con ant
 disegnato; stato per step con invalidazione mirata; writer `.fss` con validazione; quality gate via
 `tools/fss/compare_fss.py`.
 
+La catena lavora in due tempi: l'import si ferma prima dei moduli avanzati; dopo aver controllato
+e, se necessario, separato L e T, il comando del singolo progetto lancia orientamento, depth e
+scala. Il server impedisce di lanciarli su una cartella biplana non classificata o ancora mista.
+
 `#14 RECT_NAME_PROBE` resta vuoto: il resolver storico legge i `.fss` legacy indicati in
 `references/.../manifest_rect_echo.csv`, che puntano a `ESIBuilder_AI/Dataset/` — cartella oggi
 assente (0 su 426 percorsi risolve).

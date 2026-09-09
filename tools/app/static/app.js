@@ -1,6 +1,9 @@
 /* ESIBuilder AI - versione base del wizard. Vanilla JS, nessuna build. */
 
-const state = { meta: null, projectId: null, project: null, status: [], step: 'codes' };
+const state = {
+  meta: null, projectId: null, project: null, status: [], step: 'codes',
+  advancedStages: { ready: false, blocked_reason: '' },
+};
 
 const $ = (sel) => document.querySelector(sel);
 const el = (tag, attrs = {}, ...children) => {
@@ -99,6 +102,7 @@ async function openProject(projectId) {
   const data = await api('/projects/' + projectId);
   state.project = data.project;
   state.status = data.status;
+  state.advancedStages = data.advanced_stages || { ready: true, blocked_reason: '' };
   state.fssPath = data.fss_path;
   $('#project-select').value = projectId;
   render();
@@ -317,9 +321,9 @@ function panelImport(panel) {
   const analysis = state.project.analysis || {};
 
   panel.append(el('p', { class: 'hint' },
-    'un solo passaggio, fino in fondo: dedup, rotazione, ecografo, sonda, rettangolo, piano L/T, '
-    + 'e poi di seguito i tre moduli — orientamento, depth e scala. Non c\'e\' niente da lanciare '
-    + 'a mano dopo: quando finisce, ogni sezione ha gia\' la sua proposta da confermare o correggere.'));
+    'primo tempo: dedup, rotazione, ecografo, sonda e abbozzo del rettangolo. Poi controlla '
+    + 'il piano di ogni immagine e, se la cartella contiene sia L sia T, dividila in due '
+    + 'progetti. Orientamento, depth e scala si calcolano solo dopo, su un piano per volta.'));
 
   const input = el('input', {
     type: 'text', value: value.folder || state.project.source.folder || '',
@@ -341,7 +345,7 @@ function panelImport(panel) {
     try {
       const { job_id } = await api(`/projects/${state.projectId}/import`, { body: { folder: input.value } });
       await pollJob(job_id, status);
-      toast('analisi completata');
+      toast('analisi iniziale completata · ora controlla il piano L/T');
       await reload();
     } catch (error) {
       toast(error.message, true);
@@ -2329,6 +2333,7 @@ function panelRect(panel, step) {
 function panelModuleStage(panel, step) {
   const stages = (state.project.analysis || {}).stages || {};
   const rect = (state.project.steps.rect || {}).value || {};
+  const stagesGate = state.advancedStages || { ready: true, blocked_reason: '' };
 
   // Lo studio del righello ha una schermata tutta sua: niente comando dei tre moduli sopra,
   // ha il suo «rifai lo studio» che ci rimette dentro le correzioni.
@@ -2373,17 +2378,17 @@ function panelModuleStage(panel, step) {
     'marker di orientamento, depth e scala girano come i moduli della pipeline, in '
     + 'sottoprocesso: stesso codice, stessi artefatti su disco. '
     + (giaFatti
-      ? 'Sono gia\' girati insieme all\'import: qui si rifanno dopo aver corretto qualcosa da '
-        + 'cui dipendono, prima fra tutte il rettangolo ecografico.'
-      : 'Girano da soli in coda all\'import; questo comando serve a rifarli.')));
+      ? 'Qui si rifanno dopo aver corretto qualcosa da cui dipendono, prima fra tutte il '
+        + 'rettangolo ecografico.'
+      : 'Questo e\' il secondo tempo: partono qui, dopo aver controllato e separato i piani.')));
 
   const status = el('span', { class: 'hint' },
-    rect.rect_echo
+    stagesGate.blocked_reason || (rect.rect_echo
       ? 'il marker gira su tutte le immagini uniche, depth e scala su un campione: richiede qualche minuto'
-      : 'serve prima il rettangolo ecografico');
+      : 'serve prima il rettangolo ecografico'));
   const run = el('button', { class: giaFatti ? 'ghost' : '' });
   run.textContent = giaFatti ? 'Rifai i tre moduli' : 'Calcola con i moduli';
-  run.disabled = !rect.rect_echo;
+  run.disabled = !rect.rect_echo || !stagesGate.ready;
   run.addEventListener('click', async () => {
     run.disabled = true;
     try {
