@@ -493,6 +493,60 @@ function panelImport(panel) {
         `gia' sdoppiato: la T sta in «${(state.project.source || {}).split_into}»`));
     }
     pianiBox.append(riga);
+
+    /* Le due file di immagini, per guardare se la divisione e' venuta giusta. Un numero
+       («28 in L, 28 in T») non dice niente su *quali*: e sbagliarne una vuol dire portare
+       un fotogramma dell'altro piano dentro a tutte le mediane dei moduli. Un clic su
+       un'immagine la sposta di la'. */
+    const piani = value.planes || {};
+    const correzioni = value.plane_corrections || {};
+    const dettoDa = (nome) => correzioni[nome] || (piani[nome] || {}).plane || '?';
+    const tutte = Object.keys(piani);
+    if (tutte.length) {
+      const sposta = async (nome, verso) => {
+        try {
+          await api(`/projects/${state.projectId}/planes/correct`,
+            { body: { name: nome, plane: verso } });
+          correzioni[nome] = verso;
+          value.plane_corrections = correzioni;
+          const c = { L: 0, T: 0, '?': 0 };
+          for (const n of tutte) c[dettoDa(n)] = (c[dettoDa(n)] || 0) + 1;
+          value.plane_counts = c;
+          renderPiani();
+        } catch (errore) { toast(errore.message, true); }
+      };
+      const fila = (piano) => {
+        const nomi = tutte.filter((n) => dettoDa(n) === piano).sort();
+        const box = el('div', { class: 'piani-fila' });
+        box.append(el('div', { class: 'hint' },
+          `${piano === '?' ? 'senza piano' : piano} — ${nomi.length} immagini`
+          + (piano === '?' ? ' (restano con la L)' : '')));
+        const strip = el('div', { class: 'piani-strip' });
+        for (const nome of nomi) {
+          const altro = piano === 'T' ? 'L' : 'T';
+          const cella = el('div', { class: 'piani-cella' + (correzioni[nome] ? ' corretta' : '') });
+          cella.append(el('img', {
+            loading: 'lazy',
+            src: `/api/projects/${state.projectId}/image`
+              + `?name=${encodeURIComponent(nome)}&w=150`,
+            alt: nome, title: `${nome}\nclicca per spostarla in ${altro}`,
+          }));
+          cella.append(el('span', {}, nome.split('/').pop()));
+          cella.addEventListener('click', () => sposta(nome, altro));
+          strip.append(cella);
+        }
+        box.append(strip);
+        return box;
+      };
+      const gallerie = el('div', { class: 'piani-galleria' });
+      for (const piano of ['L', 'T', '?']) {
+        if (tutte.some((n) => dettoDa(n) === piano)) gallerie.append(fila(piano));
+      }
+      pianiBox.append(el('p', { class: 'hint', style: 'margin:10px 0 4px' },
+        'clicca un\'immagine per spostarla nell\'altro piano. Le corrette hanno il bordo '
+        + 'azzurro, e sono loro a comandare sullo sdoppiamento.'));
+      pianiBox.append(gallerie);
+    }
   };
   renderPiani();
 

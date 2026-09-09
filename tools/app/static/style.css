@@ -1036,6 +1036,22 @@ img.depth-crop {
   .rect-immagine { position: static; }
 }
 
+/* Le due file L e T: si guarda se la divisione e' venuta giusta, e si sposta cliccando. */
+.piani-galleria { display: flex; flex-direction: column; gap: 10px; }
+.piani-fila { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--panel); }
+.piani-strip { display: flex; gap: 6px; overflow-x: auto; padding: 6px 2px 2px; }
+.piani-cella {
+  flex: 0 0 auto; width: 118px; cursor: pointer; border: 2px solid transparent;
+  border-radius: 6px; padding: 2px; text-align: center;
+}
+.piani-cella:hover { border-color: var(--accent); background: var(--panel-2); }
+.piani-cella.corretta { border-color: #40d0ff; }
+.piani-cella img { width: 100%; display: block; border-radius: 4px; }
+.piani-cella span {
+  display: block; font-size: 10.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* Il passo del righello e la sua verifica con la depth confermata. */
 .scala-passo {
   margin: 6px 0;

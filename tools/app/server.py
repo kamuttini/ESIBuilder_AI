@@ -41,7 +41,9 @@ import constants  # noqa: E402
 from datetime import datetime  # noqa: E402
 
 from anagrafica import Anagrafica, default_path  # noqa: E402
-from importer import IMAGE_SUFFIXES, import_folder, resize_proposal, scan_folder  # noqa: E402
+from importer import (  # noqa: E402
+    IMAGE_SUFFIXES, deduplicate, import_folder, resize_proposal, scan_folder,
+)
 from inference import Engine, ModelPaths, sample_paths  # noqa: E402
 from rotation import estimate_rotation  # noqa: E402
 import marker_refine  # noqa: E402
@@ -164,17 +166,20 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int,
     try:
         project = _project(project_id)
 
-        _job_update(job_id, stage="scansione e dedup")
-        # L'area dell'orologio, se e' gia' stata indicata, va rispettata anche quando si
-        # rilancia l'analisi: e' una scelta dell'utente su questa cartella, non un dettaglio
-        # della corsa di prima.
-        area_orologio = (project.step_value("import") or {}).get("timestamp_box")
-        imported = import_folder(
-            Path(folder), timestamp_box=area_orologio,
-            progress=lambda fatte, quante: _job_update(
-                job_id, stage="scansione e dedup (confronto senza l'orologio)",
-                done=fatte, total=quante),
-        )
+        _job_update(job_id, stage="scansione e dedup bit a bit")
+        # Quello che appartiene al progetto e non alla cartella sopravvive al rilancio:
+        # l'area dell'orologio, i piani riconosciuti, le correzioni. Riscrivere lo step
+        # daccapo li perdeva - e con i piani si perdeva anche lo sdoppiamento, che tornava
+        # a mettere tutte le immagini nel progetto della L.
+        prima = project.step_value("import") or {}
+        da_tenere = {k: prima[k] for k in
+                     ("timestamp_box", "planes", "plane_corrections", "plane_counts")
+                     if prima.get(k) is not None}
+        # La dedup a meno dell'orologio si fa **dopo** la rotazione, piu' sotto: l'area la
+        # si indica su un'anteprima gia' dritta, e confrontarla su immagini storte
+        # guarderebbe un altro pezzo di schermo.
+        imported = import_folder(Path(folder))
+        imported.update(da_tenere)
         # The deduplicated list is the working set from here on: nets, modules, viewer.
         project.save_dedup_images(imported.pop("kept_names", []))
         project.source.update(
@@ -225,6 +230,58 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int,
             project = _project(project_id)
             images = project.dedup_images()
             picked = sample_paths(images, sample)
+
+        # Terza tappa: la dedup a meno dell'orologio, sullo specchio **gia' dritto**. E'
+        # qui e non prima perche' l'area la si indica su un'anteprima raddrizzata: su
+        # immagini storte quel rettangolo cadrebbe su un altro pezzo di schermo.
+        area_orologio = imported.get("timestamp_box")
+        if area_orologio:
+            base_lavoro = project.working_dir() or Path(folder)
+            nomi = project.dedup_names()
+            _job_update(job_id, stage="dedup a meno dell'orologio", done=0, total=len(nomi))
+            tenute, scartate = deduplicate(
+                [base_lavoro / n for n in nomi], area_orologio,
+                progress=lambda fatte, quante: _job_update(job_id, done=fatte, total=quante),
+            )
+            rimasti = sorted(str(Path(x).relative_to(base_lavoro)) for x in tenute)
+            if len(rimasti) < len(nomi):
+                project.save_dedup_images(rimasti)
+                doppie = dict(imported.get("duplicates") or {})
+                doppie["timestamp"] = [d for d in scartate if d["kind"] == "solo_timestamp"]
+                imported["duplicates"] = doppie
+                imported["duplicates_removed"] = (
+                    len(doppie.get("identical") or []) + len(doppie.get("timestamp") or []))
+                imported["images_total"] = len(rimasti)
+                project.source["images_total"] = len(rimasti)
+                project.save()
+                specchio = project.root / project.DEDUP_LINKS
+                if specchio.exists():
+                    shutil.rmtree(specchio, ignore_errors=True)
+                project.dedup_link_dir()
+                project = _project(project_id)
+                images = project.dedup_images()
+                picked = sample_paths(images, sample)
+
+        # E quando questo progetto e' gia' un piano (dopo lo sdoppiamento), da qui in poi
+        # lavora **solo sulle sue** immagini: rileggere la cartella intera rimetterebbe
+        # dentro quelle dell'altro piano, ed e' esattamente quello che succedeva.
+        piano = str(project.source.get("plane") or "")
+        if piano in ("L", "T"):
+            etichette = _piani_salvati(project)
+            suoi = [n for n in project.dedup_names()
+                    if (etichette.get(n) or {}).get("plane") == piano]
+            if suoi and len(suoi) < len(project.dedup_names()):
+                project.save_dedup_images(sorted(suoi))
+                imported["images_total"] = len(suoi)
+                project.source["images_total"] = len(suoi)
+                project.save()
+                specchio = project.root / project.DEDUP_LINKS
+                if specchio.exists():
+                    shutil.rmtree(specchio, ignore_errors=True)
+                project.dedup_link_dir()
+                project = _project(project_id)
+                images = project.dedup_images()
+                picked = sample_paths(images, sample)
 
         engine = _inference_engine()
         _job_update(job_id, stage="riconoscimento ecografo")
