@@ -624,8 +624,8 @@ function rectChainCard(panel) {
   panel.append(studyHost);
   const card = el('details', { class: 'ov-fold', style: 'margin-top:12px' });
   card.append(el('summary', {},
-    el('span', {}, 'come vengono calcolate le proposte'),
-    el('span', { class: 'ov-fold-tag' }, 'quattro giri')));
+    el('span', {}, 'lo studio delle corde'),
+    el('span', { class: 'ov-fold-tag' }, 'come si misura')));
   const body = el('div');
   const detail = el('div');
   card.append(body, detail);
@@ -642,74 +642,6 @@ function rectChainCard(panel) {
   const NEED_LABEL = { orientation: 'orientamento', plane: 'piano L/T', depth: 'depth e scala' };
 
   const px = (v) => (v == null ? '—' : `${v} px`);
-
-  const showMeasure = (r) => {
-    detail.innerHTML = '';
-    detail.append(el('h3', {}, 'cosa dicono i quattro gruppi'));
-    const table = el('table', { class: 'lines' });
-    table.append(el('tr', {},
-      el('td', { class: 'name' }, 'gruppo'),
-      el('td', { class: 'name' }, 'rettangolo'),
-      el('td', { class: 'name' }, 'accordo'),
-      el('td', { class: 'name' }, 'scarto se identici'),
-      el('td', { class: 'name' }, 'scarto se speculari')));
-    for (const [group, m] of Object.entries(r.per_group)) {
-      const b = m.rect;
-      table.append(el('tr', {},
-        el('td', { class: 'name', style: `color:${GROUP_COLORS_RECT[group] || 'var(--text)'}` }, group),
-        el('td', { class: 'val' }, `${b.top}|${b.left}|${b.bottom}|${b.right}`),
-        el('td', { class: 'val' }, m.agreement_iou != null ? `IoU ${m.agreement_iou}` : '—'),
-        el('td', { class: 'val' }, px(m.residual_identity.max_side_px)),
-        el('td', { class: 'val' }, px(m.residual_mirror.max_side_px))));
-    }
-    detail.append(table);
-    const vince = r.hypothesis === 'identita';
-    detail.append(el('p', { class: 'hint', style: `color:${vince ? 'var(--ok)' : 'var(--warn)'}` },
-      vince
-        ? `i quattro gruppi vedono lo stesso riquadro di schermo (scarto peggiore ` +
-          `${r.worst_identity_px} px, contro ${r.worst_mirror_px} px se fossero speculari): ` +
-          `il rettangolo non si ribalta col contenuto, resta dov'e'.`
-        : `i quattro gruppi sono speculari rispetto al centro dell'immagine ` +
-          `(${r.worst_mirror_px} px contro ${r.worst_identity_px} px).`));
-
-    detail.append(el('h3', {}, 'ribaltamento: la scala tornera\' al suo posto?'));
-    for (const [k, v] of [
-      ['scostamento dal centro dell\'immagine',
-        `dx ${r.off_centre.dx} px · dy ${r.off_centre.dy} px`],
-      ['ribaltando sinistra-destra il rettangolo si sposta di', px(r.off_centre.shift_lr)],
-      ['ribaltando sopra-sotto si sposta di', px(r.off_centre.shift_ud)],
-      ['riferimento storico', r.off_centre.legacy_note || '—'],
-    ]) detail.append(el('div', { class: 'kv' }, el('span', {}, k), el('span', {}, String(v))));
-    detail.append(el('p', { class: 'hint' },
-      'se il rettangolo fosse centrato, ribaltarlo lo lascerebbe dov\'e\' (0 px) e una scala ' +
-      'ribaltata cadrebbe ancora dentro. Piu\' il numero e\' grande, piu\' il ribaltamento va ' +
-      'fatto attorno al centro del rettangolo e non dell\'immagine.'));
-
-    detail.append(el('h3', {}, 'proposta'));
-    const d = r.delta || {};
-    for (const [k, v] of [
-      ['rettangolo attuale', r.current
-        ? `${r.current.top}|${r.current.left}|${r.current.bottom}|${r.current.right}` : '—'],
-      ['proposta del consenso',
-        `${r.proposal.top}|${r.proposal.left}|${r.proposal.bottom}|${r.proposal.right}`],
-      ['differenza sulle diagonali', r.delta
-        ? `inizio ${d.diag_start_px} px · fine ${d.diag_end_px} px · lato peggiore ${d.max_side_px} px`
-        : '—'],
-      ['immagini usate per gruppo', Object.entries(r.per_group_images || {})
-        .map(([g, n]) => `${g}: ${n}`).join(' · ')],
-    ]) detail.append(el('div', { class: 'kv' }, el('span', {}, k), el('span', {}, String(v))));
-
-    detail.append(confermaInDueTempi(
-      'Applica il rettangolo raffinato',
-      'gli step che dipendono dalla geometria tornano in review.',
-      async () => {
-        try {
-          await api(`/projects/${state.projectId}/rect/apply`, { body: { pass: 'specularita' } });
-          toast('rettangolo raffinato applicato');
-          await reload();
-        } catch (error) { toast(error.message, true); }
-      }));
-  };
 
   const showSegments = (r) => {
     detail.innerHTML = '';
@@ -793,10 +725,13 @@ function rectChainCard(panel) {
     }
     body.innerHTML = '';
     body.append(el('p', { class: 'hint' },
-      'i moduli si tengono per mano: l\'orientamento e il piano L/T si studiano DENTRO il ' +
-      'rettangolo, e servono al rettangolo per stringersi. Si percorre a giri — un ' +
-      'rettangolo provvisorio, poi ogni conferma ne rende possibile uno piu\' preciso.'));
-    for (const pass of chain.passes) {
+      'la corda e\' il segmento piu\' largo del ventaglio, cercata nel piano giusto. Fissa '
+      + 'l\'ampiezza orizzontale, e le due della coppia devono essere speculari: quanto si '
+      + 'scostano dice se il rettangolo e\' al posto giusto.'));
+    // Solo il giro delle corde: e' lo studio di questa sezione. Gli altri girano lo stesso
+    // - da soli, con l'analisi - ma raccontarli qui riempiva la pagina di roba che non
+    // riguarda quello che si sta guardando.
+    for (const pass of chain.passes.filter((p) => p.id === 'segmento')) {
       const [label, color] = STATE_LABEL[pass.state] || [pass.state, 'var(--muted)'];
       const riga = el('div', { class: 'chain-step' });
       riga.append(el('span', { class: 'chain-state', style: `color:${color};border-color:${color}` }, label));
@@ -809,24 +744,22 @@ function rectChainCard(panel) {
           : null,
         // Un giro mai fatto, con tutto pronto: dire che parte da solo evita di leggere
         // la sezione vuota come "il modulo non sa rispondere".
-        (!pass.missing.length && !(pass.saved && pass.saved.proposal)
-          && ['specularita', 'segmento'].includes(pass.id))
+        (!pass.missing.length && !(pass.saved && pass.saved.proposal))
           ? el('div', { class: 'hint' },
               'gira da solo insieme all\'analisi; qui si rifa\' quando serve')
           : null));
-      if (['specularita', 'segmento'].includes(pass.id) && !pass.missing.length) {
+      if (!pass.missing.length) {
         const run = el('button', { class: 'ghost' },
-          pass.saved && pass.saved.proposal ? 'Rifai la misura'
-            : pass.id === 'segmento' ? 'Cerca le corde' : 'Misura i quattro gruppi');
+          pass.saved && pass.saved.proposal ? 'Rifai la misura delle corde' : 'Cerca le corde');
         const stato = el('span', { class: 'hint' });
         run.addEventListener('click', async () => {
           run.disabled = true;
           try {
             const started = await api(`/projects/${state.projectId}/rect/refine`,
-              { body: { pass: pass.id, per_group: pass.id === 'segmento' ? 6 : 8 } });
+              { body: { pass: 'segmento', per_group: 6 } });
             const job = await pollJob(started.job_id, stato);
             stato.textContent = '';
-            if (pass.id === 'segmento') showSegments(job.result); else showMeasure(job.result);
+            showSegments(job.result);
             await load();
             toast('misura pronta: guarda la proposta prima di applicarla');
           } catch (error) {
@@ -837,19 +770,6 @@ function rectChainCard(panel) {
         riga.append(el('div', { class: 'row', style: 'margin:0' }, run, stato));
       }
       body.append(riga);
-    }
-    if (chain.history.length) {
-      body.append(el('p', { class: 'hint' },
-        `giri applicati: ${chain.history.map((h) => h.pass).join(' → ')}`));
-    }
-    const rete = (state.project.analysis || {}).rect || {};
-    if (rete.source) {
-      body.append(el('div', { class: 'kv' }, el('span', {}, 'giro 1: modello usato'),
-        el('span', {}, rete.source === 'vendor_specialized' ? 'specializzato per vendor'
-          : rete.source === 'global_low_vendor_conf' ? 'globale (vendor sotto 0.70)' : 'globale')));
-      body.append(el('div', { class: 'kv' }, el('span', {}, 'giro 1: accordo fra le immagini'),
-        el('span', {}, rete.agreement_iou != null
-          ? `IoU ${rete.agreement_iou} su ${rete.images ?? '?'} immagini` : '—')));
     }
     if (studyHost) { studyHost.innerHTML = ''; rectStudyCard(studyHost, chain); }
   };
@@ -887,12 +807,14 @@ function rectStudyCard(panel, chainIniziale) {
   card.append(layers);
   const size = study ? study.image_size : null;
   let axesData = null;
-  /* Di default sull'immagine ci sono due cose sole: il rettangolo di adesso e quello che
-     stai valutando. Tutto il resto e' materiale di indagine, si accende quando serve —
-     prima ce n'erano dieci insieme e non si capiva piu' a cosa si riferissero. */
+  /* Cosa si vede aprendo: il rettangolo di adesso, le due corde della coppia e l'asse che
+     ne esce. Sono lo studio, non un livello facoltativo - questa sezione serve a guardare
+     quelli. Il resto (rettangolo del gruppo, assi dai marker, centro immagine, marker)
+     resta materiale di indagine e si accende quando serve: prima erano dieci disegni
+     insieme e non si capiva piu' a cosa si riferissero. */
   const attivi = {
-    attuale: true, gruppo: false, corde: false, speculare: false,
-    assi_corde: false, assi_marker: false, assi_immagine: false, marker: false,
+    attuale: true, gruppo: false, corde: true, speculare: true,
+    assi_corde: true, assi_marker: false, assi_immagine: false, marker: false,
     candidato: '',
   };
   const gruppi = study ? Object.keys(study.per_group) : Object.keys(specularita.per_group || {});
