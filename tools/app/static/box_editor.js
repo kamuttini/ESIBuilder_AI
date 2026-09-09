@@ -45,13 +45,17 @@ function cloneBoxes(source) {
 
 /* Un editor su una singola immagine. `boxes` viene mutato in posto; `onChange` avvisa. */
 function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoubleClick,
-                           margins, projectId, imageName }) {
+                           margins, projectId, imageName, soloControlli }) {
   const marginState = margins || { x: 0, y: 0 };
   const root = el('div', { class: 'editor' });
   const stage = el('div', { class: 'editor-stage' });
   const image = el('img', { src: imageSrc, alt: '' });
   if (height) image.style.maxHeight = height;
   stage.append(image);
+  // `soloControlli`: i cursori e i numeri senza la loro immagine, per quando il rettangolo
+  // si trascina altrove. Lo stage resta costruito - e' lui a dare la scala ai calcoli - ma
+  // fuori dalla pagina, che e' meno fragile che rendere opzionale mezza funzione.
+  if (soloControlli) stage.style.display = 'none';
   root.append(stage);
 
   // la selezione salta i box in sola lettura: non si modificano

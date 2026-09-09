@@ -619,7 +619,7 @@ function confermaInDueTempi(label, testo, azione) {
   return riga;
 }
 
-function rectChainCard(panel) {
+function rectChainCard(panel, ganciRect) {
   const studyHost = el('div');
   panel.append(studyHost);
   const card = el('details', { class: 'ov-fold', style: 'margin-top:12px' });
@@ -771,7 +771,7 @@ function rectChainCard(panel) {
       }
       body.append(riga);
     }
-    if (studyHost) { studyHost.innerHTML = ''; rectStudyCard(studyHost, chain); }
+    if (studyHost) { studyHost.innerHTML = ''; rectStudyCard(studyHost, chain, ganciRect); }
   };
   load();
 }
@@ -784,8 +784,13 @@ const GROUP_COLORS_RECT = { NF: '#ff6040', LR: '#40d0ff', UD: '#d29922', LRUD: '
    Per ogni gruppo di orientamento: il rettangolo di quel gruppo, quello attuale, la
    proposta, la corda piu' larga trovata e quella del gruppo speculare — cosi' si vede se
    cadono una sull'altra. */
-function rectStudyCard(panel, chainIniziale) {
+function rectStudyCard(panel, chainIniziale, ganci) {
   let chain = chainIniziale;
+  /* Il rettangolo si modifica **qui**, sull'immagine dello studio: e' l'unica immagine
+     della sezione. Prima ce n'erano due, la stessa cosa disegnata due volte a due scale
+     diverse - si guardavano le corde su una e si trascinavano i bordi sull'altra. I ganci
+     arrivano dal pannello, che e' chi possiede il valore da salvare. */
+  const gancio = ganci || {};
   let study = (chain.study || {}).segments;
   const specularita = ((chain.passes || []).find((p) => p.id === 'specularita') || {}).saved || {};
   if (!study && !specularita.per_group) return null;
@@ -836,6 +841,74 @@ function rectStudyCard(panel, chainIniziale) {
     if (label) node.append(el('span', { class: 'study-tag', style: `background:${color}` }, label));
     return node;
   };
+  /* Il rettangolo di adesso, trascinabile: otto maniglie e il corpo. E' lo stesso gesto che
+     stava nell'altro editor, portato sull'immagine dove ci sono anche le corde - che e' il
+     motivo per cui lo si sposta: si vede subito se il bordo taglia il ventaglio. */
+  const LATI_RECT = ['nw', 'n', 'ne', 'w', 'e', 'sw', 's', 'se'];
+  const rettangoloModificabile = (box) => {
+    const s = scala();
+    const node = el('div', {
+      class: 'editor-box study-box' + (gancio.scriviRect ? '' : ' readonly'),
+      style: `--box-color:#ffffff;left:${box.left * s.x}px;top:${box.top * s.y}px;`
+        + `width:${(box.right - box.left) * s.x}px;height:${(box.bottom - box.top) * s.y}px;`,
+    });
+    node.append(el('span', { class: 'study-tag', style: 'background:#ffffff;color:#0d1117' },
+      `${box.right - box.left}x${box.bottom - box.top}`));
+    if (!gancio.scriviRect) return node;
+    node.addEventListener('pointerdown', (e) => {
+      if (e.target === node) trascinaRect(e, 'move');
+    });
+    for (const lato of LATI_RECT) {
+      const h = el('div', { class: `handle handle-${lato}` });
+      h.addEventListener('pointerdown', (e) => trascinaRect(e, lato));
+      node.append(h);
+    }
+    return node;
+  };
+
+  function trascinaRect(event, lato) {
+    event.preventDefault();
+    event.stopPropagation();
+    const partenza = { x: event.clientX, y: event.clientY };
+    const box = { ...gancio.leggiRect() };
+    const s = scala();
+    const [W, H] = [(size && size[0]) || 0, (size && size[1]) || 0];
+    const bersaglio = event.currentTarget;
+    bersaglio.setPointerCapture(event.pointerId);
+    const muovi = (e) => {
+      const dx = Math.round((e.clientX - partenza.x) / (s.x || 1));
+      const dy = Math.round((e.clientY - partenza.y) / (s.y || 1));
+      const n = { ...box };
+      if (lato === 'move') {
+        const largo = box.right - box.left;
+        const alto = box.bottom - box.top;
+        n.left = Math.max(0, Math.min(box.left + dx, (W || box.right) - largo));
+        n.top = Math.max(0, Math.min(box.top + dy, (H || box.bottom) - alto));
+        n.right = n.left + largo;
+        n.bottom = n.top + alto;
+      } else {
+        if (lato.includes('w')) n.left = Math.min(box.left + dx, box.right - 4);
+        if (lato.includes('e')) n.right = Math.max(box.right + dx, box.left + 4);
+        if (lato.includes('n')) n.top = Math.min(box.top + dy, box.bottom - 4);
+        if (lato.includes('s')) n.bottom = Math.max(box.bottom + dy, box.top + 4);
+        n.left = Math.max(0, n.left); n.top = Math.max(0, n.top);
+        if (W) n.right = Math.min(n.right, W);
+        if (H) n.bottom = Math.min(n.bottom, H);
+      }
+      gancio.scriviRect({ left: Math.round(n.left), top: Math.round(n.top),
+                          right: Math.round(n.right), bottom: Math.round(n.bottom) });
+      draw();
+    };
+    const molla = () => {
+      bersaglio.removeEventListener('pointermove', muovi);
+      bersaglio.removeEventListener('pointerup', molla);
+      bersaglio.removeEventListener('pointercancel', molla);
+    };
+    bersaglio.addEventListener('pointermove', muovi);
+    bersaglio.addEventListener('pointerup', molla);
+    bersaglio.addEventListener('pointercancel', molla);
+  }
+
   /* La corda si corregge trascinandola: due maniglie agli estremi cambiano x1 e x2, il
      corpo della linea la sposta in verticale. Il detector puo' sbagliarla, e questa e' la
      misura da cui dipende tutto il giro 3: correggerla deve valere piu' del suo risultato. */
@@ -944,7 +1017,10 @@ function rectStudyCard(panel, chainIniziale) {
       .forEach((n) => n.remove());
     const m = study && study.per_group[corrente];
     const rectDelGruppo = (specularita.per_group || {})[corrente];
-    if (attivi.attuale && chain.rect) stage.append(boxNode(chain.rect, '#ffffff', false, 'attuale'));
+    if (attivi.attuale) {
+      const suo = gancio.leggiRect ? gancio.leggiRect() : chain.rect;
+      if (suo) stage.append(rettangoloModificabile(suo));
+    }
     if (attivi.gruppo && rectDelGruppo) {
       stage.append(boxNode(rectDelGruppo, GROUP_COLORS_RECT[corrente], false, `rect ${corrente}`));
     }
@@ -1018,6 +1094,8 @@ function rectStudyCard(panel, chainIniziale) {
       info.textContent = 'per questo gruppo non c\'e\' ancora lo studio delle corde: lancia il giro 3';
     }
   };
+  // Il pannello puo' chiedere di ridisegnare: succede quando si cambia un numero sotto.
+  if (ganci) ganci.ridisegna = draw;
 
   /* Le elaborazioni sono di cartella, le immagini sono tante: si scorrono tutte sotto gli
      stessi disegni, cosi' si controlla che corda, rettangolo e assi tengano su ognuna e non
@@ -1487,12 +1565,31 @@ function panelRect(panel, step) {
   panel.append(el('p', { class: 'hint' },
     'un solo rettangolo per tutta la cartella: e\' la geometria da cui dipendono ' +
     'orientamento, depth e scala.'));
-  rectChainCard(panel);
+  // I ganci per l'immagine dello studio, che e' l'unica: da li' si trascina il rettangolo,
+  // e il valore vive qui. Si passano come funzioni perche' `panelRect` lo costruisce dopo.
+  let editorRef = null;   // i comandi numerici, che devono seguire il trascinamento
+  const ganciRect = {
+    leggiRect: () => value.rect_echo,
+    scriviRect: (box) => {
+      applyBoxes({ rect_echo: box });
+      // I numeri sotto sono una copia: senza questo restavano fermi mentre il rettangolo
+      // si muoveva, e due punti della stessa pagina dicevano cose diverse.
+      if (editorRef) {
+        Object.assign(editorRef.boxes.rect_echo, value.rect_echo);
+        editorRef.paint();
+      }
+    },
+    // Lo studio ci mette dentro il suo `draw`: cosi' cambiando un numero si muove anche
+    // il rettangolo sull'immagine, che e' l'altro verso dello stesso legame.
+    ridisegna: null,
+  };
+  rectChainCard(panel, ganciRect);
 
-  panel.append(el('h3', {}, 'Correggi a mano il rettangolo (#11)'));
+  panel.append(el('h3', {}, 'Il rettangolo in numeri (#11)'));
   panel.append(el('p', { class: 'hint' },
-    'trascina i bordi o usa gli slider. I margini si aggiungono attorno, in percentuale: ' +
-    'a zero il salvato coincide col rettangolo.'));
+    'i bordi si trascinano sull\'immagine qui sopra, dove ci sono anche le corde. Qui ci '
+    + 'sono i numeri e i margini, che si aggiungono attorno in percentuale: a zero il '
+    + 'salvato coincide col rettangolo.'));
 
   const rectSize = el('div', { class: 'hint' });
   const dirtyBadge = el('span', { class: 'dirty' }, 'modifiche non salvate');
@@ -1543,6 +1640,7 @@ function panelRect(panel, step) {
   const applyBoxes = (boxes, marginState) => {
     if (marginState) value.margin_percent = { x: marginState.x, y: marginState.y };
     if (boxes.rect_echo) value.rect_echo = { ...value.rect_echo, ...boxes.rect_echo };
+    if (ganciRect && ganciRect.ridisegna) ganciRect.ridisegna();
     readout();
     dirtyBadge.style.display =
       JSON.stringify([cloneBoxes(value), value.margin_percent]) === original
@@ -1568,15 +1666,17 @@ function panelRect(panel, step) {
       projectId: state.projectId,
       imageName: value.preview_image,
       onChange: applyBoxes,
-      onDoubleClick: () => openFullscreen(),
+      // Niente immagine qui: il rettangolo si trascina su quella dello studio, sopra, dove
+      // ci sono anche le corde. Restano i numeri e i margini, che un'immagine non la vogliono.
+      soloControlli: true,
     });
+    editorRef = editor;
     panel.append(editor.root);
-    panel.append(el('div', { class: 'row' }, Lente.bottone(editor.contestoLente),
-      el('span', { class: 'hint' }, 'una finestra a parte con il riquadro ingrandito: '
-        + 'si trascina sul secondo schermo e segue quello che fai qui')));
-    panel.append(el('p', { class: 'hint' },
-      'doppio clic sull\'immagine per aprirla a schermo intero · tratteggiato grigio: il ' +
-      'rettangolo originario proposto dalla rete'));
+    panel.append(el('div', { class: 'row' },
+      el('button', { class: 'ghost', onclick: () => openFullscreen() }, 'Schermo intero'),
+      Lente.bottone(editor.contestoLente),
+      el('span', { class: 'hint' }, 'la lente: una finestra a parte col riquadro ingrandito, '
+        + 'da tenere sul secondo schermo')));
     panel.append(el('div', { class: 'row' },
       el('button', { onclick: saveBoxes }, 'Salva il rettangolo'),
       dirtyBadge,
@@ -1598,8 +1698,6 @@ function panelRect(panel, step) {
           toast('ripristinati i valori della rete');
         },
       }, 'Valori iniziali della rete'),
-      el('button', { class: 'ghost', onclick: () => openFullscreen() },
-        'Schermo intero e scorri le immagini'),
       el('button', {
         class: 'ghost',
         onclick: async () => {
