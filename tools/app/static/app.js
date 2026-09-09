@@ -1565,7 +1565,20 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     const rectDelGruppo = (specularita.per_group || {})[corrente];
     if (attivi.attuale) {
       const suo = gancio.leggiRect ? gancio.leggiRect() : chain.rect;
-      if (suo) stage.append(rettangoloModificabile(suo));
+      if (suo) {
+        // Quello che finisce davvero in #11: il rettangolo col margine attorno. Si disegna
+        // per primo, sotto, e si aggiorna mentre si muovono i cursori - il margine e' una
+        // percentuale, e a occhio non si sa quanti pixel faccia finche' non lo si vede.
+        const salvato = gancio.leggiSalvato ? gancio.leggiSalvato() : null;
+        if (salvato && (salvato.left !== suo.left || salvato.right !== suo.right
+            || salvato.top !== suo.top || salvato.bottom !== suo.bottom)) {
+          const stretto = salvato.right - salvato.left < suo.right - suo.left;
+          stage.append(boxNode(salvato, '#3fb950', true,
+            `salvato in #11 · ${salvato.right - salvato.left}x${salvato.bottom - salvato.top}`
+            + (stretto ? ' (stretto)' : '')));
+        }
+        stage.append(rettangoloModificabile(suo));
+      }
     }
     if (attivi.gruppo && rectDelGruppo) {
       stage.append(boxNode(rectDelGruppo, GROUP_COLORS_RECT[corrente], false, `rect ${corrente}`));
@@ -2142,6 +2155,9 @@ function panelRect(panel, step) {
   let editorRef = null;   // i comandi numerici, che devono seguire il trascinamento
   const ganciRect = {
     leggiRect: () => value.rect_echo,
+    // Il rettangolo col margine: e' quello che finisce nel file, e va visto sull'immagine
+    // mentre si muovono i cursori.
+    leggiSalvato: () => savedRect(),
     scriviRect: (box) => {
       applyBoxes({ rect_echo: box });
       // I numeri sotto sono una copia: senza questo restavano fermi mentre il rettangolo

@@ -23,13 +23,19 @@ function expandBox(box, margins, maxWidth, maxHeight) {
   if (!box) return null;
   const dx = Math.round(((margins?.x || 0) / 100) * (box.right - box.left));
   const dy = Math.round(((margins?.y || 0) / 100) * (box.bottom - box.top));
+  // Con margine negativo il rettangolo si stringe: i lati non devono pero' scavalcarsi,
+  // se no si ottiene un rettangolo rovesciato che nessuno sa disegnare.
+  const meta_x = Math.floor((box.right - box.left) / 2) - 1;
+  const meta_y = Math.floor((box.bottom - box.top) / 2) - 1;
+  const sx = Math.max(-meta_x, dx);
+  const sy = Math.max(-meta_y, dy);
   return {
-    left: Math.max(0, box.left - dx),
-    right: Math.min(maxWidth - 1, box.right + dx),
-    top: Math.max(0, box.top - dy),
-    bottom: Math.min(maxHeight - 1, box.bottom + dy),
-    clampedX: box.left - dx < 0 || box.right + dx > maxWidth - 1,
-    clampedY: box.top - dy < 0 || box.bottom + dy > maxHeight - 1,
+    left: Math.max(0, box.left - sx),
+    right: Math.min(maxWidth - 1, box.right + sx),
+    top: Math.max(0, box.top - sy),
+    bottom: Math.min(maxHeight - 1, box.bottom + sy),
+    clampedX: box.left - sx < 0 || box.right + sx > maxWidth - 1,
+    clampedY: box.top - sy < 0 || box.bottom + sy > maxHeight - 1,
   };
 }
 
@@ -124,7 +130,9 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
           if (!marginState.x && !marginState.y) {
             parts.push('margini a zero: viene salvato esattamente il rettangolo ecografico');
           } else {
-            parts.push(`margine aggiunto: ${dx} px per lato in orizzontale, ${dy} px in verticale`);
+            const verso = (v, n) => (v < 0 ? `${n} px in meno` : `${n} px`);
+            parts.push(`margine: ${verso(marginState.x, Math.abs(dx))} per lato in `
+              + `orizzontale, ${verso(marginState.y, Math.abs(dy))} in verticale`);
             parts.push(`salvato ${saved.right - saved.left} x ${saved.bottom - saved.top} px ` +
                        `invece di ${box.right - box.left} x ${box.bottom - box.top}`);
             if (saved.clampedX || saved.clampedY) {
@@ -226,12 +234,14 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
       const margins = { note };
       for (const axis of ['x', 'y']) {
         const label = axis === 'x' ? 'margine sx/dx %' : 'margine alto/basso %';
-        // Percentages of the rectangle's own side, added on both sides: at 0 nothing changes.
-        const range = el('input', { type: 'range', min: '0', max: '25', step: '0.1' });
-        const number = el('input', { type: 'number', min: '0', max: '25', step: '0.1',
+        // Percentuale del lato del rettangolo, su tutti e due i lati: a 0 non cambia niente.
+        // In **negativo** il rettangolo si stringe - a volte il ventaglio finisce prima di
+        // dove la rete lo ha chiuso, e non c'era modo di dirlo se non spostando i bordi.
+        const range = el('input', { type: 'range', min: '-25', max: '25', step: '0.1' });
+        const number = el('input', { type: 'number', min: '-25', max: '25', step: '0.1',
                                      style: 'width:84px' });
         const set = (raw) => {
-          marginState[axis] = Math.max(0, Math.min(25, parseFloat(raw) || 0));
+          marginState[axis] = Math.max(-25, Math.min(25, parseFloat(raw) || 0));
           paint();
           if (onChange) onChange(boxes, marginState);
         };
