@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -164,7 +165,16 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int,
         project = _project(project_id)
 
         _job_update(job_id, stage="scansione e dedup")
-        imported = import_folder(Path(folder))
+        # L'area dell'orologio, se e' gia' stata indicata, va rispettata anche quando si
+        # rilancia l'analisi: e' una scelta dell'utente su questa cartella, non un dettaglio
+        # della corsa di prima.
+        area_orologio = (project.step_value("import") or {}).get("timestamp_box")
+        imported = import_folder(
+            Path(folder), timestamp_box=area_orologio,
+            progress=lambda fatte, quante: _job_update(
+                job_id, stage="scansione e dedup (confronto senza l'orologio)",
+                done=fatte, total=quante),
+        )
         # The deduplicated list is the working set from here on: nets, modules, viewer.
         project.save_dedup_images(imported.pop("kept_names", []))
         project.source.update(
@@ -1223,6 +1233,78 @@ def api_step_confirm(project_id: str, step_id: str):
                 status="proposed" if annulla else "confirmed",
                 source="model" if annulla else "user")
     return jsonify({"confirmed": not annulla, "status": _project(project_id).status_report()})
+
+
+@app.post("/api/projects/<project_id>/import/timestamp")
+def api_import_timestamp(project_id: str):
+    """L'area dell'orologio, e la deduplicazione rifatta ignorandola.
+
+    Due fotogrammi della stessa scena presi a un secondo di distanza differiscono in ogni
+    byte del file e in nessun pixel tranne l'ora. Finche' non si dice dove sta quell'ora,
+    nessuna misura li trova uguali - e restano tutti e due, a pesare due volte in ogni
+    mediana dei moduli.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    folder = (project.source.get("folder") or "").strip()
+    if not folder or not Path(folder).is_dir():
+        return jsonify({"error": "cartella non raggiungibile"}), 400
+    if payload.get("reset"):
+        box = None
+    else:
+        grezzo = payload.get("box") or {}
+        try:
+            box = {k: int(round(float(grezzo[k]))) for k in ("top", "left", "bottom", "right")}
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"error": "serve un riquadro completo (top/left/bottom/right)"}), 400
+        if box["right"] - box["left"] < 4 or box["bottom"] - box["top"] < 4:
+            return jsonify({"error": "l'area dell'orologio e' troppo piccola"}), 400
+    return jsonify({"job_id": _start_job(_run_dedup, project_id, folder, box)})
+
+
+def _run_dedup(job_id: str, project_id: str, folder: str, box: Optional[Dict]) -> None:
+    """Rifa' solo la deduplicazione, senza toccare il resto dell'analisi."""
+    try:
+        _job_update(job_id, stage="rileggo le immagini senza l'area dell'orologio")
+        esito = import_folder(
+            Path(folder), timestamp_box=box,
+            progress=lambda fatte, quante: _job_update(
+                job_id, stage="confronto le immagini", done=fatte, total=quante),
+        )
+        project = _project(project_id)
+        project.save_dedup_images(esito.get("kept_names") or [])
+        # Lo specchio di lavoro va rifatto: contiene una copia (o un link) per immagine
+        # tenuta, e adesso ne sono di meno.
+        specchio = project.root / project.DEDUP_LINKS
+        if specchio.exists():
+            shutil.rmtree(specchio, ignore_errors=True)
+
+        def mutate(_p: Project, value: Dict) -> Dict:
+            value.update({
+                "timestamp_box": dict(box) if box else None,
+                "duplicates": esito.get("duplicates") or {},
+                "duplicates_removed": esito.get("duplicates_removed", 0),
+                "images_total": esito.get("images_total", 0),
+                "images_total_raw": esito.get("images_total_raw", 0),
+            })
+            return value
+
+        _write_step(project_id, "import", mutate, status="proposed", source="user")
+        progetto = _project(project_id)
+        progetto.source.update({
+            "images_total": esito.get("images_total", 0),
+            "duplicates_removed": esito.get("duplicates_removed", 0),
+        })
+        progetto.save()
+        progetto.dedup_link_dir()      # ricostruisce lo specchio, ruotato se serve
+        doppie = esito.get("duplicates") or {}
+        _job_update(job_id, status="done", stage="fatto", result={
+            "kept": esito.get("images_total", 0),
+            "identical": len(doppie.get("identical") or []),
+            "timestamp": len(doppie.get("timestamp") or []),
+        })
+    except Exception as error:  # noqa: BLE001
+        _job_update(job_id, status="error", stage="errore", error=str(error))
 
 
 @app.post("/api/projects/<project_id>/resize_check")

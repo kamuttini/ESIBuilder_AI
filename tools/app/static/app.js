@@ -327,10 +327,15 @@ function panelImport(panel) {
   panel.append(el('h3', {}, 'cartella'));
   const card = el('div', { class: 'card' });
   const rotation = value.rotation_detail || {};
+  const doppie = value.duplicates || {};
+  const uguali = (doppie.identical || []).length;
+  const orologio = (doppie.timestamp || []).length;
   for (const [key, val] of [
     ['immagini trovate', value.images_total_raw],
-    ['dopo la dedup esatta', value.images_total],
-    ['duplicati rimossi', value.duplicates_removed],
+    ['immagini tenute', value.images_total],
+    ['scartate perche\' identiche', uguali],
+    ['scartate perche\' cambia solo l\'ora',
+      value.timestamp_box ? orologio : 'area dell\'ora non indicata'],
     ['input video (#06)', state.meta.video_inputs[value.video_input] || value.video_input],
     ['video input (#07/#08)', (value.video_input_size || []).join(' x ')],
     ['immagine campione (#09/#10)', (value.image_sample_size || []).join(' x ')],
@@ -339,6 +344,85 @@ function panelImport(panel) {
   panel.append(card);
   for (const warning of value.warnings || []) {
     panel.append(el('ul', { class: 'problems' }, el('li', {}, warning)));
+  }
+
+  /* L'area dell'orologio.
+
+     Due fotogrammi della stessa scena presi a un secondo di distanza differiscono in ogni
+     byte del file e in nessun pixel tranne l'ora: nessuna misura li trova uguali, e restano
+     tutti e due a pesare due volte in ogni mediana dei moduli. Indicare dove sta l'ora e'
+     l'unico modo di dirlo al programma - e non e' indovinabile, perche' ogni macchina la
+     scrive in un posto suo. */
+  const anteprima = ((state.project.steps.vendor || {}).value || {}).preview_image
+    || (value.images || [])[0]?.name;
+  if (anteprima) {
+    panel.append(el('h3', {}, 'Area dell\'ora, da non guardare quando si confrontano le immagini'));
+    panel.append(el('p', { class: 'hint' },
+      'trascina un rettangolo attorno all\'orologio a schermo. Le immagini che differiscono '
+      + 'solo li\' dentro vengono scartate come le identiche: ai moduli serve un fotogramma '
+      + 'per contenuto, non due copie della stessa scena.'));
+    // Senza un riquadro da cui partire non c'e' niente da trascinare: se ne mette uno
+    // piccolo in alto a sinistra, che e' dove l'ora sta piu' spesso, e lo si porta dov'e'.
+    const misura = value.image_sample_size || [1920, 1080];
+    const boxOra = {
+      timestamp: value.timestamp_box ? { ...value.timestamp_box } : {
+        left: Math.round(misura[0] * 0.02), top: Math.round(misura[1] * 0.02),
+        right: Math.round(misura[0] * 0.16), bottom: Math.round(misura[1] * 0.06),
+      },
+    };
+    const editor = createBoxEditor({
+      imageSrc: `/api/projects/${state.projectId}/image`
+        + `?name=${encodeURIComponent(anteprima)}&w=980`,
+      boxes: boxOra,
+      sampleSize: value.image_sample_size,
+      projectId: state.projectId,
+      imageName: anteprima,
+      onChange: () => { statoOra.textContent = ''; },
+    });
+    panel.append(editor.root);
+    const statoOra = el('span', { class: 'hint' });
+    const applica = el('button', {}, 'Usa quest\'area e rifai la deduplicazione');
+    applica.addEventListener('click', async () => {
+      const box = editor.boxes.timestamp;
+      if (!box) { toast('disegna prima il rettangolo attorno all\'ora', true); return; }
+      applica.disabled = true;
+      try {
+        const avvio = await api(`/projects/${state.projectId}/import/timestamp`, { body: { box } });
+        const job = await pollJob(avvio.job_id, statoOra);
+        const r = job.result || {};
+        toast(`${r.kept} immagini tenute · ${r.identical} identiche e ${r.timestamp} `
+          + 'uguali a meno dell\'ora, scartate');
+        await reload();
+      } catch (errore) { toast(errore.message, true); statoOra.textContent = errore.message; }
+      finally { applica.disabled = false; }
+    });
+    const riga = el('div', { class: 'row' }, applica, Lente.bottone(editor.contestoLente), statoOra);
+    if (value.timestamp_box) {
+      riga.append(confermaInDueTempi('Togli l\'area', 'si torna a confrontare tutta l\'immagine.',
+        async () => {
+          try {
+            const avvio = await api(`/projects/${state.projectId}/import/timestamp`,
+              { body: { reset: true } });
+            await pollJob(avvio.job_id, statoOra);
+            toast('area tolta');
+            await reload();
+          } catch (errore) { toast(errore.message, true); }
+        }));
+    }
+    panel.append(riga);
+    const elenco = [...((value.duplicates || {}).timestamp || []),
+                    ...((value.duplicates || {}).identical || [])];
+    if (elenco.length) {
+      const dett = el('details', { class: 'ov-fold' },
+        el('summary', {}, `le ${elenco.length} immagini scartate`));
+      const corpo = el('div', { class: 'depth-rimaste' });
+      for (const voce of elenco.slice(0, 200)) {
+        corpo.append(el('div', { class: 'hint' },
+          `${voce.name} — ${voce.kind === 'identiche' ? 'identica a' : 'uguale a meno dell\'ora a'} ${voce.of}`));
+      }
+      dett.append(corpo);
+      panel.append(dett);
+    }
   }
 
   if (analysis.vendor || analysis.probe) {

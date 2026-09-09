@@ -42,27 +42,87 @@ def scan_folder(folder: Path) -> List[Path]:
     return frames or images
 
 
-def deduplicate(paths: List[Path]) -> Tuple[List[Path], List[Path]]:
-    """Exact duplicates only: bucket by file size, hash just the collisions."""
+def _masked_digest(path: Path, mask: Optional[Dict]) -> Optional[str]:
+    """The image hashed with one rectangle blanked out.
+
+    Two frames of the same still picture, captured a second apart, differ in every byte of
+    the file but in no pixel except the clock. Blanking that rectangle before hashing is
+    what makes them compare equal - and it has to be the *pixels*, not the file: PNG
+    encoders leave timestamps and chunk order in the bytes.
+    """
+    try:
+        from PIL import Image, ImageDraw  # noqa: PLC0415
+
+        with Image.open(path) as raw:
+            image = raw.convert("RGB")
+            if mask:
+                ImageDraw.Draw(image).rectangle(
+                    [int(mask["left"]), int(mask["top"]),
+                     int(mask["right"]), int(mask["bottom"])],
+                    fill=(0, 0, 0),
+                )
+            return f"{image.size[0]}x{image.size[1]}:" + hashlib.sha1(image.tobytes()).hexdigest()
+    except Exception:  # noqa: BLE001 - un file illeggibile non e' un duplicato
+        return None
+
+
+def deduplicate(paths: List[Path], timestamp_box: Optional[Dict] = None,
+                progress=None) -> Tuple[List[Path], List[Dict]]:  # noqa: ANN001
+    """Le immagini da tenere, e quelle scartate **con il perche'**.
+
+    Due specie di scarto, tenute distinte perche' dicono due cose diverse su come e' stata
+    fatta l'acquisizione:
+
+    * `identiche` - stesso file, byte per byte. E' il duplicato classico;
+    * `solo_timestamp` - stessa immagine tranne l'orologio. Si vedono solo se le si indica
+      dove sta l'orologio, perche' altrimenti nessuna delle due misure le trova uguali.
+
+    Entrambe finiscono fuori: ai moduli serve un fotogramma per contenuto, e due copie dello
+    stesso pesano due volte nelle mediane senza aggiungere niente.
+    """
     by_size: Dict[int, List[Path]] = {}
     for path in paths:
         by_size.setdefault(path.stat().st_size, []).append(path)
 
     kept: List[Path] = []
-    removed: List[Path] = []
-    for size, group in by_size.items():
+    removed: List[Dict] = []
+    for _size, group in by_size.items():
         if len(group) == 1:
             kept.append(group[0])
             continue
         seen: Dict[str, Path] = {}
-        for path in group:
+        for path in sorted(group):
             digest = hashlib.sha1(path.read_bytes()).hexdigest()
             if digest in seen:
-                removed.append(path)
+                removed.append({"name": path.name, "path": str(path),
+                                "of": seen[digest].name, "kind": "identiche"})
             else:
                 seen[digest] = path
                 kept.append(path)
-    return sorted(kept), sorted(removed)
+
+    if not timestamp_box:
+        return sorted(kept), removed
+
+    # Seconda passata, sui soli sopravvissuti: uguali a meno dell'orologio. Costa una
+    # decodifica per immagine, quindi si fa solo quando l'area e' stata indicata.
+    per_impronta: Dict[str, Path] = {}
+    tenuti: List[Path] = []
+    quante = len(kept)
+    for indice, path in enumerate(sorted(kept)):
+        if progress is not None and (indice % 20 == 0 or indice == quante - 1):
+            progress(indice + 1, quante)
+        impronta = _masked_digest(path, timestamp_box)
+        if impronta is None:
+            tenuti.append(path)
+            continue
+        gemella = per_impronta.get(impronta)
+        if gemella is not None:
+            removed.append({"name": path.name, "path": str(path),
+                            "of": gemella.name, "kind": "solo_timestamp"})
+        else:
+            per_impronta[impronta] = path
+            tenuti.append(path)
+    return sorted(tenuti), removed
 
 
 def parse_capture_metadata(name: str) -> Optional[Tuple[str, int, int]]:
@@ -103,14 +163,15 @@ def _image_size(path: Path) -> Optional[Tuple[int, int]]:
         return None
 
 
-def import_folder(folder: Path, max_listed: int = 60) -> Dict:
+def import_folder(folder: Path, max_listed: int = 60,
+                  timestamp_box: Optional[Dict] = None, progress=None) -> Dict:  # noqa: ANN001
     """Everything step 1 can establish without a model."""
     folder = Path(folder).expanduser()
     if not folder.is_dir():
         raise NotADirectoryError(str(folder))
 
     all_images = scan_folder(folder)
-    kept, removed = deduplicate(all_images)
+    kept, removed = deduplicate(all_images, timestamp_box, progress)
     warnings: List[str] = []
 
     metadata = majority_metadata(kept)
@@ -145,6 +206,13 @@ def import_folder(folder: Path, max_listed: int = 60) -> Dict:
         "images_total_raw": len(all_images),
         "images_total": len(kept),
         "duplicates_removed": len(removed),
+        "timestamp_box": dict(timestamp_box) if timestamp_box else None,
+        # Lo scarto per esteso, diviso per specie: serve a poterlo guardare, non solo a
+        # contarlo. Un numero non dice se ha buttato via la cosa giusta.
+        "duplicates": {
+            "identical": [d for d in removed if d["kind"] == "identiche"],
+            "timestamp": [d for d in removed if d["kind"] == "solo_timestamp"],
+        },
         "rotation_applied": 0,
         "rotation_source": "not_run",
         "resize_factor": 1.0,

@@ -13,6 +13,9 @@ const BOX_SPECS = [
   { key: 'rect_echo', label: 'rettangolo ecografico', color: '#ff6040', margins: true },
   { key: 'rect_name_echo', label: 'template ecografo #13', color: '#40d0ff' },
   { key: 'rect_name_probe', label: 'template sonda #14', color: '#d29922' },
+  // L'area dell'orologio: non finisce in nessuna riga del .fss, serve al confronto fra le
+  // immagini nell'import. Sta qui perche' si disegna con lo stesso editor.
+  { key: 'timestamp', label: 'area dell\'ora (esclusa dal confronto)', color: '#ff4fd8' },
 ];
 
 /* Il margine e' una percentuale del lato del rettangolo, aggiunta su entrambi i lati. */
