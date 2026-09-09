@@ -1842,7 +1842,10 @@ def api_orientation(project_id: str):
         row["box_batch"] = row.get("box")
         if v.get("box"):
             row["box"] = v["box"]
-    per_image = list(by_name.values())
+    # Solo le immagini di questo progetto: gli artefatti del marker sono di quando e'
+    # girato, e dopo uno sdoppiamento elencano ancora quelle dell'altro piano.
+    mie = _sue_immagini(project)
+    per_image = [r for r in by_name.values() if not mie or r.get("name") in mie]
 
     # The runner skips these on purpose: forbidden/freeze screens carry no orientation marker.
     marker_excluded = r"Thumbs\.db|Software Release|System Info|proibite"
@@ -2692,8 +2695,13 @@ def _envelope_contributors(project: Project, value: Dict) -> Dict[str, List[Dict
                 "name": name, "group": fixed["group"], "box": fixed["box"],
                 "score": fixed.get("score"), "source": "correzione", "corrected": True,
             }
+    # Solo le immagini che questo progetto ha: gli artefatti del marker sono di quando e'
+    # girato, e dopo uno sdoppiamento contengono ancora quelle dell'altro piano.
+    mie = _sue_immagini(project)
     out: Dict[str, List[Dict]] = {}
     for row in per_name.values():
+        if mie and row["name"] not in mie:
+            continue
         out.setdefault(row["group"], []).append(row)
     return out
 
@@ -3381,9 +3389,21 @@ RECT_PASSES = (
 )
 
 
+def _sue_immagini(project: Project) -> set:
+    """I nomi che questo progetto ha davvero.
+
+    Gli artefatti dei moduli sono di **quando sono girati**: dopo uno sdoppiamento contengono
+    ancora le immagini dell'altro piano, e ogni sezione che li legge tal quali le rimette in
+    scena - immagini che di questo progetto non fanno piu' parte. Il confronto con l'elenco
+    di adesso e' cio' che tiene le sezioni oneste senza aspettare che i moduli rigirino.
+    """
+    return set(project.dedup_names())
+
+
 def _groups_of_images(project: Project) -> Dict[str, str]:
     """Il gruppo di orientamento per immagine, con la solita priorita' delle sorgenti."""
     value = project.step_value("orientation")
+    mie = _sue_immagini(project)
     out: Dict[str, str] = {}
     stage = _marker_stage_dir(project)
     if stage is not None:
@@ -3397,7 +3417,7 @@ def _groups_of_images(project: Project) -> Dict[str, str]:
     for name, fixed in (value.get("corrections") or {}).items():
         if fixed.get("group"):
             out[name] = fixed["group"]
-    return out
+    return {n: g for n, g in out.items() if not mie or n in mie}
 
 
 def _mirror_rect(rect: Dict[str, int], group: str, width: int, height: int) -> Dict[str, int]:
@@ -4739,6 +4759,10 @@ def _dati_studio(project: Project) -> Optional[Dict]:
             frame["name"] = str(percorso_frame.relative_to(base))
         except ValueError:
             frame["name"] = percorso_frame.name
+    # Solo i fotogrammi di questo progetto: lo studio puo' essere di prima dello sdoppiamento.
+    mie = _sue_immagini(project)
+    if mie:
+        dati["frames"] = [f for f in (dati.get("frames") or []) if f.get("name") in mie]
     return dati
 
 
@@ -5310,6 +5334,10 @@ def api_scale_study(project_id: str):
             frame["name"] = str(percorso_frame.relative_to(base))
         except ValueError:
             frame["name"] = percorso_frame.name
+    # Solo i fotogrammi di questo progetto: lo studio puo' essere di prima dello sdoppiamento.
+    mie = _sue_immagini(project)
+    if mie:
+        dati["frames"] = [f for f in (dati.get("frames") or []) if f.get("name") in mie]
     valore = project.step_value("scale_study")
     correzioni = valore.get("corrections") or {}
     dati["corrections"] = correzioni
@@ -5398,6 +5426,11 @@ def api_depth(project_id: str):
             "reason": "il modulo non l'ha esaminata: la depth si puo' indicare a mano",
             "direct": {}, "scale": {}, "in_run": False,
         })
+    # Solo le immagini di questo progetto: la run della depth puo' essere di prima dello
+    # sdoppiamento, e conterrebbe ancora quelle dell'altro piano.
+    mie = _sue_immagini(project)
+    if mie:
+        righe = [r for r in righe if r["name"] in mie]
     righe.sort(key=lambda r: r["name"])
     correzioni = valore_step.get("depth_corrections") or {}
     for nome, fix in correzioni.items():
