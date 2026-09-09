@@ -1402,7 +1402,18 @@ def api_split_planes(project_id: str):
     piani = _piani_salvati(project)
     if not piani:
         return jsonify({"error": "il piano non e' ancora stato riconosciuto"}), 400
-    tutte = project.dedup_names()
+
+    # L'insieme da dividere non e' «le immagini di questo progetto»: dopo il primo
+    # sdoppiamento qui dentro ci sono solo le L, e riconfermare avrebbe diviso quelle -
+    # buttando via le T invece di rimetterle al loro posto. L'insieme sono le immagini dei
+    # due progetti insieme, che e' la cartella deduplicata.
+    tutte = list(project.dedup_names())
+    gia_esistente = str(project.source.get("split_into") or "")
+    if gia_esistente:
+        try:
+            tutte = sorted(set(tutte) | set(_project(gia_esistente).dedup_names()))
+        except FileNotFoundError:
+            tutte = sorted(set(tutte) | set(piani.keys()))
     nomi = {"L": [], "T": []}
     senza = []
     for nome in tutte:
@@ -1419,8 +1430,20 @@ def api_split_planes(project_id: str):
     # sarebbe peggio che tenerle dove si possono ancora guardare.
     nomi["L"].extend(senza)
 
+    # Se lo sdoppiamento c'e' gia' stato, si **aggiorna** quello che c'e' invece di aprire
+    # un terzo progetto. Correggere due immagini e ritrovarsi tre configurazioni sarebbe
+    # peggio del problema che si stava sistemando.
     nome_base = str(project.codes.get("project_name") or project.root.name)
-    nuovo = Project.create(_projects_root, f"{nome_base} T")
+    gia = str(project.source.get("split_into") or "")
+    nuovo = None
+    if gia:
+        try:
+            nuovo = _project(gia)
+        except FileNotFoundError:
+            nuovo = None
+    aggiornato = nuovo is not None
+    if nuovo is None:
+        nuovo = Project.create(_projects_root, f"{nome_base} T")
     nuovo.source.update({
         **{k: v for k, v in project.source.items() if k != "split_into"},
         "plane": "T",
@@ -1429,7 +1452,7 @@ def api_split_planes(project_id: str):
         "derived_at": datetime.now().isoformat(timespec="seconds"),
     })
     nuovo.codes.update({k: v for k, v in project.codes.items() if k != "project_name"})
-    nuovo.codes["project_name"] = f"{nome_base} T"
+    nuovo.codes.setdefault("project_name", f"{nome_base} T")
     nuovo.save()
     nuovo.save_dedup_images(sorted(nomi["T"]))
 
@@ -1463,6 +1486,12 @@ def api_split_planes(project_id: str):
     for step_id in STEP_EREDITATI:
         if step_id == "codes":
             continue
+        # Su un progetto che esiste gia' si eredita solo cio' che non e' ancora stato
+        # guardato: quello che ha gia' sistemato lei di la' vale piu' della copia di qua.
+        suo = nuovo.step_value(step_id) or {}
+        stato_suo = str((nuovo.steps.get(step_id) or {}).get("status") or "")
+        if aggiornato and suo and stato_suo not in ("", "empty", "proposed"):
+            continue
         valore = dict(project.step_value(step_id) or {})
         if valore:
             nuovo.set_step(step_id, _anteprima_valida(valore, nomi_t),
@@ -1471,9 +1500,15 @@ def api_split_planes(project_id: str):
                    status="proposed", source="ereditato")
     scala = project.step_value("depth_scale") or {}
     ereditata = {k: scala[k] for k in CHIAVI_SCALA_EREDITATE if scala.get(k)}
-    if ereditata:
+    stato_scala = str((nuovo.steps.get("depth_scale") or {}).get("status") or "")
+    if ereditata and not (aggiornato and stato_scala not in ("", "empty", "proposed")):
         nuovo.set_step("depth_scale", ereditata, status="proposed", source="ereditato")
     nuovo.save()
+    # Lo specchio di lavoro va rifatto da zero: aggiornando una divisione gia' fatta le
+    # immagini sono altre, e il timbro `.built_from` cambierebbe solo se cambia il numero.
+    specchio_t = nuovo.root / nuovo.DEDUP_LINKS
+    if specchio_t.exists():
+        shutil.rmtree(specchio_t, ignore_errors=True)
     nuovo.dedup_link_dir()
 
     # E la L resta qui, con le sue sole immagini - anteprime comprese: anche di qua quella
@@ -1502,7 +1537,8 @@ def api_split_planes(project_id: str):
         shutil.rmtree(specchio, ignore_errors=True)
     project.dedup_link_dir()
 
-    return jsonify({"created": nuovo.root.name, "L": len(nomi["L"]), "T": len(nomi["T"]),
+    return jsonify({"created": nuovo.root.name, "updated": aggiornato,
+                    "L": len(nomi["L"]), "T": len(nomi["T"]),
                     "without_plane": len(senza),
                     "inherited": list(STEP_EREDITATI) + (["scala"] if ereditata else [])})
 
@@ -6741,6 +6777,15 @@ def api_image(project_id: str):
     if not folder.is_dir() or not name:
         return jsonify({"error": "immagine non disponibile"}), 404
     path = _immagine_nella_cartella(folder, name)
+    ruota_qui = 0
+    if path is None:
+        # Un'immagine che questo progetto non ha piu' nello specchio - dopo lo sdoppiamento
+        # sono quelle dell'altro piano - si prende comunque dalla cartella d'origine: serve
+        # a **guardare** la divisione, e per guardarla bisogna vederle tutte e due le file.
+        # Li' pero' sono ancora storte, quindi si raddrizza qui.
+        originale = Path(project.source.get("folder") or "")
+        path = _immagine_nella_cartella(originale, name) if originale.is_dir() else None
+        ruota_qui = project.rotation()
     if path is None:
         return jsonify({"error": "percorso non consentito"}), 403
     width = int(request.args.get("w") or 320)
@@ -6751,6 +6796,9 @@ def api_image(project_id: str):
 
         with Image.open(path) as raw:
             image = raw.convert("RGB")
+            if ruota_qui:
+                # `angle` e' la rotazione oraria che raddrizza: PIL ruota antiorario.
+                image = image.rotate(-ruota_qui, expand=True)
             original = image.size
             image.thumbnail((width, width))
             scale_x = image.size[0] / original[0]

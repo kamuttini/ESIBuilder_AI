@@ -477,23 +477,31 @@ function panelImport(panel) {
       finally { riconosci.disabled = false; }
     });
     const riga = el('div', { class: 'row' }, riconosci, stato);
-    if (quantiL && quantiT && !(state.project.source || {}).split_into) {
-      riga.append(confermaInDueTempi(`Sdoppia: ${quantiL} in L qui, ${quantiT} in T in un progetto nuovo`,
-        'la L resta in questo progetto, la T ne apre uno accanto che eredita codici, '
-        + 'vendor col suo template, sonda, rettangolo e il rapporto pixel/mm della scala. '
-        + 'E\' una copia: da li\' in poi le due configurazioni vivono per conto loro.',
+    const gia = (state.project.source || {}).split_into;
+    if (quantiL && quantiT) {
+      riga.append(confermaInDueTempi(
+        gia ? `Conferma la divisione: ${quantiL} in L qui, ${quantiT} in «${gia}»`
+            : `Sdoppia: ${quantiL} in L qui, ${quantiT} in T in un progetto nuovo`,
+        gia
+          ? 'i due progetti che ci sono gia\' vengono riportati alla divisione di adesso. '
+            + 'Quello che hai gia\' guardato di la\' non viene toccato: si aggiornano le '
+            + 'immagini, non il lavoro.'
+          : 'la L resta in questo progetto, la T ne apre uno accanto che eredita codici, '
+            + 'vendor col suo template, sonda, rettangolo e il rapporto pixel/mm della '
+            + 'scala. E\' una copia: da li\' in poi le due configurazioni vivono per conto loro.',
         async () => {
           try {
             const esito = await api(`/projects/${state.projectId}/split`, { body: {} });
-            toast(`creato ${esito.created}: ${esito.T} immagini in T`);
+            toast(esito.updated
+              ? `${esito.created} aggiornato: ${esito.L} in L, ${esito.T} in T`
+              : `creato ${esito.created}: ${esito.T} immagini in T`);
             await refreshProjects();
             await reload();
           } catch (errore) { toast(errore.message, true); }
         }));
     }
-    if ((state.project.source || {}).split_into) {
-      riga.append(el('span', { class: 'hint' },
-        `gia' sdoppiato: la T sta in «${(state.project.source || {}).split_into}»`));
+    if (gia) {
+      riga.append(el('span', { class: 'hint' }, `la T sta in «${gia}»`));
     }
     pianiBox.append(riga);
 
