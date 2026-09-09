@@ -1555,22 +1555,21 @@ async function createOrientationViewer(projectId, sampleSize) {
         'glifo cercato e\' proprio quello sbagliato, usa «Il marker trovato e\' sbagliato» e ' +
         'trascina un rettangolo attorno a quello vero.'))));
 
-  root.append(el('div', { class: 'ov-bar' }, filterRow, navRow));
-  root.append(el('div', { class: 'row' }, Lente.bottone(contestoLente),
-    el('span', { class: 'hint' }, 'il marker ingrandito in una finestra a parte, da tenere '
-      + 'sul secondo schermo: segue l\'immagine che stai guardando')));
+  root.append(el('div', { class: 'ov-bar' }, filterRow));
+
   root.append(fixBar);
   root.append(warnBar);
   root.append(bgBar);
 
+  // Immagine a sinistra, strumenti a destra: la stessa forma di tutte le sezioni.
+  // Frecce e lente sopra l'immagine, nello stesso posto di ogni altra sezione.
+  const barraImmagine = el('div', { class: 'barra-immagine' },
+    navRow, Lente.bottone(contestoLente));
   root.append(el('div', { class: 'ov-body' },
-    el('div', { class: 'ov-main' },
-      stage,
-      el('div', { class: 'ov-under' },
-        el('div', { class: 'ov-under-text' }, caption, detail, legend),
-        cropCard),
-      wrongPanel, modificaPanel, fixPanel),
-    el('div', { class: 'ov-side' }, limitsSide, listBox)));
+    el('div', { class: 'ov-main' }, barraImmagine, stage, caption),
+    el('div', { class: 'ov-side' },
+      detail, legend, cropCard, wrongPanel, modificaPanel, fixPanel,
+      limitsSide, listBox)));
 
   root.append(el('div', { class: 'ov-folds' },
     fold('chi fissa i bordi degli envelope', limitsTag, limitsCard),

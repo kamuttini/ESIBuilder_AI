@@ -845,6 +845,7 @@ async function createScaleViewer(projectId) {
       didascalia.append(el('span', {}, ' · righello non trovato: due clic per indicarlo'));
     }
     disegna(); aggiornaZoom(); renderDati(); renderPasso(); renderAzioni(); renderLista();
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
   };
   const passo = (delta) => {
     const elenco = visibili();
@@ -942,25 +943,54 @@ async function createScaleViewer(projectId) {
   };
   window.addEventListener('keydown', daTastiera);
 
+  /* Cosa vede la lente qui: la colonna del righello, con le tacche e i due estremi. Non
+     c'e' un riquadro da trascinare - il righello e' una riga di segni - quindi si guarda e
+     basta, ma il tasto sta dove sta in tutte le altre sezioni. */
+  const contestoLente = () => {
+    const f = corrente();
+    if (f.x == null) return { source: 'scala', projectId, name: f.name, boxes: [] };
+    const x = Number(f.x);
+    const ys = [f.y_zero, f.y_far].filter((v) => v != null).map(Number);
+    const su = ys.length ? Math.min(...ys) : 0;
+    const giu = ys.length ? Math.max(...ys) : (f.h || 0);
+    return {
+      source: 'scala',
+      projectId, name: f.name, size: [f.w || 0, f.h || 0],
+      boxes: [{ box: { left: x - 26, right: x + 26, top: su, bottom: giu },
+                color: '#40d0ff', label: 'righello' }],
+      segments: (f.ticks || []).map((y) => ({
+        x1: x - 22, x2: x + 22, y: Number(y), color: '#3fb950' })),
+      lines: [
+        ...(f.y_zero != null ? [{ y: Number(f.y_zero), color: '#3fb950', label: 'zero' }] : []),
+        ...(f.y_far != null ? [{ y: Number(f.y_far), color: '#d29922', label: 'fondo' }] : []),
+      ],
+      focus: { left: x - 70, right: x + 70, top: su - 20, bottom: giu + 20 },
+      caption: `${(f.ticks || []).length} tacche`,
+    };
+  };
+
+  // Frecce e lente sopra l'immagine, come in tutte le altre sezioni.
+  const barraImmagine = el('div', { class: 'barra-immagine' },
+    el('div', { class: 'ov-nav' },
+      el('button', { class: 'ghost sq', onclick: () => passo(-1) }, '‹'),
+      el('button', { class: 'ghost sq', onclick: () => passo(1) }, '›'),
+      didascalia, statoBox),
+    Lente.bottone(contestoLente));
+
   root.append(
     el('p', { class: 'hint' },
       `il righello di questa cartella: colonna a x=${Math.round((dati.zone || {}).x || 0)}, `
       + `trovata su ${(dati.zone || {}).found || 0} fotogrammi su ${(dati.zone || {}).total || 0}.`),
     legenda(),
     chips, notiBox, giroBox,
-    el('div', { class: 'ov-bar' },
-      el('div', { class: 'ov-nav' },
-        el('button', { class: 'ghost sq', onclick: () => passo(-1) }, '‹'),
-        el('button', { class: 'ghost sq', onclick: () => passo(1) }, '›'),
-        didascalia, statoBox)),
+    // Immagine a sinistra, strumenti a destra: la stessa forma di tutte le sezioni.
     el('div', { class: 'ov-body' },
       el('div', { class: 'ov-main' },
+        barraImmagine,
         el('div', { class: 'scala-zoom-coppia' }, zoomZero, zoomFondo),
-        stage,
-        el('div', { class: 'ov-under' },
-          el('div', { class: 'ov-under-text' }, passoBox, datiBox, azioni,
-            el('div', { class: 'row' }, rifai, avanzamento)))),
-      el('div', { class: 'ov-side' }, listBox)),
+        stage),
+      el('div', { class: 'ov-side' }, passoBox, datiBox, azioni,
+        el('div', { class: 'row' }, rifai, avanzamento), listBox)),
   );
 
   image.addEventListener('load', () => { disegna(); aggiornaZoom(); });

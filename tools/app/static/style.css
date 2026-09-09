@@ -1,4 +1,6 @@
 :root {
+  /* la larghezza dell'immagine, uguale in tutte le sezioni */
+  --immagine-larga: 720px;
   --bg: #12151a;
   --panel: #1a1f27;
   --panel-2: #222834;
@@ -457,14 +459,48 @@ button.chip:disabled { opacity: 0.35; }
 }
 .ov-actions .serie { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
 
-.ov-body { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
-.ov-main { flex: 1 1 560px; min-width: 0; }
+/* La barra sopra l'immagine, uguale in ogni sezione: frecce per scorrere la cartella, nome
+   dell'immagine, lente. Stessa riga, stesso ordine, stesso posto - si trovano senza
+   cercarle, che e' tutto quello che si chiede a un comando usato mille volte. */
+.barra-immagine {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  margin: 0 0 6px; min-height: 28px;
+}
+.barra-immagine .ov-nav { margin: 0; }
+
+/* Tutte le sezioni con un'immagine hanno la stessa forma: immagine a sinistra, larga
+   sempre uguale e appiccicata in alto; strumenti a destra, che scorrono. Prima ogni
+   sezione aveva la sua - immagini di misure diverse, comandi ora sotto ora di fianco - e
+   passando da una all'altra bisognava ritrovare ogni volta dove stavano le cose. */
+.ov-body { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+.ov-main {
+  flex: 1 1 var(--immagine-larga);
+  max-width: var(--immagine-larga);
+  min-width: 0;
+  position: sticky;
+  top: 8px;
+}
 .ov-side {
-  flex: 0 1 300px;
-  min-width: 230px;
+  flex: 1 1 320px;
+  min-width: 280px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+/* L'immagine riempie la sua colonna, in ogni sezione. Lo stage e' il riferimento degli
+   overlay: deve coincidere con l'immagine, se no i riquadri cadono spostati. */
+.ov-main .editor-stage, .rect-immagine .editor-stage, .editor > .editor-stage {
+  display: block;
+  width: 100%;
+}
+/* Anche l'editor dei box (ecografo, sonda) sta nella stessa larghezza: e' quella la misura
+   di riferimento, e due immagini della stessa cartella a due misure diverse si confrontano
+   male anche solo a memoria. */
+.editor { max-width: var(--immagine-larga); }
+.ov-main .editor-stage img, .rect-immagine .editor-stage img,
+.editor > .editor-stage img { width: 100%; }
+@media (max-width: 1100px) {
+  .ov-main { position: static; max-width: none; }
 }
 .ov-side .template-card { width: auto; }
 /* l'altezza esatta la mette il JS (quella dell'immagine, meno il ritaglio): qui c'e' solo
@@ -976,7 +1012,8 @@ img.depth-crop {
    una colonna sola: schiacciarle su uno schermo stretto le rende illeggibili entrambe. */
 .rect-due {
   display: grid;
-  grid-template-columns: minmax(380px, 1.35fr) minmax(300px, 1fr);
+  /* la stessa larghezza d'immagine di tutte le altre sezioni */
+  grid-template-columns: minmax(0, var(--immagine-larga)) minmax(300px, 1fr);
   gap: 16px;
   align-items: start;
 }

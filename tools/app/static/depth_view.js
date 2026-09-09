@@ -715,9 +715,7 @@ async function createDepthViewer(projectId, sampleSize) {
       el('div', { class: 'hint' },
         'trascina il riquadro o le maniglie per stringerlo sul solo numero: piu\' e\' stretto, '
         + 'piu\' il match tiene su tutte le immagini.'),
-      el('div', { class: 'row' }, misura,
-        Lente.bottone(contestoLente),
-        el('span', { class: 'hint' }, 'finestra a parte, per il secondo schermo')),
+      el('div', { class: 'row' }, misura),
       el('div', { class: 'row' }, stringi, esitoStretto),
       campi,
       el('div', { class: 'row' }, ambitoSel,
@@ -941,11 +939,13 @@ async function createDepthViewer(projectId, sampleSize) {
 
   // --- le due viste: una per una, oppure tutte le depth trovate in un colpo d'occhio
   let vista = 'singola';
+  /* Immagine a sinistra, strumenti a destra: la stessa forma di tutte le sezioni. Prima i
+     comandi stavano sotto l'immagine, e per usarli bisognava scorrere finche' l'immagine
+     non usciva dallo schermo - proprio quella che serviva per decidere. */
+  const barraImmagine = el('div', { class: 'barra-immagine' });
   const corpo = el('div', { class: 'ov-body' },
-    el('div', { class: 'ov-main' }, zoomTesta, zoomStage, stage,
-      el('div', { class: 'ov-under' },
-        el('div', { class: 'ov-under-text' }, dettaglio, confronto, riquadro, correzione))),
-    el('div', { class: 'ov-side' }, listBox));
+    el('div', { class: 'ov-main' }, barraImmagine, zoomTesta, zoomStage, stage),
+    el('div', { class: 'ov-side' }, dettaglio, confronto, riquadro, correzione, listBox));
   const vistaBtn = el('div', { class: 'ov-chips' },
     el('button', { class: 'chip on' }, 'una per una'),
     el('button', { class: 'chip' }, 'riepilogo per valore'));
@@ -953,7 +953,7 @@ async function createDepthViewer(projectId, sampleSize) {
     vistaBtn.children[0].className = 'chip' + (vista === 'singola' ? ' on' : '');
     vistaBtn.children[1].className = 'chip' + (vista === 'singola' ? '' : ' on');
     corpo.style.display = vista === 'singola' ? '' : 'none';
-    barra.style.display = vista === 'singola' ? '' : 'none';
+    barraImmagine.style.display = vista === 'singola' ? '' : 'none';
     riepilogo.style.display = vista === 'singola' ? 'none' : '';
     if (vista === 'singola') mostra(); else renderRiepilogo();
   };
@@ -964,7 +964,8 @@ async function createDepthViewer(projectId, sampleSize) {
     el('button', { class: 'ghost sq', onclick: () => passo(-1) }, '‹'),
     el('button', { class: 'ghost sq', onclick: () => passo(1) }, '›'),
     caption);
-  const barra = el('div', { class: 'ov-bar' }, nav);
+  // Frecce e lente vanno sopra l'immagine, nello stesso posto di ogni altra sezione.
+  barraImmagine.append(nav, Lente.bottone(contestoLente));
 
   root.append(
     el('p', { class: 'hint' },
@@ -979,7 +980,6 @@ async function createDepthViewer(projectId, sampleSize) {
       el('span', { class: 'hint' }, 'filtra le immagini per nome: serve per applicare un '
         + 'secondo riquadro a una parte sola della cartella')),
     vistaBtn,
-    barra,
     corpo,
     riepilogo,
   );

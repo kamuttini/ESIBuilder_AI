@@ -1565,10 +1565,6 @@ function rectStudyCard(panel, chainIniziale, ganci) {
   // appenderla qui e basta non serve a niente, perche' quella composizione ricomincia da capo.
   const inquadraCorde = el('button', { class: 'ghost sq2' }, 'inquadra le corde');
   inquadraCorde.addEventListener('click', () => { miraLente = null; draw(); });
-  const rigaLente = el('div', { class: 'row' }, Lente.bottone(contestoLente), inquadraCorde,
-    el('span', { class: 'hint' }, 'la lente segue quello che fai: ingrandisce la zona delle '
-      + 'corde, e mentre trascini un angolo del rettangolo va a quell\'angolo. Il rettangolo '
-      + 'si sposta anche da li\'.'));
 
   /* Solo i disegni dello studio delle corde. Gli altri - il rettangolo visto nel gruppo,
      gli assi dai marker, il centro dell'immagine, i marker - venivano da studi che questa
@@ -1823,7 +1819,10 @@ function rectStudyCard(panel, chainIniziale, ganci) {
      alto mentre la destra scorre: e' l'immagine il punto fermo del lavoro. */
   const colonnaSinistra = el('div', { class: 'rect-immagine' },
     chips,           // quale orientamento
-    navRow,          // quale immagine di quell'orientamento
+    // Frecce e lente nella stessa riga e nello stesso posto di ogni altra sezione.
+    el('div', { class: 'barra-immagine' }, navRow,
+      Lente.bottone(contestoLente), inquadraCorde,
+      el('span', { class: 'hint' }, 'la lente segue quello che tocchi')),
     stage,           // l'immagine con le elaborazioni
     legenda,         // che colore e' cosa
   );
@@ -1832,7 +1831,6 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     correzione,      // correggere la corda che si sta guardando
     spiegaAssi,      // cosa sono gli assi accesi
     layers,          // cosa mostrare sull'immagine
-    rigaLente,       // la stessa cosa ingrandita, su un'altra finestra
     candidati,       // quale rettangolo consegnare
   );
   card.replaceChildren(titolo, el('div', { class: 'rect-due' }, colonnaSinistra, colonnaDestra));
