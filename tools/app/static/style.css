@@ -182,6 +182,9 @@ pre.out {
 }
 .slider-row.margin-row .hint { width: 14px; }
 
+/* Il marker mentre lo si stringe: le maniglie prendono i clic, il box e' afferrabile. */
+.editor-box.marker-box.in-modifica { cursor: move; pointer-events: auto; }
+.editor-box.marker-box.in-modifica .handle { pointer-events: auto; }
 .editor-box.marker-box {
   border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.7); pointer-events: none;
 }

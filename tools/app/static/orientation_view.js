@@ -86,6 +86,20 @@ async function createOrientationViewer(projectId, sampleSize) {
   }
   const markerNode = el('div', { class: 'editor-box marker-box' });
   markerNode.style.display = 'none';
+  /* Le maniglie per stringere il marker. Restano nascoste finche' non si entra in modifica:
+     il rettangolo che si vede normalmente e' un risultato, non un comando. */
+  const LATI_MANIGLIA = ['nw', 'n', 'ne', 'w', 'e', 'sw', 's', 'se'];
+  const maniglieMarker = LATI_MANIGLIA.map((lato) => {
+    const h = el('div', { class: `handle handle-${lato}` });
+    h.style.display = 'none';
+    h.addEventListener('pointerdown', (e) => trascinaMarker(e, lato));
+    markerNode.append(h);
+    return h;
+  });
+  markerNode.addEventListener('pointerdown', (e) => {
+    if (!modificaMarker || e.target !== markerNode) return;
+    trascinaMarker(e, 'move');
+  });
   stage.append(markerNode);
 
   /* La rielaborazione si vede sull'immagine, non in una riga di testo altrove: velo,
@@ -131,7 +145,9 @@ async function createOrientationViewer(projectId, sampleSize) {
     const row = byName.get(names[index]);
     const gruppo = row && row.group;
     const voci = [];
-    if (row && row.box) {
+    if (modificaMarker && bozzaMarker) {
+      voci.push({ box: bozzaMarker, color: '#ff6040', label: 'marker da stringere' });
+    } else if (row && row.box) {
       voci.push({ box: row.box, color: GROUP_COLORS[gruppo] || '#40d0ff',
                   label: `marker ${gruppo || ''}`.trim() });
     }
@@ -140,7 +156,15 @@ async function createOrientationViewer(projectId, sampleSize) {
                            label: `envelope ${gruppo}` });
     return {
       projectId, name: names[index], size: [size[0] || 0, size[1] || 0], boxes: voci,
-      caption: row ? `score ${row.score}` : 'nessun marker',
+      caption: modificaMarker ? 'stringilo sul glifo'
+        : (row ? `score ${row.score}` : 'nessun marker'),
+      // Stringere un marker vuol dire guardarlo da vicino: e' il caso in cui la lente
+      // serve di piu', quindi qui si trascina anche da li'.
+      onChange: modificaMarker ? (nuovo) => {
+        bozzaMarker = limitaBox(nuovo);
+        place(markerNode, bozzaMarker);
+        renderModifica();
+      } : null,
     };
   };
 
@@ -156,7 +180,10 @@ async function createOrientationViewer(projectId, sampleSize) {
         `${Math.max(160, stage.clientHeight - limitsSide.offsetHeight - 8)}px`;
     }
     const row = byName.get(names[index]);
-    place(markerNode, row && row.box);
+    // In modifica comanda la bozza: ridisegnare il box del modulo cancellerebbe la
+    // stretta appena fatta.
+    place(markerNode, modificaMarker ? bozzaMarker : (row && row.box));
+    mostraManiglie();
     if (Lente.viva()) Lente.aggiorna(contestoLente());
     detail.innerHTML = '';
     if (row) {
@@ -533,6 +560,149 @@ async function createOrientationViewer(projectId, sampleSize) {
      dell'intestazione, che non si muove mai, e ha messo tutte le immagini in un gruppo.
      Qui l'utente disegna il rettangolo attorno al marker vero e da quel ritaglio si
      rifanno posizioni, gruppi ed envelope, senza passare dalla banca. */
+  /* --- stringere il marker ---
+
+     Il rettangolo che il modulo ha trovato e' spesso piu' largo del glifo: ci sta dentro
+     un pezzo di cornice, o l'ombra della scritta accanto. Stringerlo non e' correggere una
+     posizione sbagliata - quella c'e' gia' - e' dare al modulo un ritaglio che aderisce, e
+     un ritaglio che aderisce si ritrova meglio su tutte le altre immagini.
+
+     E' lo stesso gesto del «marker sbagliato», ma partendo da quello che c'e' invece che
+     dal foglio bianco: stessa strada, `marker_override`, che ritaglia, ricerca su tutte le
+     immagini e rifa' gruppi ed envelope. Quindi diventa davvero **il** marker della
+     cartella, anche nei blocchi #12/#16 del file. */
+  let modificaMarker = false;
+  let bozzaMarker = null;
+  const modificaPanel = el('div', { class: 'card', style: 'display:none' });
+  const modificaButton = el('button', { class: 'ghost' }, 'Stringi il marker');
+
+  const limitaBox = (box) => {
+    const [w, h] = [size[0] || image.naturalWidth || 0, size[1] || image.naturalHeight || 0];
+    const out = { ...box };
+    out.left = Math.max(0, Math.round(out.left));
+    out.top = Math.max(0, Math.round(out.top));
+    out.right = Math.max(out.left + 4, Math.round(out.right));
+    out.bottom = Math.max(out.top + 4, Math.round(out.bottom));
+    if (w) out.right = Math.min(out.right, w);
+    if (h) out.bottom = Math.min(out.bottom, h);
+    return out;
+  };
+
+  function trascinaMarker(event, lato) {
+    if (!modificaMarker || !bozzaMarker) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const partenza = { x: event.clientX, y: event.clientY };
+    const box = { ...bozzaMarker };
+    const sx = scaleX() || 1;
+    const sy = scaleY() || 1;
+    const bersaglio = event.currentTarget;
+    bersaglio.setPointerCapture(event.pointerId);
+    const muovi = (e) => {
+      const dx = Math.round((e.clientX - partenza.x) / sx);
+      const dy = Math.round((e.clientY - partenza.y) / sy);
+      const n = { ...box };
+      if (lato === 'move') {
+        // Si sposta intero: i lati vanno limitati insieme, se no contro un bordo si
+        // schiaccia invece di fermarsi.
+        const largo = box.right - box.left;
+        const alto = box.bottom - box.top;
+        n.left = box.left + dx; n.top = box.top + dy;
+        n.right = n.left + largo; n.bottom = n.top + alto;
+      } else {
+        if (lato.includes('w')) n.left = Math.min(box.left + dx, box.right - 4);
+        if (lato.includes('e')) n.right = Math.max(box.right + dx, box.left + 4);
+        if (lato.includes('n')) n.top = Math.min(box.top + dy, box.bottom - 4);
+        if (lato.includes('s')) n.bottom = Math.max(box.bottom + dy, box.top + 4);
+      }
+      bozzaMarker = limitaBox(n);
+      place(markerNode, bozzaMarker);
+      mostraManiglie();
+      renderModifica();
+      if (Lente.viva()) Lente.aggiorna(contestoLente());
+    };
+    const molla = () => {
+      bersaglio.removeEventListener('pointermove', muovi);
+      bersaglio.removeEventListener('pointerup', molla);
+      bersaglio.removeEventListener('pointercancel', molla);
+    };
+    bersaglio.addEventListener('pointermove', muovi);
+    bersaglio.addEventListener('pointerup', molla);
+    bersaglio.addEventListener('pointercancel', molla);
+  }
+
+  const mostraManiglie = () => {
+    for (const h of maniglieMarker) h.style.display = modificaMarker ? 'block' : 'none';
+    markerNode.classList.toggle('in-modifica', modificaMarker);
+  };
+
+  const setModifica = (on) => {
+    const row = byName.get(names[index]);
+    if (on && !(row && row.box)) { toast('qui non c\'e\' un marker da stringere', true); return; }
+    modificaMarker = on;
+    bozzaMarker = on ? { ...row.box } : null;
+    modificaButton.textContent = on ? 'Annulla' : 'Stringi il marker';
+    modificaPanel.style.display = on ? 'block' : 'none';
+    if (!on) paint(); else place(markerNode, bozzaMarker);
+    mostraManiglie();
+    renderModifica();
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
+  };
+  modificaButton.addEventListener('click', () => setModifica(!modificaMarker));
+
+  const renderModifica = () => {
+    if (!modificaMarker || !bozzaMarker) { modificaPanel.innerHTML = ''; return; }
+    const b = bozzaMarker;
+    const largo = b.right - b.left;
+    const alto = b.bottom - b.top;
+    const partito = (byName.get(names[index]) || {}).box || b;
+    modificaPanel.innerHTML = '';
+    modificaPanel.append(el('h3', { style: 'margin-top:0' }, 'stringi il marker'));
+    modificaPanel.append(el('p', { class: 'hint' },
+      'trascina le maniglie sull\'immagine o dentro la lente. Quando va bene, questo '
+      + 'ritaglio diventa il marker cercato su tutte le immagini della cartella, e quello '
+      + 'che finisce nei blocchi #12/#16 del file.'));
+    modificaPanel.append(el('div', { class: 'kv' }, el('span', {}, 'ora'),
+      el('span', {}, `${b.top}|${b.left}|${b.bottom}|${b.right} — ${largo}x${alto} px`)));
+    modificaPanel.append(el('div', { class: 'kv' }, el('span', {}, 'partiva da'),
+      el('span', {}, `${partito.right - partito.left}x${partito.bottom - partito.top} px`)));
+    if (largo > 45 || alto > 45) {
+      modificaPanel.append(el('p', { class: 'hint', style: 'color:var(--warn)' },
+        `i ritagli orientation_*.png delle configurazioni storiche vanno da 16x18 a 30x31: `
+        + `questo e' ${largo}x${alto}. Piu' stretto sul glifo aderisce meglio.`));
+    }
+    modificaPanel.append(el('img', {
+      src: `/api/projects/${projectId}/orientation/crop?name=${encodeURIComponent(names[index])}`
+        + `&scale=6&pad=1&box=${b.top}|${b.left}|${b.bottom}|${b.right}`,
+      style: 'border:1px solid var(--line);image-rendering:pixelated;margin:6px 0',
+    }));
+    const stato = el('span', { class: 'hint' });
+    const vai = el('button', {}, 'Usa questo marker su tutta la cartella');
+    vai.addEventListener('click', async () => {
+      vai.disabled = true;
+      setBusy(true, 'cerco il marker stretto su tutte le immagini');
+      try {
+        const started = await api(`/projects/${projectId}/orientation/marker_override`,
+          { body: { name: names[index], box: bozzaMarker, narrow: true } });
+        const job = await pollJob(started.job_id,
+          { set textContent(v) { busyLabel.textContent = v; stato.textContent = v; } });
+        setBusy(false);
+        setModifica(false);
+        await refreshData();
+        renderOverrideResult(job.result);
+        toast(`marker stretto: ${job.result.matched} immagini su ${job.result.images}, `
+          + `gruppi ${(job.result.groups_found || []).join(' ') || 'nessuno'}`);
+      } catch (errore) {
+        setBusy(false);
+        stato.textContent = '';
+        modificaPanel.append(el('p', { class: 'hint', style: 'color:var(--err)' }, errore.message));
+        vai.disabled = false;
+      }
+    });
+    modificaPanel.append(el('div', { class: 'row' }, vai,
+      el('button', { class: 'ghost', onclick: () => setModifica(false) }, 'Annulla'), stato));
+  };
+
   let drawing = false;
   let drawStart = null;
   const drawNode = el('div', { class: 'editor-box draw-box' });
@@ -672,7 +842,10 @@ async function createOrientationViewer(projectId, sampleSize) {
         .map(([g, n]) => `${g}: ${n}`).join(' · ') || '—'],
       ['copertura della cartella', pct(r.coverage)],
       ['correzioni scartate', r.corrections_dropped
-        ? `${r.corrections_dropped} (riferite al glifo vecchio)` : 'nessuna'],
+        ? `${r.corrections_dropped} (riferite al glifo vecchio)`
+        : (r.corrections_kept
+          ? `nessuna: ${r.corrections_kept} tenute e spostate col ritaglio`
+          : 'nessuna')],
     ]) wrongPanel.append(el('div', { class: 'kv' }, el('span', {}, k), el('span', {}, String(v))));
     if (r.legacy_size_hint) {
       wrongPanel.append(el('p', { class: 'hint', style: 'color:var(--warn)' }, r.legacy_size_hint));
@@ -1144,7 +1317,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     fixButton,
     el('label', { class: 'serie', title: 'resta armato e passa alla prossima immagine dopo ogni correzione' },
       serieToggle, el('span', {}, 'in serie')),
-    wrongButton,
+    wrongButton, modificaButton,
     el('label', { class: 'serie', title: 'disegna sull\'immagine i quattro marker che fissano i bordi dell\'envelope di questo gruppo' },
       limitsToggle, el('span', {}, 'vertici')),
     pickHint, serieBadge, wrongHint);
@@ -1315,7 +1488,7 @@ async function createOrientationViewer(projectId, sampleSize) {
       el('div', { class: 'ov-under' },
         el('div', { class: 'ov-under-text' }, caption, detail, legend),
         cropCard),
-      wrongPanel, fixPanel),
+      wrongPanel, modificaPanel, fixPanel),
     el('div', { class: 'ov-side' }, limitsSide, listBox)));
 
   root.append(el('div', { class: 'ov-folds' },

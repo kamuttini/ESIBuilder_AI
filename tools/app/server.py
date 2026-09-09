@@ -2030,7 +2030,8 @@ def _drop_outliers(rows: List[Dict], rect: Dict[str, int]) -> Tuple[List[Dict], 
 
 
 def _run_marker_override(
-    job_id: str, project_id: str, name: str, box: Dict[str, int], min_score: float
+    job_id: str, project_id: str, name: str, box: Dict[str, int], min_score: float,
+    stretta: bool = False,
 ) -> None:
     """Il marker indicato a mano diventa IL marker della cartella, e il modulo riparte.
 
@@ -2116,13 +2117,33 @@ def _run_marker_override(
 
         def mutate(project: Project, value: Dict) -> Dict:
             merged = _fill_blocks(dict(value), groups)
+            # Le correzioni fatte sul marker **sbagliato** non valgono piu': indicavano
+            # dov'era un glifo che non stiamo piu' cercando. Ma stringere e' un'altra cosa -
+            # il glifo e' lo stesso, si e' solo tolto il contorno - e li' buttarle sarebbe
+            # buttare lavoro suo. Si spostano invece dello stesso scarto del ritaglio: se il
+            # riquadro si e' stretto di 4 px a sinistra, la posizione corretta si sposta di 4.
+            vecchie = dict(value.get("corrections") or {})
+            tenute: Dict[str, Dict] = {}
+            if stretta and vecchie:
+                prima = ((value.get("marker_override") or {}).get("box")
+                         or (value.get("folder_template") or {}).get("source_box") or {})
+                dx = int(box["left"]) - int(prima.get("left", box["left"]))
+                dy = int(box["top"]) - int(prima.get("top", box["top"]))
+                for nome_fix, fix in vecchie.items():
+                    voce = dict(fix)
+                    scatola = voce.get("box")
+                    if isinstance(scatola, dict) and all(
+                            k in scatola for k in ("top", "left", "bottom", "right")):
+                        voce["box"] = {
+                            "left": scatola["left"] + dx, "right": scatola["right"] + dx,
+                            "top": scatola["top"] + dy, "bottom": scatola["bottom"] + dy,
+                        }
+                    tenute[nome_fix] = voce
             merged.update(
                 {
-                    # Le correzioni fatte sul marker sbagliato non valgono piu': indicavano
-                    # dov'era un glifo che non stiamo piu' cercando. Si buttano, dicendolo.
-                    "corrections": {},
-                    "hint_paths": {},
-                    "hint_templates": [],
+                    "corrections": tenute,
+                    "hint_paths": {} if not stretta else (value.get("hint_paths") or {}),
+                    "hint_templates": [] if not stretta else (value.get("hint_templates") or []),
                     "marker_override": {
                         "path": str(crop["path"]), "size": crop["size"],
                         "source_image": name, "box": dict(box),
@@ -2172,7 +2193,8 @@ def _run_marker_override(
                 "coverage": validation.get("coverage"),
                 "coverage_by_group": validation.get("coverage_by_group") or {},
                 "warning": value.get("marker_warning") or {},
-                "corrections_dropped": len(stored.get("corrections") or {}),
+                "corrections_dropped": 0 if stretta else len(stored.get("corrections") or {}),
+                "corrections_kept": len(value.get("corrections") or {}) if stretta else 0,
                 "legacy_size_hint": (
                     "" if 10 <= crop["size"][0] <= 40 and 10 <= crop["size"][1] <= 40
                     else f"i ritagli orientation_*.png delle configurazioni storiche vanno da "
@@ -2532,8 +2554,11 @@ def api_orientation_marker_override(project_id: str):
     min_score = float(
         payload.get("min_score") or (stored.get("validation") or {}).get("min_score") or 0.55
     )
+    # Stringere non e' cambiare glifo: si dichiara, perche' cambia cosa succede alle
+    # correzioni gia' fatte.
+    stretta = bool(payload.get("narrow"))
     return jsonify(
-        {"job_id": _start_job(_run_marker_override, project_id, name, box, min_score)}
+        {"job_id": _start_job(_run_marker_override, project_id, name, box, min_score, stretta)}
     )
 
 
@@ -2688,10 +2713,21 @@ def api_orientation_crop(project_id: str):
     if stage is None or not folder.is_dir() or not name:
         return jsonify({"error": "ritaglio non disponibile"}), 404
 
-    box = _current_marker_box(project, name)
-    if box is None:
-        return jsonify({"error": "nessun marker in questa immagine"}), 404
-    box = [box["top"], box["left"], box["bottom"], box["right"]]
+    # Un riquadro esplicito serve a vedere il ritaglio **prima** di applicarlo: mentre si
+    # stringe il marker, quello salvato e' ancora il vecchio.
+    chiesto = request.args.get("box") or ""
+    if chiesto:
+        try:
+            box = [int(round(float(v))) for v in chiesto.split("|")]
+        except (TypeError, ValueError):
+            return jsonify({"error": "riquadro illeggibile: serve top|left|bottom|right"}), 400
+        if len(box) != 4:
+            return jsonify({"error": "riquadro incompleto: serve top|left|bottom|right"}), 400
+    else:
+        trovato = _current_marker_box(project, name)
+        if trovato is None:
+            return jsonify({"error": "nessun marker in questa immagine"}), 404
+        box = [trovato["top"], trovato["left"], trovato["bottom"], trovato["right"]]
 
     path = _immagine_nella_cartella(folder, name)
     if path is None:
