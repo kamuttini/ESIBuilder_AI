@@ -1097,7 +1097,7 @@ function rectStudyCard(panel, chainIniziale) {
   for (const [colore, testo] of [
     ['#ffffff', 'rettangolo di adesso'],
     ['#d29922', 'proposta che stai guardando'],
-    [GROUP_COLORS_RECT.NF, 'corda e rettangolo dell\'orientamento scelto'],
+    [GROUP_COLORS_RECT.NF, 'corda dell\'orientamento scelto'],
   ]) {
     legenda.append(el('span', { class: 'editor-legend' },
       el('span', { class: 'swatch', style: `background:${colore}` }), testo));
@@ -1207,15 +1207,14 @@ function rectStudyCard(panel, chainIniziale) {
 
   card.append(navRow, stage, legenda, info);
 
+  /* Solo i disegni dello studio delle corde. Gli altri - il rettangolo visto nel gruppo,
+     gli assi dai marker, il centro dell'immagine, i marker - venivano da studi che questa
+     sezione non racconta piu': lasciarli era lasciare interruttori senza una stanza. */
   const LIVELLI = [
     ['attuale', 'rettangolo di adesso'],
     ['corde', 'corda del ventaglio'],
     ['speculare', 'corda dell\'orientamento speculare'],
-    ['gruppo', 'rettangolo visto in questo orientamento'],
     ['assi_corde', 'asse di ribaltamento (dal ventaglio)'],
-    ['assi_marker', 'asse di ribaltamento (dai marker)'],
-    ['assi_immagine', 'centro dell\'immagine, per confronto'],
-    ['marker', 'dove sta il marker in ogni orientamento'],
   ];
   for (const [chiave, label] of LIVELLI) {
     const btn = el('button', { class: 'chip' + (attivi[chiave] ? ' on' : '') }, label);
@@ -1274,13 +1273,14 @@ function rectStudyCard(panel, chainIniziale) {
     const dentro = el('div');
     misure.append(dentro);
     candidati.append(misure);
+    // Resta il confronto con i marker, che e' la verifica dell'asse delle corde: due misure
+    // indipendenti che concordano valgono piu' di una sola. Via invece il centro
+    // dell'immagine e quello del rettangolo, che erano numeri da leggere e basta.
     for (const [k, v] of [
       ['asse x dalle corde', a.corde_x], ['asse x dai marker', a.marker_x],
       ['accordo sulla x', acc.x_px != null ? `${acc.x_px} px` : '—'],
       ['asse y dalle corde', a.corde_y], ['asse y dai marker', a.marker_y],
       ['accordo sulla y', acc.y_px != null ? `${acc.y_px} px` : '—'],
-      ['centro dell\'immagine', `${a.immagine_x} · ${a.immagine_y}`],
-      ['centro del rettangolo', `${a.rect_x} · ${a.rect_y}`],
     ]) {
       const riga = el('div', { class: 'kv' }, el('span', {}, k), el('span', {}, String(v ?? '—')));
       if (k.startsWith('accordo')) {
@@ -1385,7 +1385,12 @@ function rectStudyCard(panel, chainIniziale) {
     candidati.append(el('p', { class: 'hint' },
       'premi «vedi» per disegnarlo sull\'immagine sopra, accanto a quello di adesso. ' +
       'Niente cambia finche\' non applichi.'));
-    for (const c of axesData.candidates) {
+    // «attuale» non e' una proposta: e' il rettangolo gia' disegnato sull'immagine e gia'
+    // scritto nel riepilogo sotto, e in mezzo alle altre si legge come una quinta scelta.
+    // «consenso» viene dalla specularita' e «simmetrico_marker» dai marker: due studi che
+    // questa sezione non fa piu'.
+    const SOLO_CORDE = ['ampiezza', 'simmetrico_corde'];
+    for (const c of axesData.candidates.filter((v) => SOLO_CORDE.includes(v.id))) {
       const r = c.rect;
       const scelto = attivi.candidato === c.id;
       const riga = el('div', { class: 'proposta' + (scelto ? ' scelta' : '') });
