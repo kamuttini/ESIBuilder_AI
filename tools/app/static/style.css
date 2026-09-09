@@ -1060,6 +1060,21 @@ img.depth-crop {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+/* La divisione L/T a tutto schermo: si passa in rassegna la cartella con le frecce. */
+.piani-pieno {
+  position: fixed; inset: 0; z-index: 80; background: rgba(2, 6, 12, .94);
+  display: flex; flex-direction: column;
+}
+.piani-pieno-testa {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.piani-pieno-scena {
+  flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+  padding: 12px;
+}
+.piani-pieno-scena img { max-width: 100%; max-height: 100%; object-fit: contain; }
+
 /* L'anteprima grande al passaggio del mouse sulle strisce L/T. */
 .piani-lente {
   position: fixed; z-index: 60; pointer-events: none;

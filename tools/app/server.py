@@ -1093,6 +1093,48 @@ def api_projects():
     return jsonify({"projects": list_projects(_projects_root)})
 
 
+@app.delete("/api/projects/<project_id>")
+def api_project_delete(project_id: str):
+    """Butta via un progetto: lo studio, non le immagini.
+
+    Cancella la cartella del progetto sotto la radice dei progetti - `project.json`, lo
+    specchio di lavoro, i template ritagliati, gli artefatti dei moduli. La cartella delle
+    acquisizioni non si tocca: quella non e' nostra.
+
+    Il controllo che sia davvero **dentro** la radice non e' pedanteria: qui si cancella
+    ricorsivamente, e un percorso che esce dalla radice sarebbe un disastro silenzioso.
+    """
+    project = _project(project_id)
+    radice = Path(_projects_root).resolve()
+    cartella = Path(project.root).resolve()
+    if cartella.parent != radice or cartella == radice:
+        return jsonify({"error": "questo progetto non sta dove dovrebbe: non lo tocco"}), 400
+
+    # Se e' la meta' di uno sdoppiamento, l'altra meta' resta orfana: lo si dice a lei, e si
+    # toglie il riferimento invece di lasciarlo puntare al vuoto.
+    orfani = []
+    for altro in list_projects(_projects_root):
+        if altro.get("project_id") == project_id:
+            continue
+        try:
+            vicino = _project(altro["project_id"])
+        except FileNotFoundError:
+            continue
+        cambiato = False
+        if str(vicino.source.get("split_into") or "") == project_id:
+            vicino.source.pop("split_into", None)
+            cambiato = True
+        if str(vicino.source.get("derived_from") or "") == project_id:
+            vicino.source["derived_from"] = ""
+            cambiato = True
+        if cambiato:
+            vicino.save()
+            orfani.append(vicino.root.name)
+
+    shutil.rmtree(cartella, ignore_errors=True)
+    return jsonify({"deleted": project_id, "unlinked": orfani})
+
+
 @app.post("/api/projects")
 def api_project_create():
     name = (_payload().get("name") or "").strip()

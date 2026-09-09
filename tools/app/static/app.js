@@ -27,7 +27,7 @@ function toast(message, isError = false) {
 
 async function api(path, options = {}) {
   const response = await fetch('/api' + path, {
-    method: options.body ? 'POST' : 'GET',
+    method: options.method || (options.body ? 'POST' : 'GET'),
     headers: options.body ? { 'Content-Type': 'application/json' } : {},
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
@@ -42,7 +42,32 @@ async function boot() {
   state.meta = await api('/meta');
   await refreshProjects();
   $('#new-project').addEventListener('click', createProject);
+  $('#del-project').addEventListener('click', eliminaProgetto);
   $('#project-select').addEventListener('change', (event) => openProject(event.target.value));
+}
+
+/* Buttare via un progetto: lo studio, non le immagini. La cartella delle acquisizioni non
+   e' nostra e non si tocca - e va detto, se no non si sa cosa si sta cancellando. */
+async function eliminaProgetto() {
+  if (!state.projectId) { toast('scegli prima un progetto', true); return; }
+  const nome = ((state.project || {}).codes || {}).project_name || state.projectId;
+  const conferma = prompt(
+    `Eliminare il progetto «${nome}»?\n\n`
+    + 'Si cancella lo studio: riconoscimenti, correzioni, riquadri, artefatti dei moduli.\n'
+    + 'La cartella delle immagini NON viene toccata.\n\n'
+    + `Per confermare scrivi:  ${state.projectId}`);
+  if (conferma === null) return;
+  if (conferma.trim() !== state.projectId) { toast('nome non corrispondente: non elimino niente', true); return; }
+  try {
+    const esito = await api(`/projects/${state.projectId}`, { method: 'DELETE' });
+    toast(`progetto eliminato${esito.unlinked && esito.unlinked.length
+      ? ` · sciolto il legame con ${esito.unlinked.join(', ')}` : ''}`);
+    state.projectId = null;
+    state.project = null;
+    $('#panel').innerHTML = '<p class="empty">Crea o seleziona un progetto per iniziare.</p>';
+    $('#steps').innerHTML = '';
+    await refreshProjects();
+  } catch (errore) { toast(errore.message, true); }
 }
 
 async function refreshProjects() {
@@ -571,6 +596,7 @@ function panelImport(panel) {
           }));
           cella.append(el('span', {}, nome.split('/').pop()));
           cella.addEventListener('click', () => sposta(nome, altro));
+          cella.addEventListener('dblclick', (ev) => { ev.preventDefault(); aSchermoIntero(nome); });
           cella.addEventListener('mouseenter', (e) => mostraLente(nome, e));
           cella.addEventListener('mousemove', (e) => mostraLente(nome, e));
           cella.addEventListener('mouseleave', nascondiLente);
@@ -579,13 +605,90 @@ function panelImport(panel) {
         box.append(strip);
         return box;
       };
+      /* A tutto schermo, per guardarle una per una. Su un francobollo di 118 px il piano si
+         indovina; a schermo pieno si vede. Le frecce scorrono, L e T assegnano, Esc chiude:
+         cosi' si passa in rassegna una cartella intera senza mai staccare le mani. */
+      const aSchermoIntero = (partenza) => {
+        const ordine = ['L', 'T', '?'].flatMap((pi) => tutte.filter((n) => dettoDa(n) === pi).sort());
+        let dove = Math.max(0, ordine.indexOf(partenza));
+        const velo = el('div', { class: 'piani-pieno' });
+        const img = el('img', { alt: '' });
+        const testa = el('div', { class: 'piani-pieno-testa' });
+        const info = el('span', {});
+        const inL = el('button', {}, 'porta in L  (L)');
+        const inT = el('button', {}, 'porta in T  (T)');
+        const chiudi = el('button', { class: 'ghost' }, 'chiudi  (Esc)');
+        testa.append(
+          el('button', { class: 'ghost sq' }, '‹'),
+          el('button', { class: 'ghost sq' }, '›'),
+          info, inL, inT, chiudi);
+        velo.append(testa, el('div', { class: 'piani-pieno-scena' }, img));
+        const mostra = () => {
+          const nome = ordine[dove];
+          if (!nome) return;
+          img.src = `/api/projects/${state.projectId}/image`
+            + `?name=${encodeURIComponent(nome)}&w=1600`;
+          info.innerHTML = '';
+          const piano = dettoDa(nome);
+          info.append(
+            el('strong', { style: `color:${piano === 'L' ? '#3fb950' : piano === 'T' ? '#d29922' : 'var(--muted)'}` },
+              `piano ${piano}`),
+            el('span', { class: 'hint' },
+              ` · ${dove + 1} di ${ordine.length} · ${nome.split('/').pop()}`
+              + (correzioni[nome] ? ' · corretta da te' : '')));
+          inL.disabled = piano === 'L';
+          inT.disabled = piano === 'T';
+        };
+        const vai = (delta) => { dove = (dove + delta + ordine.length) % ordine.length; mostra(); };
+        const assegna = async (verso) => {
+          const nome = ordine[dove];
+          if (dettoDa(nome) === verso) return;
+          try {
+            await api(`/projects/${state.projectId}/planes/correct`,
+              { body: { name: nome, plane: verso } });
+            correzioni[nome] = verso;
+            value.plane_corrections = correzioni;
+            mostra();
+          } catch (errore) { toast(errore.message, true); }
+        };
+        const tasti = (ev) => {
+          if (ev.key === 'ArrowRight') { ev.preventDefault(); vai(1); }
+          else if (ev.key === 'ArrowLeft') { ev.preventDefault(); vai(-1); }
+          else if (ev.key === 'l' || ev.key === 'L') assegna('L');
+          else if (ev.key === 't' || ev.key === 'T') assegna('T');
+          else if (ev.key === 'Escape') via();
+        };
+        const via = () => {
+          document.removeEventListener('keydown', tasti);
+          velo.remove();
+          // I conteggi e le strisce si rifanno con quello che si e' deciso qui dentro.
+          const c = { L: 0, T: 0, '?': 0 };
+          for (const n of tutte) c[dettoDa(n)] = (c[dettoDa(n)] || 0) + 1;
+          value.plane_counts = c;
+          renderPiani();
+        };
+        testa.children[0].addEventListener('click', () => vai(-1));
+        testa.children[1].addEventListener('click', () => vai(1));
+        inL.addEventListener('click', () => assegna('L'));
+        inT.addEventListener('click', () => assegna('T'));
+        chiudi.addEventListener('click', via);
+        velo.addEventListener('click', (ev) => { if (ev.target === velo) via(); });
+        document.addEventListener('keydown', tasti);
+        document.body.append(velo);
+        mostra();
+      };
+
       const gallerie = el('div', { class: 'piani-galleria' });
       for (const piano of ['L', 'T', '?']) {
         if (tutte.some((n) => dettoDa(n) === piano)) gallerie.append(fila(piano));
       }
-      pianiBox.append(el('p', { class: 'hint', style: 'margin:10px 0 4px' },
-        'clicca un\'immagine per spostarla nell\'altro piano. Le corrette hanno il bordo '
-        + 'azzurro, e sono loro a comandare sullo sdoppiamento.'));
+      const aperturaPiena = el('button', { class: 'ghost' }, 'Guardale a tutto schermo');
+      aperturaPiena.addEventListener('click', () => aSchermoIntero(tutte[0]));
+      pianiBox.append(el('div', { class: 'row', style: 'margin-top:10px' }, aperturaPiena,
+        el('span', { class: 'hint' },
+          'un clic sposta l\'immagine nell\'altro piano, doppio clic la apre grande. '
+          + 'A tutto schermo: frecce per scorrere, L e T per assegnare, Esc per chiudere. '
+          + 'Le corrette hanno il bordo azzurro e comandano sullo sdoppiamento.')));
       pianiBox.append(gallerie);
     }
   };
