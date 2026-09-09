@@ -4344,6 +4344,60 @@ def api_scale_study_ticks(project_id: str):
                     "check": dopo, "check_before": controllo, "saved": True})
 
 
+@app.post("/api/projects/<project_id>/scale/study/approve")
+def api_scale_study_approve(project_id: str):
+    """«Va bene cosi'»: il dubbio del modulo si chiude, e l'etichetta «da rivedere» va via.
+
+    Non tutti i "da rivedere" sono errori: spesso il modulo ha trovato il righello giusto e
+    si e' solo tenuto basso col punteggio. Segnare a mano che va bene non e' una correzione
+    — non c'e' niente da correggere — ma nemmeno una cosa da lasciare li': un dubbio gia'
+    sciolto, se resta scritto, nasconde quelli veri.
+
+    Si approva un fotogramma, un elenco, oppure tutti quelli che stanno in un certo stato.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    dati = _dati_studio(project)
+    if dati is None:
+        return jsonify({"error": "lo studio della scala non e' ancora stato fatto"}), 404
+    valore_ora = project.step_value("scale_study")
+    correzioni = valore_ora.get("corrections") or {}
+    # Con dentro le approvazioni gia' date: cosi' `statuses: ["approved"]` serve a
+    # ripensarci in blocco, che e' l'altra meta' del gesto.
+    approvati_ora = set(valore_ora.get("approved") or [])
+    per_stato: Dict[str, List[str]] = {}
+    for frame in dati.get("frames") or []:
+        nome_frame = str(frame.get("name"))
+        stato = _stato_effettivo(frame, correzioni.get(nome_frame),
+                                 nome_frame in approvati_ora)
+        per_stato.setdefault(stato, []).append(nome_frame)
+
+    nomi = [str(n) for n in (payload.get("names") or []) if str(n).strip()]
+    uno = str(payload.get("name") or "").strip()
+    if uno:
+        nomi.append(uno)
+    for stato in (payload.get("statuses") or []):
+        nomi.extend(per_stato.get(str(stato)) or [])
+    nomi = sorted(set(nomi))
+    if not nomi:
+        return jsonify({"error": "nessun fotogramma da approvare"}), 400
+
+    togli = bool(payload.get("reset"))
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        approvati = set(value.get("approved") or [])
+        if togli:
+            approvati -= set(nomi)
+        else:
+            approvati |= set(nomi)
+        value["approved"] = sorted(approvati)
+        return value
+
+    valore = _write_step(project_id, "scale_study", mutate, status="corrected", source="user")
+    return jsonify({"approved": len(nomi), "names": nomi, "removed": togli,
+                    "total": len(valore.get("approved") or [])})
+
+
 @app.post("/api/projects/<project_id>/scale/study/propagate")
 def api_scale_study_propagate(project_id: str):
     """Da un fotogramma sistemato a tutti gli altri.
@@ -4605,24 +4659,33 @@ def _stati_studio(project: Project) -> Dict[str, str]:
             nome = str(percorso_frame.relative_to(base))
         except ValueError:
             nome = percorso_frame.name
+        # Senza le approvazioni: qui si confronta cosa fa il **modulo** prima e dopo le
+        # correzioni, e un'approvazione non e' un suo miglioramento.
         fuori[nome] = _stato_effettivo(frame, correzioni.get(nome))
     return fuori
 
 
-ORDINE_STATO = {"reject": 0, "review": 1, "accepted": 2, "corrected": 3}
+ORDINE_STATO = {"reject": 0, "review": 1, "accepted": 2, "approved": 3, "corrected": 3}
 
 
-def _stato_effettivo(frame: Dict, correzione: Optional[Dict]) -> str:
+def _stato_effettivo(frame: Dict, correzione: Optional[Dict],
+                     approvato: bool = False) -> str:
     """Lo stato che conta per chi guarda: il modulo non lo ricalcola dopo una correzione.
 
     `study_scale_folder` applica le correzioni *dopo* la detection e lascia `status` com'era —
     scelta giusta la' dentro, perche' cosi' si continua a vedere cosa avrebbe detto da solo.
     Ma se il righello glielo hai dato tu, quel fotogramma un righello ce l'ha, e chiamarlo
     ancora `reject` fa credere che la correzione non sia servita a niente.
+
+    `approvato` e' la terza voce: il modulo non era sicuro, lei ha guardato e va bene cosi'.
+    Non e' una correzione — non c'e' niente da correggere — ma nemmeno un dubbio del modulo
+    che resti aperto. Un "da rivedere" gia' rivisto e' rumore in mezzo a quelli veri.
     """
     if correzione and all(correzione.get(k) is not None
                           for k in ("x", "y_zero", "y_far")):
         return "corrected"
+    if approvato:
+        return "approved"
     return str(frame.get("status") or "")
 
 
@@ -4687,12 +4750,16 @@ def api_scale_study(project_id: str):
         if not quando or str(voce.get("ts") or "") > quando
     )
     confermate = _depth_confermate(project)
+    approvati = set(valore.get("approved") or [])
+    dati["approved"] = sorted(approvati)
     per_nome = {}
     for frame in dati.get("frames") or []:
         # Lo stato del modulo resta visibile in `detector_status`: serve a vedere se la
         # detection da sola migliora, che e' l'altra domanda.
         frame["detector_status"] = str(frame.get("status") or "")
-        frame["status"] = _stato_effettivo(frame, correzioni.get(frame["name"]))
+        frame["approved"] = frame["name"] in approvati
+        frame["status"] = _stato_effettivo(frame, correzioni.get(frame["name"]),
+                                           frame["approved"])
         # Il confronto con la depth confermata, fotogramma per fotogramma: e' il dato
         # esterno che dice se il righello e' al posto giusto, e va visto accanto a lui.
         righello = _righello_effettivo(frame, correzioni.get(frame["name"]))

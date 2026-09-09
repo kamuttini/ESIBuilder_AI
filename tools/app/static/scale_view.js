@@ -12,7 +12,8 @@
    Le correzioni rientrano nel modulo alla run successiva (`--corrections`), applicate *dopo*
    la detection: la pagina continua a mostrare anche cosa avrebbe detto da solo. */
 
-const COLORI_SCALA = { accepted: '#3fb950', corrected: '#40d0ff', review: '#d29922',
+const COLORI_SCALA = { accepted: '#3fb950', corrected: '#40d0ff', approved: '#7ee787',
+  review: '#d29922',
                        reject: '#f85149' };
 
 /* I gesti, scritti dove servono. Una riga di prosa lunga non la legge nessuno mentre corregge. */
@@ -759,6 +760,34 @@ async function createScaleViewer(projectId) {
       rifai.addEventListener('click', ridistribuisci);
       azioni.append(rifai);
     }
+    /* «Va bene cosi'». Non tutti i «da rivedere» sono errori: spesso il righello e' quello
+       giusto e il modulo si e' solo tenuto basso col punteggio. Dirlo non e' una correzione
+       - non c'e' niente da correggere - ma lasciare il dubbio scritto nasconde quelli veri. */
+    if (['review', 'reject', 'accepted'].includes(f.status)) {
+      const bene = el('button', {}, f.status === 'accepted' ? 'Confermo, va bene' : 'Va bene cosi\', togli «da rivedere»');
+      bene.addEventListener('click', async () => {
+        try {
+          await api(`/projects/${projectId}/scale/study/approve`, { body: { name: f.name } });
+          f.status = 'approved'; f.approved = true;
+          stato('confermato: non e\' piu\' da rivedere');
+          renderAzioni(); renderLista(); rifaiChips(); mostra();
+        } catch (errore) { toast(errore.message, true); }
+      });
+      azioni.append(bene);
+    } else if (f.status === 'approved') {
+      const ripensa = el('button', { class: 'ghost' }, 'Rimettilo fra quelli da rivedere');
+      ripensa.addEventListener('click', async () => {
+        try {
+          await api(`/projects/${projectId}/scale/study/approve`,
+            { body: { name: f.name, reset: true } });
+          dati = await api(`/projects/${projectId}/scale/study`);
+          frames = dati.frames || [];
+          stato('torna da rivedere');
+          rifaiChips(); mostra();
+        } catch (errore) { toast(errore.message, true); }
+      });
+      azioni.append(ripensa);
+    }
     const indietro = el('button', { class: 'ghost' }, 'Annulla l\'ultimo gesto');
     indietro.addEventListener('click', annulla);
     azioni.append(indietro);
@@ -827,21 +856,48 @@ async function createScaleViewer(projectId) {
 
   const chips = el('div', { class: 'ov-chips' });
   const perStato = (s) => frames.filter((f) => f.status === s).length;
-  for (const [chiave, etichetta] of [['', `tutti ${frames.length}`],
-                                     ['accepted', `trovati ${perStato('accepted')}`],
-                                     ['corrected', `dati da te ${perStato('corrected')}`],
-                                     ['review', `da rivedere ${perStato('review')}`],
-                                     ['reject', `senza righello ${perStato('reject')}`]]) {
-    const b = el('button', { class: 'chip' + (chiave === filtro ? ' on' : '') }, etichetta);
-    if (chiave) b.style.borderColor = COLORI_SCALA[chiave];
-    b.addEventListener('click', () => {
-      filtro = chiave;
-      for (const altro of chips.children) altro.classList.remove('on');
-      b.classList.add('on');
-      mostra();
-    });
-    chips.append(b);
-  }
+  /* I chip si rifanno a ogni cambio di stato: approvare un fotogramma sposta un numero da
+     «da rivedere» a «confermati da te», ed e' proprio quel numero che si vuole vedere
+     scendere. */
+  const rifaiChips = () => {
+    chips.innerHTML = '';
+    for (const [chiave, etichetta] of [['', `tutti ${frames.length}`],
+                                       ['accepted', `trovati ${perStato('accepted')}`],
+                                       ['corrected', `dati da te ${perStato('corrected')}`],
+                                       ['approved', `confermati da te ${perStato('approved')}`],
+                                       ['review', `da rivedere ${perStato('review')}`],
+                                       ['reject', `senza righello ${perStato('reject')}`]]) {
+      const b = el('button', { class: 'chip' + (chiave === filtro ? ' on' : '') }, etichetta);
+      if (chiave) b.style.borderColor = COLORI_SCALA[chiave];
+      b.addEventListener('click', () => {
+        filtro = chiave;
+        for (const altro of chips.children) altro.classList.remove('on');
+        b.classList.add('on');
+        mostra();
+      });
+      chips.append(b);
+    }
+    // In blocco: quando si e' scorso tutto e i dubbi rimasti sono buoni, chiuderli uno per
+    // uno e' otto volte lo stesso gesto.
+    const dubbi = perStato('review') + perStato('reject');
+    if (dubbi) {
+      chips.append(confermaInDueTempi(
+        dubbi === 1 ? 'Confermo l\'unico da rivedere' : `Confermo i ${dubbi} da rivedere`,
+        'restano com\'e' + ' il modulo li ha trovati, ma senza piu\' il cartellino: '
+        + 'guardali prima, che dopo non si distinguono dagli altri.',
+        async () => {
+          try {
+            const esito = await api(`/projects/${projectId}/scale/study/approve`,
+              { body: { statuses: ['review', 'reject'] } });
+            dati = await api(`/projects/${projectId}/scale/study`);
+            frames = dati.frames || [];
+            toast(`${esito.approved} fotogrammi confermati`);
+            rifaiChips(); mostra();
+          } catch (errore) { toast(errore.message, true); }
+        }));
+    }
+  };
+  rifaiChips();
 
   const avanzamento = el('span', { class: 'hint' });
   const rifai = confermaInDueTempi('Rifai lo studio con le mie correzioni',
