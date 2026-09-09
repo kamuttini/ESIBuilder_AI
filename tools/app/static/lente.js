@@ -18,24 +18,31 @@ const Lente = (() => {
   let ctx = null;         // {projectId, name, size, boxes:[{box,color,label}], caption}
   let finestra = null;    // [x0, y0, x1, y1] in coordinate native
   let nomeInFinestra = '';
+  let zoomManuale = null;   // null = si adatta alla finestra
+  let zoomServito = 0;      // l'ingrandimento gia' chiesto al server, per non richiederlo
 
   const viva = () => !!(win && !win.closed && win.document && win.document.getElementById('crop'));
 
   const DOC = `<!doctype html><html lang="it"><head><meta charset="utf-8">
 <title>Lente — ESIBuilder AI</title><style>
   :root { color-scheme: dark; }
+  /* scorrevole e non tagliato: ingrandendo oltre la finestra il ritaglio deve potersi
+     scorrere, se no lo zoom serve solo a nascondere quello che si voleva vedere. */
   body { margin: 0; background: #0d1117; color: #c9d1d9;
-         font: 13px ui-monospace, Menlo, monospace; overflow: hidden; }
+         font: 13px ui-monospace, Menlo, monospace; overflow: auto; }
   #testa { padding: 6px 10px; border-bottom: 1px solid #30363d; display: flex;
            gap: 10px; align-items: baseline; justify-content: space-between; }
   #titolo { font-weight: 600; }
   #dettaglio { color: #8b949e; }
   #scena { position: relative; display: inline-block; }
-  /* Il ritaglio non deve mai uscire dalla finestra: se lei la rimpicciolisce, si rimpicciolisce
-     anche lui. La scala del rettangolo disegnato sopra non si rompe perche' viene misurata
-     ogni volta, non calcolata dallo zoom chiesto al server. */
-  #crop { display: block; image-rendering: pixelated;
-          max-width: 100vw; max-height: calc(100vh - 46px); }
+  /* Nessun limite di larghezza: la misura la decide lo zoom, e la scala del rettangolo
+     disegnato sopra non si rompe perche' viene misurata ogni volta invece che calcolata. */
+  #crop { display: block; image-rendering: pixelated; }
+  #zoombar { display: flex; gap: 4px; align-items: center; }
+  #zoombar button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+                    border-radius: 5px; padding: 1px 8px; font: inherit; cursor: pointer; }
+  #zoombar button:hover { background: #30363d; }
+  #fattore { min-width: 46px; text-align: right; color: #8b949e; }
   .riq { position: absolute; border: 2px solid #3fb950; box-sizing: border-box;
          box-shadow: 0 0 0 1px rgba(0,0,0,.75); pointer-events: none; }
   /* Il riquadro su cui si sta lavorando si trascina anche da qui: e' il posto dove si vede
@@ -52,10 +59,44 @@ const Lente = (() => {
            background: #0d1117; padding: 0 3px; white-space: nowrap; }
   #vuoto { padding: 18px; color: #8b949e; }
 </style></head><body>
-<div id="testa"><span id="titolo">lente</span><span id="dettaglio"></span></div>
+<div id="testa"><span id="titolo">lente</span>
+  <span id="zoombar"><button id="meno" title="rimpicciolisci (rotella)">\u2212</button>
+    <span id="fattore"></span>
+    <button id="piu" title="ingrandisci (rotella)">+</button>
+    <button id="adatta" title="torna a riempire la finestra">adatta</button></span>
+  <span id="dettaglio"></span></div>
 <div id="scena"><img id="crop" alt=""></div>
 <div id="vuoto">niente da ingrandire: scegli un riquadro nella pagina principale.</div>
 </body></html>`;
+
+  /* Lo zoom. Il server ingrandisce fino a 8 volte; oltre si continua via CSS sugli stessi
+     pixel - moltiplicarli ancora non aggiunge informazione, ma e' quello che serve per
+     lavorare su un bordo. La scala del rettangolo si misura, quindi non c'e' niente da
+     tenere in sincrono a mano. */
+  const PASSI_ZOOM = [1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32];
+
+  const zoomAuto = () => {
+    if (!finestra || !viva()) return 4;
+    const largo = Math.max(1, finestra[2] - finestra[0]);
+    const alto = Math.max(1, finestra[3] - finestra[1]);
+    return Math.max(1, Math.min(32,
+      Math.min((win.innerWidth - 8) / largo, (win.innerHeight - 46) / alto)));
+  };
+
+  const fattore = () => zoomManuale || zoomAuto();
+
+  const cambiaZoom = (verso) => {
+    const ora = fattore();
+    const vicino = PASSI_ZOOM.reduce((a, b) => (Math.abs(b - ora) < Math.abs(a - ora) ? b : a));
+    const k = PASSI_ZOOM.indexOf(vicino);
+    // Se si sta fra due passi, il primo scatto porta sul passo dalla parte giusta invece
+    // di saltarlo: da 5.2 in giu' si va a 4, non a 3.
+    let prossimo = k + verso;
+    if (verso > 0 && vicino > ora) prossimo = k;
+    if (verso < 0 && vicino < ora) prossimo = k;
+    zoomManuale = PASSI_ZOOM[Math.max(0, Math.min(PASSI_ZOOM.length - 1, prossimo))];
+    disegna(true);
+  };
 
   const apri = () => {
     if (viva()) { win.focus(); return true; }
@@ -71,6 +112,17 @@ const Lente = (() => {
     // si rifa' per riempirla, se no si resta con l'ingrandimento della vecchia dimensione.
     win.addEventListener('resize', () => { finestra = null; disegna(); });
     win.addEventListener('unload', () => { win = null; });
+    const d = win.document;
+    d.getElementById('piu').addEventListener('click', () => cambiaZoom(+1));
+    d.getElementById('meno').addEventListener('click', () => cambiaZoom(-1));
+    d.getElementById('adatta').addEventListener('click', () => { zoomManuale = null; disegna(true); });
+    // La rotella ingrandisce invece di scorrere: in una lente e' quello che si vuole fare.
+    // Con shift resta lo scorrimento, per quando il ritaglio e' piu' grande della finestra.
+    d.addEventListener('wheel', (ev) => {
+      if (ev.shiftKey) return;
+      ev.preventDefault();
+      cambiaZoom(ev.deltaY < 0 ? +1 : -1);
+    }, { passive: false });
     disegna();
     return true;
   };
@@ -163,7 +215,7 @@ const Lente = (() => {
     || box.left < finestra[0] + 1 || box.right > finestra[2] - 1
     || box.top < finestra[1] + 1 || box.bottom > finestra[3] - 1;
 
-  const disegna = () => {
+  const disegna = (centra) => {
     if (!viva() || !ctx) return;
     const d = win.document;
     const img = d.getElementById('crop');
@@ -184,18 +236,26 @@ const Lente = (() => {
     if (!trascinando && (nomeInFinestra !== ctx.name || fuoriFinestra(principale.box))) {
       finestra = nuovaFinestra(principale.box, size);
       nomeInFinestra = ctx.name;
-      const largo = Math.max(1, finestra[2] - finestra[0]);
-      const alto = Math.max(1, finestra[3] - finestra[1]);
-      // Ingrandimento per riempire la finestra, entro il tetto del server.
-      const zoom = Math.max(1, Math.min(8, Math.floor(Math.min(
-        (win.innerWidth - 8) / largo, (win.innerHeight - 46) / alto))));
+      zoomServito = 0;
+    }
+
+    // Il ritaglio si chiede al server ingrandito quanto serve, fino al suo tetto di 8; da
+    // li' in su ci pensa il CSS sugli stessi pixel. Si richiede solo quando il fattore
+    // cambia davvero, non a ogni ridisegno.
+    const largoNativo = Math.max(1, finestra[2] - finestra[0]);
+    const voluto = fattore();
+    const dalServer = Math.max(1, Math.min(8, Math.ceil(voluto)));
+    if (dalServer !== zoomServito) {
+      zoomServito = dalServer;
       // Il ridisegno dopo il caricamento si aggancia una volta sola, qui: metterlo nel
       // ramo "non ho ancora una larghezza" ne accumulava uno per ogni trascinamento.
       img.onload = () => disegna();
       img.src = `/api/projects/${ctx.projectId}/crop?name=${encodeURIComponent(ctx.name)}`
-        + `&raw=1&zoom=${zoom}&x0=${finestra[0]}&y0=${finestra[1]}`
+        + `&raw=1&zoom=${dalServer}&x0=${finestra[0]}&y0=${finestra[1]}`
         + `&x1=${finestra[2]}&y1=${finestra[3]}`;
     }
+    img.style.width = `${Math.round(largoNativo * voluto)}px`;
+    d.getElementById('fattore').textContent = `${Math.round(voluto * 100)}%`;
 
     // La scala si misura: e' l'unico modo di essere sicuri che il rettangolo cada dove deve.
     const larghezzaVista = img.clientWidth || 0;
@@ -251,6 +311,14 @@ const Lente = (() => {
     }
     d.getElementById('titolo').textContent = (ctx.name || '').split('/').pop();
     scrividettaglio(d, principale.box);
+    // Dopo un cambio di zoom il riquadro resta al centro: se no ingrandire lo fa uscire
+    // dallo schermo, ed e' proprio quello che si stava guardando.
+    if (centra) {
+      const cx = (principale.box.left + principale.box.right) / 2 - finestra[0];
+      const cy = (principale.box.top + principale.box.bottom) / 2 - finestra[1];
+      win.scrollTo(Math.max(0, cx * s - win.innerWidth / 2),
+                   Math.max(0, cy * s - (win.innerHeight - 46) / 2));
+    }
   };
 
   const scrividettaglio = (d, b) => {
