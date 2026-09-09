@@ -502,6 +502,8 @@ function templateBoxPanel(panel, step, value, key, color, emptyHint) {
       `?name=${encodeURIComponent(value.preview_image)}&w=980`,
     boxes: cloneBoxes(value),
     sampleSize,
+    projectId: state.projectId,
+    imageName: value.preview_image,
     onChange: applyBoxes,
     onDoubleClick: () => openFullscreenEditor({
       projectId: state.projectId,
@@ -512,6 +514,9 @@ function templateBoxPanel(panel, step, value, key, color, emptyHint) {
     }),
   });
   panel.append(editor.root);
+  panel.append(el('div', { class: 'row' }, Lente.bottone(editor.contestoLente),
+    el('span', { class: 'hint' }, 'una finestra a parte con il riquadro ingrandito: '
+      + 'si trascina sul secondo schermo e segue quello che fai qui')));
   panel.append(el('p', { class: 'hint' },
     'trascina il box o usa le maniglie · doppio clic per aprire a schermo intero e ' +
     'scorrere le immagini · il box vale per tutta la cartella'));
@@ -1633,10 +1638,15 @@ function panelRect(panel, step) {
       boxes: editorBoxes(value),
       sampleSize,
       margins,
+      projectId: state.projectId,
+      imageName: value.preview_image,
       onChange: applyBoxes,
       onDoubleClick: () => openFullscreen(),
     });
     panel.append(editor.root);
+    panel.append(el('div', { class: 'row' }, Lente.bottone(editor.contestoLente),
+      el('span', { class: 'hint' }, 'una finestra a parte con il riquadro ingrandito: '
+        + 'si trascina sul secondo schermo e segue quello che fai qui')));
     panel.append(el('p', { class: 'hint' },
       'doppio clic sull\'immagine per aprirla a schermo intero · tratteggiato grigio: il ' +
       'rettangolo originario proposto dalla rete'));

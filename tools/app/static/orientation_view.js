@@ -125,6 +125,25 @@ async function createOrientationViewer(projectId, sampleSize) {
     node.style.height = `${(box.bottom - box.top) * scaleY()}px`;
   };
 
+  /* Cosa vede la lente: il marker di questa immagine e, dietro, l'envelope del suo
+     gruppo — e' il confronto che conta, perche' il marker deve starci dentro. */
+  const contestoLente = () => {
+    const row = byName.get(names[index]);
+    const gruppo = row && row.group;
+    const voci = [];
+    if (row && row.box) {
+      voci.push({ box: row.box, color: GROUP_COLORS[gruppo] || '#40d0ff',
+                  label: `marker ${gruppo || ''}`.trim() });
+    }
+    const busta = gruppo && (data.envelopes || {})[gruppo];
+    if (busta) voci.push({ box: busta, color: GROUP_COLORS[gruppo] || '#8b949e',
+                           label: `envelope ${gruppo}` });
+    return {
+      projectId, name: names[index], size: [size[0] || 0, size[1] || 0], boxes: voci,
+      caption: row ? `score ${row.score}` : 'nessun marker',
+    };
+  };
+
   const paint = () => {
     for (const [group, node] of Object.entries(overlays)) place(node, (data.envelopes || {})[group]);
     if (typeof paintLimits === 'function') paintLimits();
@@ -138,6 +157,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     }
     const row = byName.get(names[index]);
     place(markerNode, row && row.box);
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
     detail.innerHTML = '';
     if (row) {
       detail.append(el('span', {},
@@ -1282,6 +1302,9 @@ async function createOrientationViewer(projectId, sampleSize) {
         'trascina un rettangolo attorno a quello vero.'))));
 
   root.append(el('div', { class: 'ov-bar' }, filterRow, navRow));
+  root.append(el('div', { class: 'row' }, Lente.bottone(contestoLente),
+    el('span', { class: 'hint' }, 'il marker ingrandito in una finestra a parte, da tenere '
+      + 'sul secondo schermo: segue l\'immagine che stai guardando')));
   root.append(fixBar);
   root.append(warnBar);
   root.append(bgBar);

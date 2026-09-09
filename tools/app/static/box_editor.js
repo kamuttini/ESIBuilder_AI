@@ -45,7 +45,7 @@ function cloneBoxes(source) {
 
 /* Un editor su una singola immagine. `boxes` viene mutato in posto; `onChange` avvisa. */
 function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoubleClick,
-                           margins }) {
+                           margins, projectId, imageName }) {
   const marginState = margins || { x: 0, y: 0 };
   const root = el('div', { class: 'editor' });
   const stage = el('div', { class: 'editor-stage' });
@@ -91,6 +91,7 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
       node.style.width = `${(box.right - box.left) * scaleX()}px`;
       node.style.height = `${(box.bottom - box.top) * scaleY()}px`;
       node.classList.toggle('selected', spec.key === selected);
+      if (Lente.viva()) Lente.aggiorna(contestoLente());
       const readout = sliderRows[spec.key];
       if (readout) {
         readout.size.textContent =
@@ -245,10 +246,32 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
   window.addEventListener('resize', paint);
   if (image.complete) setTimeout(paint, 0);
 
+  /* Cosa mandare alla lente: il box selezionato per primo, che e' quello su cui si sta
+     lavorando e quindi quello attorno a cui la finestra si centra; gli altri dietro, per
+     vedere come stanno l'uno rispetto all'altro. */
+  function contestoLente() {
+    const scelto = BOX_SPECS.find((spec) => spec.key === selected);
+    const voci = [];
+    if (scelto && boxes[scelto.key]) {
+      voci.push({ box: boxes[scelto.key], color: scelto.color, label: scelto.label });
+    }
+    for (const spec of BOX_SPECS) {
+      if (spec.key === selected || !boxes[spec.key]) continue;
+      voci.push({ box: boxes[spec.key], color: spec.color, label: spec.label });
+    }
+    return {
+      projectId, name: imageName,
+      size: [originalWidth(), originalHeight()],
+      boxes: voci,
+      caption: scelto ? scelto.label : '',
+    };
+  }
+
   return {
     root,
     paint,
     setImage(src) { image.src = src; },
+    contestoLente,
     boxes,
   };
 }

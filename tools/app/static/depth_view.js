@@ -240,10 +240,27 @@ async function createDepthViewer(projectId, sampleSize) {
     window.addEventListener('pointerup', molla);
   }
 
+  /* Cosa vede la lente: il riquadro di questa immagine, col valore letto. */
+  const contestoLente = () => {
+    const r = byName.get(names[index]) || {};
+    const box = (modificabile() ? bozza : r.box) || r.box;
+    return {
+      projectId, name: names[index], size: nativo(),
+      boxes: box ? [{ box, color: (modes[r.mode] || {}).color || '#3fb950',
+                      label: r.depth_mm == null ? 'depth' : `${r.depth_mm} mm` }] : [],
+      caption: r.ocr_text ? `letto «${r.ocr_text}»` : '',
+    };
+  };
+
   const disegna = () => {
     const r = byName.get(names[index]);
     const box = modificabile() ? bozza : (r && r.box);
-    if (!r || !box) { boxNode.style.display = 'none'; return; }
+    if (!r || !box) {
+      boxNode.style.display = 'none';
+      // Anche il vuoto va detto alla lente, se no resta il riquadro dell'immagine di prima.
+      if (Lente.viva()) Lente.aggiorna(contestoLente());
+      return;
+    }
     const s = scala();
     const colore = (modes[r.mode] || {}).color || '#ffffff';
     boxNode.style.display = 'block';
@@ -254,6 +271,7 @@ async function createDepthViewer(projectId, sampleSize) {
     boxNode.style.width = `${(box.right - box.left) * s.x}px`;
     boxNode.style.height = `${(box.bottom - box.top) * s.y}px`;
     for (const h of maniglie) h.style.display = 'none';
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
   };
 
   const mostra = () => {
@@ -688,7 +706,9 @@ async function createDepthViewer(projectId, sampleSize) {
       el('div', { class: 'hint' },
         'trascina il riquadro o le maniglie per stringerlo sul solo numero: piu\' e\' stretto, '
         + 'piu\' il match tiene su tutte le immagini.'),
-      el('div', { class: 'row' }, misura),
+      el('div', { class: 'row' }, misura,
+        Lente.bottone(contestoLente),
+        el('span', { class: 'hint' }, 'finestra a parte, per il secondo schermo')),
       el('div', { class: 'row' }, stringi, esitoStretto),
       campi,
       el('div', { class: 'row' }, ambitoSel,

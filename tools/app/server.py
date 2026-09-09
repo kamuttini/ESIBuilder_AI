@@ -5930,6 +5930,10 @@ def _run_depth_box(job_id: str, project_id: str, nome: str, box: Dict,
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
 
+# Lo stesso ritaglio con due nomi. Nato per la depth, ma con la finestra esplicita e' un
+# ritaglio ingrandito di un'immagine qualunque: e' quello che serve alla lente, che di depth
+# non sa niente.
+@app.get("/api/projects/<project_id>/crop")
 @app.get("/api/projects/<project_id>/depth/crop")
 def api_depth_crop(project_id: str):
     """La striscia di interfaccia attorno alla depth, ingrandita, col riquadro disegnato.
