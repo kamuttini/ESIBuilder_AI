@@ -51,6 +51,9 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
                            margins, projectId, imageName, soloControlli }) {
   const marginState = margins || { x: 0, y: 0 };
   const root = el('div', { class: 'editor' });
+  // Due colonne, come ovunque: l'immagine a sinistra, i comandi a destra. I comandi
+  // finiscono qui dentro, che e' il posto che il layout riserva loro.
+  const comandi = el('div', { class: 'editor-lato' });
   const stage = el('div', { class: 'editor-stage' });
   const image = el('img', { src: imageSrc, alt: '' });
   if (height) image.style.maxHeight = height;
@@ -59,7 +62,8 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
   // si trascina altrove. Lo stage resta costruito - e' lui a dare la scala ai calcoli - ma
   // fuori dalla pagina, che e' meno fragile che rendere opzionale mezza funzione.
   if (soloControlli) stage.style.display = 'none';
-  root.append(stage);
+  root.append(stage, comandi);
+  if (soloControlli) root.classList.add('senza-immagine');
 
   // la selezione salta i box in sola lettura: non si modificano
   let selected = BOX_SPECS.find((spec) => boxes[spec.key] && !spec.readonly)?.key
@@ -241,7 +245,7 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
       sliderRows[spec.key].margins = margins;
     }
 
-    root.append(block);
+    comandi.append(block);
   }
 
   if (onDoubleClick) {

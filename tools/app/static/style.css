@@ -1,6 +1,6 @@
 :root {
-  /* la larghezza dell'immagine, uguale in tutte le sezioni */
-  --immagine-larga: 720px;
+  /* la colonna degli strumenti: fissa, cosi' l'immagine prende tutto il resto */
+  --lato-largo: 380px;
   --bg: #12151a;
   --panel: #1a1f27;
   --panel-2: #222834;
@@ -69,7 +69,13 @@ nav {
 .step .dot.blocked { background: var(--err); }
 .step .meta { display: block; color: var(--muted); font-size: 12px; }
 
-section#panel { flex: 1; padding: 20px 26px; max-width: 1100px; }
+/* Il pannello prende la larghezza che c'e'. Il tetto di 1100 px era giusto quando dentro
+   c'era una colonna di testo; adesso c'e' un'immagine su cui si lavora, e ogni pixel che
+   le si toglie e' un pixel in meno per vedere dove cade un bordo. Un tetto largo resta,
+   per non far diventare le righe di testo lunghissime su uno schermo molto grande. */
+section#panel { flex: 1; padding: 20px 26px; max-width: 1900px; }
+/* Il testo discorsivo pero' resta leggibile: righe corte anche su schermi larghi. */
+section#panel > p.hint, section#panel > ul.problems { max-width: 900px; }
 
 h2 { margin: 0 0 4px; font-size: 18px; }
 h3 { margin: 22px 0 8px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
@@ -468,39 +474,44 @@ button.chip:disabled { opacity: 0.35; }
 }
 .barra-immagine .ov-nav { margin: 0; }
 
-/* Tutte le sezioni con un'immagine hanno la stessa forma: immagine a sinistra, larga
-   sempre uguale e appiccicata in alto; strumenti a destra, che scorrono. Prima ogni
-   sezione aveva la sua - immagini di misure diverse, comandi ora sotto ora di fianco - e
-   passando da una all'altra bisognava ritrovare ogni volta dove stavano le cose. */
-.ov-body { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
-.ov-main {
-  flex: 1 1 var(--immagine-larga);
-  max-width: var(--immagine-larga);
-  min-width: 0;
-  position: sticky;
-  top: 8px;
+/* Tutte le sezioni con un'immagine hanno la stessa forma: immagine grande a sinistra,
+   strumenti e informazioni a destra. Una **griglia**, non un flex che va a capo: col flex
+   bastava che una colonna chiedesse un pixel di troppo e la destra finiva sotto
+   l'immagine, larga tutta la pagina - che e' il contrario di quello che serve.
+
+   L'immagine prende tutto lo spazio che resta: e' lei il lavoro, e piu' e' grande meglio
+   si vede dove cade un bordo. La colonna degli strumenti ha una larghezza fissa, perche'
+   un pannello che cambia larghezza da una sezione all'altra si rilegge ogni volta. */
+.ov-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--lato-largo);
+  gap: 14px;
+  align-items: start;
 }
-.ov-side {
-  flex: 1 1 320px;
-  min-width: 280px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.ov-main { min-width: 0; position: sticky; top: 8px; }
+.ov-side { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 /* L'immagine riempie la sua colonna, in ogni sezione. Lo stage e' il riferimento degli
    overlay: deve coincidere con l'immagine, se no i riquadri cadono spostati. */
 .ov-main .editor-stage, .rect-immagine .editor-stage, .editor > .editor-stage {
   display: block;
   width: 100%;
 }
-/* Anche l'editor dei box (ecografo, sonda) sta nella stessa larghezza: e' quella la misura
-   di riferimento, e due immagini della stessa cartella a due misure diverse si confrontano
-   male anche solo a memoria. */
-.editor { max-width: var(--immagine-larga); }
 .ov-main .editor-stage img, .rect-immagine .editor-stage img,
 .editor > .editor-stage img { width: 100%; }
-@media (max-width: 1100px) {
-  .ov-main { position: static; max-width: none; }
+
+/* L'editor dei box (ecografo, sonda, rettangolo a schermo intero) ha la stessa forma. */
+.editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--lato-largo);
+  gap: 14px;
+  align-items: start;
+}
+.editor.senza-immagine { display: block; }
+.editor-lato { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+
+@media (max-width: 1180px) {
+  .ov-body, .editor { grid-template-columns: 1fr; }
+  .ov-main { position: static; }
 }
 .ov-side .template-card { width: auto; }
 /* l'altezza esatta la mette il JS (quella dell'immagine, meno il ritaglio): qui c'e' solo
@@ -1012,16 +1023,15 @@ img.depth-crop {
    una colonna sola: schiacciarle su uno schermo stretto le rende illeggibili entrambe. */
 .rect-due {
   display: grid;
-  /* la stessa larghezza d'immagine di tutte le altre sezioni */
-  grid-template-columns: minmax(0, var(--immagine-larga)) minmax(300px, 1fr);
-  gap: 16px;
+  grid-template-columns: minmax(0, 1fr) var(--lato-largo);
+  gap: 14px;
   align-items: start;
 }
 .rect-immagine { position: sticky; top: 8px; }
 .rect-lato { min-width: 0; }
 .rect-lato .proposta { margin-top: 8px; }
 .rect-lato h3 { font-size: 14px; }
-@media (max-width: 1100px) {
+@media (max-width: 1180px) {
   .rect-due { grid-template-columns: 1fr; }
   .rect-immagine { position: static; }
 }
