@@ -20,6 +20,9 @@ const Lente = (() => {
   let nomeInFinestra = '';
   let miraInFinestra = null;   // la zona inquadrata l'ultima volta che si e' rifatta
   let zoomManuale = null;   // null = si adatta alla finestra
+  let finestraManuale = false;  // la vista l'ha spostata lei: non inseguire piu' la mira
+  let latoScelto = null;        // il bordo che le frecce muovono
+  let miraScelta = '';          // quale bersaglio della barra e' acceso
   let zoomServito = 0;      // l'ingrandimento gia' chiesto al server, per non richiederlo
 
   const viva = () => !!(win && !win.closed && win.document && win.document.getElementById('crop'));
@@ -40,6 +43,16 @@ const Lente = (() => {
      disegnato sopra non si rompe perche' viene misurata ogni volta invece che calcolata. */
   #crop { display: block; image-rendering: pixelated; }
   #zoombar { display: flex; gap: 4px; align-items: center; }
+  #mire { display: flex; gap: 3px; flex-wrap: wrap; padding: 5px 10px;
+          border-bottom: 1px solid #30363d; }
+  #mire button { background: #161b22; color: #8b949e; border: 1px solid #30363d;
+                 border-radius: 999px; padding: 1px 9px; font: inherit; font-size: 11.5px;
+                 cursor: pointer; }
+  #mire button:hover { background: #21262d; color: #c9d1d9; }
+  #mire button.on { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  #coord { color: #6e7681; font-variant-numeric: tabular-nums; }
+  #scena { cursor: grab; }
+  #scena.trascina { cursor: grabbing; }
   #zoombar button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
                     border-radius: 5px; padding: 1px 8px; font: inherit; cursor: pointer; }
   #zoombar button:hover { background: #30363d; }
@@ -56,6 +69,15 @@ const Lente = (() => {
   .man.w, .man.e { cursor: ew-resize; }
   .man.nw, .man.se { cursor: nwse-resize; }
   .man.ne, .man.sw { cursor: nesw-resize; }
+  /* I lati si afferrano lungo **tutto** il bordo, non solo nelle maniglie: ingrandendo a
+     800% le maniglie degli angoli finiscono fuori dalla finestra, e restava un rettangolo
+     che si vedeva ma non si poteva prendere. */
+  .lato { position: absolute; pointer-events: auto; }
+  .lato.n, .lato.s { left: 0; right: 0; height: 11px; cursor: ns-resize; }
+  .lato.n { top: -5px; } .lato.s { bottom: -5px; }
+  .lato.w, .lato.e { top: 0; bottom: 0; width: 11px; cursor: ew-resize; }
+  .lato.w { left: -5px; } .lato.e { right: -5px; }
+  .lato.scelto { background: rgba(31, 111, 235, .35); }
   .riq b { position: absolute; top: -17px; left: -2px; font-size: 11px; font-weight: 600;
            background: #0d1117; padding: 0 3px; white-space: nowrap; }
   /* Assi e corde: la lente non serve solo ai riquadri. Sul rettangolo ecografico quello
@@ -72,11 +94,13 @@ const Lente = (() => {
                       background: currentColor; padding: 0 3px; white-space: nowrap; }
   #vuoto { padding: 18px; color: #8b949e; }
 </style></head><body>
+<div id="mire"></div>
 <div id="testa"><span id="titolo">lente</span>
   <span id="zoombar"><button id="meno" title="rimpicciolisci (rotella)">\u2212</button>
     <span id="fattore"></span>
     <button id="piu" title="ingrandisci (rotella)">+</button>
     <button id="adatta" title="torna a riempire la finestra">adatta</button></span>
+  <span id="coord"></span>
   <span id="dettaglio"></span></div>
 <div id="scena"><img id="crop" alt=""></div>
 <div id="vuoto">niente da ingrandire: scegli un riquadro nella pagina principale.</div>
@@ -86,14 +110,16 @@ const Lente = (() => {
      pixel - moltiplicarli ancora non aggiunge informazione, ma e' quello che serve per
      lavorare su un bordo. La scala del rettangolo si misura, quindi non c'e' niente da
      tenere in sincrono a mano. */
-  const PASSI_ZOOM = [1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32];
+  const PASSI_ZOOM = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32];
 
   const zoomAuto = () => {
     if (!finestra || !viva()) return 4;
     const largo = Math.max(1, finestra[2] - finestra[0]);
     const alto = Math.max(1, finestra[3] - finestra[1]);
-    return Math.max(1, Math.min(32,
-      Math.min((win.innerWidth - 8) / largo, (win.innerHeight - 46) / alto)));
+    // Puo' scendere sotto 1: «tutto il rettangolo» e' 1100 px e in una finestra da 900
+    // non ci sta - rifiutarsi di rimpicciolire vorrebbe dire non mostrarlo mai intero.
+    return Math.max(0.15, Math.min(32,
+      Math.min((win.innerWidth - 8) / largo, (win.innerHeight - 72) / alto)));
   };
 
   const fattore = () => zoomManuale || zoomAuto();
@@ -111,6 +137,96 @@ const Lente = (() => {
     disegna(true);
   };
 
+  /* Spostare la vista trascinando lo sfondo. Senza, per guardare il bordo destro dopo aver
+     guardato il sinistro bisognava passare dalla pagina: la lente era una finestra su un
+     punto solo. La vista spostata a mano resta dov'e' finche' non si sceglie un altro
+     bersaglio - se no tornerebbe indietro al primo ridisegno. */
+  const attaccaSpostamento = (scena) => {
+    scena.addEventListener('pointerdown', (ev) => {
+      if (ev.target !== scena && ev.target.id !== 'crop') return;
+      ev.preventDefault();
+      const img = win.document.getElementById('crop');
+      const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
+      const da = { x: ev.clientX, y: ev.clientY };
+      const inizio = [...finestra];
+      const [W, H] = ctx.size || [0, 0];
+      scena.classList.add('trascina');
+      scena.setPointerCapture(ev.pointerId);
+      const muovi = (e) => {
+        const dx = Math.round((da.x - e.clientX) / (s || 1));
+        const dy = Math.round((da.y - e.clientY) / (s || 1));
+        const largo = inizio[2] - inizio[0];
+        const alto = inizio[3] - inizio[1];
+        let x0 = inizio[0] + dx, y0 = inizio[1] + dy;
+        x0 = Math.max(0, Math.min(x0, (W || x0 + largo) - largo));
+        y0 = Math.max(0, Math.min(y0, (H || y0 + alto) - alto));
+        finestra = [x0, y0, x0 + largo, y0 + alto];
+        finestraManuale = true;
+        miraScelta = '';
+        zoomServito = 0;      // la striscia e' un'altra: va richiesta
+        disegna();
+      };
+      const molla = () => {
+        scena.classList.remove('trascina');
+        scena.removeEventListener('pointermove', muovi);
+        scena.removeEventListener('pointerup', molla);
+        scena.removeEventListener('pointercancel', molla);
+      };
+      scena.addEventListener('pointermove', muovi);
+      scena.addEventListener('pointerup', molla);
+      scena.addEventListener('pointercancel', molla);
+    });
+  };
+
+  /* Le coordinate sotto al puntatore. Su un ingrandimento forte il pixel esatto non si
+     conta a occhio, e questo e' il numero che serve per dire «il bordo va a 419». */
+  const attaccaCoordinate = (scena) => {
+    scena.addEventListener('pointermove', (ev) => {
+      if (!finestra || !viva()) return;
+      const img = win.document.getElementById('crop');
+      const r = img.getBoundingClientRect();
+      const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
+      const x = Math.round(finestra[0] + (ev.clientX - r.left) / (s || 1));
+      const y = Math.round(finestra[1] + (ev.clientY - r.top) / (s || 1));
+      win.document.getElementById('coord').textContent = `x ${x} · y ${y}`;
+    });
+    scena.addEventListener('pointerleave', () => {
+      if (viva()) win.document.getElementById('coord').textContent = '';
+    });
+  };
+
+  /* Le frecce muovono di un pixel il lato scelto, shift di dieci. E' il gesto per la
+     rifinitura: si guarda ingrandito e si aggiusta senza trascinare. */
+  const attaccaTasti = (d) => {
+    d.addEventListener('keydown', (ev) => {
+      if (!ctx || !ctx.onChange || !latoScelto) return;
+      const passo = ev.shiftKey ? 10 : 1;
+      const delta = { ArrowLeft: [-passo, 0], ArrowRight: [passo, 0],
+                      ArrowUp: [0, -passo], ArrowDown: [0, passo] }[ev.key];
+      if (!delta) return;
+      ev.preventDefault();
+      const box = { ...(ctx.boxes[0] || {}).box };
+      const [W, H] = ctx.size || [0, 0];
+      const n = { ...box };
+      if (latoScelto === 'move') {
+        const largo = box.right - box.left, alto = box.bottom - box.top;
+        n.left = Math.max(0, Math.min(box.left + delta[0], (W || box.right) - largo));
+        n.top = Math.max(0, Math.min(box.top + delta[1], (H || box.bottom) - alto));
+        n.right = n.left + largo; n.bottom = n.top + alto;
+      } else {
+        if (latoScelto.includes('w')) n.left = Math.min(box.left + delta[0], box.right - 2);
+        if (latoScelto.includes('e')) n.right = Math.max(box.right + delta[0], box.left + 2);
+        if (latoScelto.includes('n')) n.top = Math.min(box.top + delta[1], box.bottom - 2);
+        if (latoScelto.includes('s')) n.bottom = Math.max(box.bottom + delta[1], box.top + 2);
+        n.left = Math.max(0, n.left); n.top = Math.max(0, n.top);
+        if (W) n.right = Math.min(n.right, W);
+        if (H) n.bottom = Math.min(n.bottom, H);
+      }
+      ctx.onChange({ left: Math.round(n.left), top: Math.round(n.top),
+                     right: Math.round(n.right), bottom: Math.round(n.bottom) });
+    });
+  };
+
   const apri = () => {
     if (viva()) { win.focus(); return true; }
     win = window.open('', 'esibuilder-lente',
@@ -126,6 +242,11 @@ const Lente = (() => {
     win.addEventListener('resize', () => { finestra = null; disegna(); });
     win.addEventListener('unload', () => { win = null; });
     const d = win.document;
+    attaccaSpostamento(d.getElementById('scena'));
+    attaccaCoordinate(d.getElementById('scena'));
+    attaccaTasti(d);
+    d.body.tabIndex = 0;
+    d.body.focus();
     d.getElementById('piu').addEventListener('click', () => cambiaZoom(+1));
     d.getElementById('meno').addEventListener('click', () => cambiaZoom(-1));
     d.getElementById('adatta').addEventListener('click', () => { zoomManuale = null; disegna(true); });
@@ -149,8 +270,11 @@ const Lente = (() => {
     const [w, h] = size;
     const largo = box.right - box.left;
     const alto = box.bottom - box.top;
-    const mx = Math.max(40, Math.round(1.4 * largo));
-    const my = Math.max(24, Math.round(1.4 * alto));
+    // Il margine attorno: generoso per un riquadro piccolo (un marker di 30 px va visto
+    // nel suo contesto), ma con un tetto - su un bersaglio di 180 px un margine di 1.4
+    // volte lo portava a 684, e non restava niente da ingrandire.
+    const mx = Math.min(160, Math.max(40, Math.round(0.35 * largo)));
+    const my = Math.min(160, Math.max(24, Math.round(0.35 * alto)));
     let x0 = Math.round(box.left - mx);
     let x1 = Math.round(box.right + mx);
     let y0 = Math.round(box.top - my);
@@ -184,6 +308,7 @@ const Lente = (() => {
       const box = { ...(ctx.boxes[0] || {}).box };
       const [w, h] = ctx.size || [0, 0];
       trascinando = true;
+      latoScelto = lato;      // da qui in poi le frecce muovono questo
       nodo.setPointerCapture(ev.pointerId);
       const muovi = (e) => {
         const dx = Math.round((e.clientX - partenza.x) / (s || 1));
@@ -259,7 +384,8 @@ const Lente = (() => {
       || Math.abs(miraInFinestra.top - mira.top) > 2
       || Math.abs(miraInFinestra.right - mira.right) > 2
       || Math.abs(miraInFinestra.bottom - mira.bottom) > 2;
-    if (!trascinando
+    if (finestraManuale && miraCambiata) finestraManuale = false;
+    if (!trascinando && !finestraManuale
         && (nomeInFinestra !== ctx.name || miraCambiata || fuoriFinestra(mira))) {
       finestra = nuovaFinestra(mira, size);
       nomeInFinestra = ctx.name;
@@ -284,6 +410,7 @@ const Lente = (() => {
     }
     img.style.width = `${Math.round(largoNativo * voluto)}px`;
     d.getElementById('fattore').textContent = `${Math.round(voluto * 100)}%`;
+    disegnaMire(d);
 
     // La scala si misura: e' l'unico modo di essere sicuri che il rettangolo cada dove deve.
     const larghezzaVista = img.clientWidth || 0;
@@ -352,6 +479,14 @@ const Lente = (() => {
       }
       if (primo && ctx.onChange) {
         attaccaTrascinamento(n, 'move');
+        // I quattro lati, afferrabili lungo tutto il bordo: e' cosi' che si prende un lato
+        // quando l'ingrandimento ha portato gli angoli fuori dalla finestra.
+        for (const lato of ['n', 's', 'w', 'e']) {
+          const striscia = d.createElement('div');
+          striscia.className = `lato ${lato}` + (latoScelto === lato ? ' scelto' : '');
+          attaccaTrascinamento(striscia, lato);
+          n.append(striscia);
+        }
         for (const [lato, sx, sy] of [['nw', 0, 0], ['n', 0.5, 0], ['ne', 1, 0],
                                       ['w', 0, 0.5], ['e', 1, 0.5],
                                       ['sw', 0, 1], ['s', 0.5, 1], ['se', 1, 1]]) {
@@ -376,6 +511,34 @@ const Lente = (() => {
       const cy = (mira.top + mira.bottom) / 2 - finestra[1];
       win.scrollTo(Math.max(0, cx * s - win.innerWidth / 2),
                    Math.max(0, cy * s - (win.innerHeight - 46) / 2));
+    }
+  };
+
+  /* I bersagli: un clic e la lente va li'. Li decide chi la usa - la lente non sa cosa
+     siano un angolo o una corda - e sono la differenza fra una finestra che guarda un punto
+     solo e uno strumento con cui si gira intorno al rettangolo. */
+  const disegnaMire = (d) => {
+    const barra = d.getElementById('mire');
+    const elenco = ctx.targets || [];
+    if (!elenco.length) { barra.style.display = 'none'; return; }
+    barra.style.display = '';
+    const firma = elenco.map((v) => v.id).join('|') + '#' + miraScelta;
+    if (barra.dataset.firma === firma) return;
+    barra.dataset.firma = firma;
+    barra.innerHTML = '';
+    for (const voce of elenco) {
+      const b = d.createElement('button');
+      b.textContent = voce.label;
+      if (voce.id === miraScelta) b.className = 'on';
+      b.addEventListener('click', () => {
+        miraScelta = voce.id;
+        finestraManuale = false;
+        latoScelto = voce.side || null;
+        miraInFinestra = null;      // costringe a rifare la finestra su questo bersaglio
+        if (ctx.onTarget) ctx.onTarget(voce);
+        disegna(true);
+      });
+      barra.append(b);
     }
   };
 

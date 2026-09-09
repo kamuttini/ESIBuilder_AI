@@ -908,6 +908,29 @@ function rectStudyCard(panel, chainIniziale, ganci) {
                       color: GROUP_COLORS_RECT[PARTNER[corrente]], dashed: true,
                       label: `corda ${PARTNER[corrente]}` });
     }
+    // I bersagli della lente: un clic e va li'. Girare intorno al rettangolo bordo per
+    // bordo e' il lavoro vero di questa sezione, e farlo trascinando la vista ogni volta
+    // sarebbe un giro lungo per una cosa che si sa gia' dove sta.
+    const bersagli = [];
+    if (rect) {
+      const r = 90;
+      const meta = (a, b2) => (a + b2) / 2;
+      const attorno = (x, y) => ({ left: x - r, top: y - r, right: x + r, bottom: y + r });
+      bersagli.push(
+        { id: 'tutto', label: 'tutto il rettangolo', box: { ...rect } },
+        { id: 'w', label: 'bordo sx', side: 'w', box: attorno(rect.left, meta(rect.top, rect.bottom)) },
+        { id: 'e', label: 'bordo dx', side: 'e', box: attorno(rect.right, meta(rect.top, rect.bottom)) },
+        { id: 'n', label: 'bordo alto', side: 'n', box: attorno(meta(rect.left, rect.right), rect.top) },
+        { id: 's', label: 'bordo basso', side: 's', box: attorno(meta(rect.left, rect.right), rect.bottom) },
+        { id: 'nw', label: 'angolo ↖', side: 'nw', box: attorno(rect.left, rect.top) },
+        { id: 'ne', label: 'angolo ↗', side: 'ne', box: attorno(rect.right, rect.top) },
+        { id: 'sw', label: 'angolo ↙', side: 'sw', box: attorno(rect.left, rect.bottom) },
+        { id: 'se', label: 'angolo ↘', side: 'se', box: attorno(rect.right, rect.bottom) },
+      );
+    }
+    const corde = zonaCorde();
+    if (corde) bersagli.push({ id: 'corde', label: `corda ${corrente}`, box: corde });
+
     return {
       projectId: state.projectId,
       name: image.title || '',
@@ -915,8 +938,10 @@ function rectStudyCard(panel, chainIniziale, ganci) {
       boxes: rect ? [{ box: rect, color: '#ffffff', label: 'rettangolo (#11)' }] : [],
       lines: linee,
       segments: segmenti,
-      focus: miraLente || zonaCorde() || rect || null,
-      caption: miraLente ? 'angolo che stai spostando' : 'zona delle corde',
+      focus: miraLente || corde || rect || null,
+      targets: bersagli,
+      caption: miraLente ? 'stai lavorando qui' : 'zona delle corde',
+      onTarget: (voce) => { miraLente = voce.box; draw(); },
       onChange: gancio.scriviRect ? (nuovo) => { gancio.scriviRect(nuovo); draw(); } : null,
     };
   };
@@ -1568,7 +1593,9 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     // scritto nel riepilogo sotto, e in mezzo alle altre si legge come una quinta scelta.
     // «consenso» viene dalla specularita' e «simmetrico_marker» dai marker: due studi che
     // questa sezione non fa piu'.
-    const SOLO_CORDE = ['ampiezza', 'simmetrico_corde'];
+    // Resta la sola proposta che nasce davvero dalla misura delle corde: allargare fino
+    // alla piu' larga. Il «simmetrico sull'asse del ventaglio» non serve.
+    const SOLO_CORDE = ['ampiezza'];
     for (const c of axesData.candidates.filter((v) => SOLO_CORDE.includes(v.id))) {
       const r = c.rect;
       const scelto = attivi.candidato === c.id;
