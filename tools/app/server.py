@@ -2520,6 +2520,96 @@ def api_orientation_limits(project_id: str):
     return jsonify({"groups": out, "order": list(marker_refine.GROUP_ORDER)})
 
 
+def _senza_bordo(image_path: Path, box: Dict[str, int],
+                 margine: int = 1) -> Optional[Dict]:
+    """Il riquadro del marker portato sul glifo, buttando via il nero attorno.
+
+    Il template matching consegna un rettangolo che contiene il glifo, non che gli aderisce:
+    attorno resta un bordo di sfondo, e quel bordo cambia da un'immagine all'altra - e' la
+    parte che rende il ritaglio meno riconoscibile proprio dove serve.
+
+    Lo sfondo di queste interfacce e' scuro e il glifo chiaro, ma non sempre: si guarda
+    quale dei due prevale nel ritaglio e si prende l'altro come inchiostro. Poi si tiene la
+    scatola che contiene l'inchiostro, con un pixel di respiro - senza, il match si aggrappa
+    ai bordi del glifo e diventa fragile.
+
+    Torna None quando non c'e' niente da togliere o quando quel che resta e' troppo poco per
+    essere un glifo: meglio lasciare il riquadro com'e' che consegnarne uno vuoto.
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    try:
+        with Image.open(image_path) as grezza:
+            ritaglio = grezza.convert("L").crop(
+                (int(box["left"]), int(box["top"]), int(box["right"]), int(box["bottom"]))
+            )
+    except Exception:  # noqa: BLE001
+        return None
+    larghezza, altezza = ritaglio.size
+    if larghezza < 6 or altezza < 6:
+        return None
+    px = ritaglio.load()
+    valori = [px[x, y] for y in range(altezza) for x in range(larghezza)]
+    basso, alto = min(valori), max(valori)
+    if alto - basso < 25:
+        return None      # tutto uguale: non c'e' nessun glifo da isolare
+    soglia = (basso + alto) / 2.0
+    # Chiaro su scuro o scuro su chiaro: comanda quello che occupa meno spazio, che e'
+    # l'inchiostro. Uno sfondo che copre meno di meta' del ritaglio non e' uno sfondo.
+    chiari = sum(1 for v in valori if v > soglia)
+    inchiostro_chiaro = chiari <= len(valori) / 2
+    acceso = ((lambda v: v > soglia) if inchiostro_chiaro else (lambda v: v <= soglia))
+
+    colonne = [x for x in range(larghezza) if any(acceso(px[x, y]) for y in range(altezza))]
+    righe = [y for y in range(altezza) if any(acceso(px[x, y]) for x in range(larghezza))]
+    if not colonne or not righe:
+        return None
+    nuovo = {
+        "left": int(box["left"] + max(0, colonne[0] - margine)),
+        "right": int(box["left"] + min(larghezza, colonne[-1] + 1 + margine)),
+        "top": int(box["top"] + max(0, righe[0] - margine)),
+        "bottom": int(box["top"] + min(altezza, righe[-1] + 1 + margine)),
+    }
+    if nuovo["right"] - nuovo["left"] < 6 or nuovo["bottom"] - nuovo["top"] < 6:
+        return None
+    tolti = {
+        "left": nuovo["left"] - int(box["left"]), "top": nuovo["top"] - int(box["top"]),
+        "right": int(box["right"]) - nuovo["right"], "bottom": int(box["bottom"]) - nuovo["bottom"],
+    }
+    if not any(tolti.values()):
+        return None
+    return {"box": nuovo, "trimmed": tolti,
+            "ink": round(sum(1 for v in valori if acceso(v)) / len(valori), 3),
+            "ink_light": inchiostro_chiaro}
+
+
+@app.get("/api/projects/<project_id>/orientation/marker_tight")
+def api_orientation_marker_tight(project_id: str):
+    """Il riquadro del marker senza il bordo di sfondo, da guardare prima di applicarlo."""
+    project = _project(project_id)
+    folder = project.working_dir() or Path("")
+    nome = (request.args.get("name") or "").strip()
+    percorso = _immagine_nella_cartella(folder, nome)
+    if percorso is None:
+        return jsonify({"error": f"immagine non nella cartella: {nome or '(vuoto)'}"}), 400
+    chiesto = request.args.get("box") or ""
+    if chiesto:
+        try:
+            lati = [int(round(float(v))) for v in chiesto.split("|")]
+            box = {"top": lati[0], "left": lati[1], "bottom": lati[2], "right": lati[3]}
+        except (TypeError, ValueError, IndexError):
+            return jsonify({"error": "riquadro illeggibile: serve top|left|bottom|right"}), 400
+    else:
+        box = _current_marker_box(project, nome)
+        if box is None:
+            return jsonify({"error": "nessun marker in questa immagine"}), 404
+    esito = _senza_bordo(percorso, box)
+    if esito is None:
+        return jsonify({"box": box, "before": box, "changed": False,
+                        "reason": "il bordo scuro non c'e' o quel che resterebbe e' troppo poco"})
+    return jsonify({**esito, "before": box, "changed": True})
+
+
 @app.post("/api/projects/<project_id>/orientation/marker_override")
 def api_orientation_marker_override(project_id: str):
     """Segnala che il marker trovato e' sbagliato e indica quello giusto, con un rettangolo."""

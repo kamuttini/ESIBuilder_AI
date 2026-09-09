@@ -573,6 +573,7 @@ async function createOrientationViewer(projectId, sampleSize) {
      cartella, anche nei blocchi #12/#16 del file. */
   let modificaMarker = false;
   let bozzaMarker = null;
+  let partenzaMarker = null;
   const modificaPanel = el('div', { class: 'card', style: 'display:none' });
   const modificaButton = el('button', { class: 'ghost' }, 'Stringi il marker');
 
@@ -636,15 +637,46 @@ async function createOrientationViewer(projectId, sampleSize) {
     markerNode.classList.toggle('in-modifica', modificaMarker);
   };
 
-  const setModifica = (on) => {
+  /* Entrando in modifica il software ci prova per primo: toglie il bordo di sfondo e
+     lascia il glifo. Non e' una decisione presa al posto suo - il riquadro di partenza
+     resta scritto, e basta un trascinamento per rimetterlo come si vuole - e' solo che
+     togliere il nero attorno e' un conto, non un giudizio, e farglielo fare a mano ogni
+     volta sarebbe farle ripetere quel conto. */
+  let strettaAutomatica = null;
+  const setModifica = async (on) => {
     const row = byName.get(names[index]);
     if (on && !(row && row.box)) { toast('qui non c\'e\' un marker da stringere', true); return; }
     modificaMarker = on;
+    partenzaMarker = on ? { ...row.box } : null;
     bozzaMarker = on ? { ...row.box } : null;
+    strettaAutomatica = null;
     modificaButton.textContent = on ? 'Annulla' : 'Stringi il marker';
     modificaPanel.style.display = on ? 'block' : 'none';
     if (!on) paint(); else place(markerNode, bozzaMarker);
     mostraManiglie();
+    renderModifica();
+    if (!on) { if (Lente.viva()) Lente.aggiorna(contestoLente()); return; }
+    // La risposta puo' arrivare dopo che si e' gia' cambiata immagine o usciti: in quel
+    // caso e' la risposta a una domanda che non si fa piu', e va lasciata cadere.
+    const chiesta = names[index];
+    try {
+      const b = partenzaMarker;
+      const esito = await api(`/projects/${projectId}/orientation/marker_tight`
+        + `?name=${encodeURIComponent(chiesta)}`
+        + `&box=${b.top}|${b.left}|${b.bottom}|${b.right}`);
+      if (names[index] !== chiesta || !modificaMarker) return;
+      if (esito.changed) {
+        strettaAutomatica = esito;
+        bozzaMarker = limitaBox(esito.box);
+        place(markerNode, bozzaMarker);
+        mostraManiglie();
+      } else {
+        strettaAutomatica = { changed: false, reason: esito.reason || '' };
+      }
+    } catch (errore) {
+      if (names[index] !== chiesta || !modificaMarker) return;
+      strettaAutomatica = { changed: false, reason: errore.message };
+    }
     renderModifica();
     if (Lente.viva()) Lente.aggiorna(contestoLente());
   };
@@ -655,7 +687,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     const b = bozzaMarker;
     const largo = b.right - b.left;
     const alto = b.bottom - b.top;
-    const partito = (byName.get(names[index]) || {}).box || b;
+    const partito = partenzaMarker || (byName.get(names[index]) || {}).box || b;
     modificaPanel.innerHTML = '';
     modificaPanel.append(el('h3', { style: 'margin-top:0' }, 'stringi il marker'));
     modificaPanel.append(el('p', { class: 'hint' },
@@ -666,6 +698,25 @@ async function createOrientationViewer(projectId, sampleSize) {
       el('span', {}, `${b.top}|${b.left}|${b.bottom}|${b.right} — ${largo}x${alto} px`)));
     modificaPanel.append(el('div', { class: 'kv' }, el('span', {}, 'partiva da'),
       el('span', {}, `${partito.right - partito.left}x${partito.bottom - partito.top} px`)));
+    if (strettaAutomatica && strettaAutomatica.changed) {
+      const t = strettaAutomatica.trimmed || {};
+      const rimetti = el('button', { class: 'ghost sq2', style: 'margin-left:8px' },
+        'rimetti com\'era');
+      rimetti.addEventListener('click', () => {
+        bozzaMarker = { ...partito };
+        place(markerNode, bozzaMarker);
+        mostraManiglie();
+        renderModifica();
+        if (Lente.viva()) Lente.aggiorna(contestoLente());
+      });
+      modificaPanel.append(el('div', { class: 'depth-prestito' },
+        `il bordo di sfondo l'ho tolto io: ${t.top || 0} px sopra, ${t.bottom || 0} sotto, `
+        + `${t.left || 0} a sinistra, ${t.right || 0} a destra. `
+        + 'Correggi con le maniglie se non ti torna, oppure conferma.', rimetti));
+    } else if (strettaAutomatica && strettaAutomatica.reason) {
+      modificaPanel.append(el('div', { class: 'hint' },
+        `da togliere non ho trovato niente: ${strettaAutomatica.reason}`));
+    }
     if (largo > 45 || alto > 45) {
       modificaPanel.append(el('p', { class: 'hint', style: 'color:var(--warn)' },
         `i ritagli orientation_*.png delle configurazioni storiche vanno da 16x18 a 30x31: `
