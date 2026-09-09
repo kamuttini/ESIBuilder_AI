@@ -965,6 +965,32 @@ img.depth-crop {
   flex-direction: column;
   gap: 2px;
 }
+/* Il passo del righello e la sua verifica con la depth confermata. */
+.scala-passo {
+  margin: 6px 0;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12.5px;
+}
+.scala-verdetto {
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.scala-avviso {
+  border-left: 3px solid var(--warn);
+  background: rgba(210, 153, 34, 0.10);
+  padding: 5px 8px;
+  border-radius: 0 6px 6px 0;
+  color: var(--warn);
+}
 .depth-stona { color: var(--warn); margin-top: 4px; }
 /* Il riquadro che l'immagine non ha di suo: e' quello di cartella, prestato. Va detto,
    se no sembra una lettura gia' avvenuta. */

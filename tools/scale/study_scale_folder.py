@@ -723,7 +723,19 @@ def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
             pred.x = float(c["x"]); applied.append("colonna")
         if c.get("y_zero") not in (None, ""):
             y_zero = float(c["y_zero"]); zero_moved = False; applied.append("zero")
-        if c.get("ticks_del") or c.get("ticks_add"):
+        # An explicit ladder replaces the detection outright. It is what the app writes once
+        # the operator has fixed one tick: inside a frame the pitch does not change, so the
+        # whole ladder follows from one, and sending it as add/delete pairs would only make
+        # the same fact harder to read.
+        if c.get("ticks"):
+            pred.ticks_y = sorted(float(v) for v in c["ticks"])
+            pred.n_ticks = len(pred.ticks_y)
+            if len(pred.ticks_y) > 1:
+                d = sorted(pred.ticks_y[k + 1] - pred.ticks_y[k]
+                           for k in range(len(pred.ticks_y) - 1))
+                pred.tick_pitch_px = d[len(d) // 2]
+            applied.append("tacche")
+        elif c.get("ticks_del") or c.get("ticks_add"):
             dele = {round(float(v)) for v in (c.get("ticks_del") or [])}
             keep = [t for t in (pred.ticks_y or []) if round(t) not in dele]
             pred.ticks_y = sorted(keep + [float(v) for v in (c.get("ticks_add") or [])])

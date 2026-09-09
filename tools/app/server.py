@@ -3772,7 +3772,156 @@ def _depth_module_rows(project: Project) -> Tuple[List[Dict], Optional[Path]]:
 # fotogramma fa da ancora per tutta la cartella. E' in questo senso che impara: la verita'
 # non si perde, rientra nel calcolo ogni volta.
 SCALE_CORRECTION_FIELDS = ("x", "y_zero", "y_far", "zero_end", "ticks_add", "ticks_del",
-                           "nums", "depth_mm")
+                           "ticks", "pitch", "nums", "depth_mm")
+
+
+# I passi che una macchina ecografica disegna davvero fra una tacca e l'altra. Non e' un
+# elenco arbitrario: e' quello che si legge sui righelli, e serve da rete quando il passo
+# ricavato dai pixel cade vicino a uno di questi ma non esatto.
+PASSI_PLAUSIBILI_MM = (1.0, 2.0, 2.5, 5.0, 10.0, 20.0, 25.0, 50.0)
+
+
+def _griglia_tacche(y_zero: float, y_far: float, passo_px: float,
+                    aggancia_al_fondo: bool = False) -> List[float]:
+    """Le tacche da uno zero, a passo costante, fino al fondo.
+
+    Dentro a un fotogramma il passo **non cambia**: e' la sola cosa che il righello promette
+    sempre. Quindi non si cercano le tacche una per una - se ne conosce una e le altre
+    seguono. L'ultima si include se ci sta dentro mezzo passo dal fondo: e' il fondo scala,
+    e sarebbe strano perderlo per un pixel.
+
+    `aggancia_al_fondo` quando il fondo e' un dato e non una stima - tipicamente perche'
+    viene dalla depth confermata. Allora il passo si aggiusta di quel poco che serve a far
+    cadere l'ultima tacca **esattamente** sul fondo: 575 px in 10 passi fanno 57.5, non 58
+    con l'ultima tacca cinque pixel oltre la fine della barra.
+    """
+    if not passo_px or passo_px <= 0:
+        return []
+    verso = 1.0 if y_far >= y_zero else -1.0
+    lunghezza = abs(y_far - y_zero)
+    quante = int(round(lunghezza / passo_px))
+    if quante < 1 or quante > 200:
+        return []
+    if aggancia_al_fondo and quante:
+        passo_px = lunghezza / quante
+    tacche = [round(y_zero + verso * k * passo_px, 1) for k in range(quante + 1)]
+    # Se l'ultima sfora il fondo di piu' di mezzo passo, non e' una tacca: e' un troppo.
+    if abs(tacche[-1] - y_zero) - lunghezza > 0.5 * passo_px:
+        tacche.pop()
+    return tacche
+
+
+def _passo_da_tacca(y_zero: float, tacca: float, passo_atteso: Optional[float] = None) -> float:
+    """Il passo dedotto da **una** tacca indicata a mano.
+
+    Di solito e' la prima dopo lo zero, e allora il passo e' la distanza. Ma se lei ne
+    segna una piu' lontana - capita, e' quella che si vede meglio - la distanza e' un
+    multiplo: si divide per il numero di passi piu' vicino, usando il passo atteso quando
+    c'e' (quello della cartella, o quello che il rilevatore aveva trovato).
+    """
+    distanza = abs(float(tacca) - float(y_zero))
+    if distanza <= 0:
+        return 0.0
+    if passo_atteso and passo_atteso > 0:
+        quanti = max(1, int(round(distanza / passo_atteso)))
+        return distanza / quanti
+    return distanza
+
+
+def _passo_vicino(passo_mm: float) -> Tuple[float, float]:
+    """Il passo plausibile piu' vicino, e di quanto ci si discosta (in parti di uno)."""
+    migliore = min(PASSI_PLAUSIBILI_MM, key=lambda v: abs(v - passo_mm))
+    return migliore, abs(migliore - passo_mm) / migliore
+
+
+def _righello_con_depth(y_zero: float, y_far: Optional[float], passo_px: Optional[float],
+                        depth_mm: Optional[float],
+                        mm_per_px_etichette: Optional[float] = None,
+                        etichetta_max_mm: Optional[float] = None) -> Dict:
+    """Il righello riletto alla luce della depth confermata, dicendo **cosa** e' sbagliato.
+
+    Ci sono due misure indipendenti della stessa cosa. Le tacche danno un passo in pixel; se
+    l'OCR ha letto dei numeri, danno anche i millimetri per pixel. La barra da' una
+    lunghezza, e la depth confermata dice quanti millimetri deve valere. Se le due non
+    tornano, una delle due e' sbagliata - e sapere quale e' tutto il punto.
+
+    Sono le etichette a decidere, quando ci sono: sono una misura, non un'ipotesi. Su
+    `prova_4` dicono 4, 6, 8 cm a 115 px di distanza l'una dall'altra, cioe' 0.174 mm/px;
+    con quella scala la barra fino a 750 px varrebbe 113 mm, mentre la depth dice 100. Non
+    e' il passo a essere sbagliato: e' il fondo, che il rilevatore ha tirato troppo in giu'.
+    Senza etichette si fa il contrario, perche' resta solo la barra.
+    """
+    esito: Dict = {}
+    if y_far is not None:
+        esito["span_px"] = round(abs(float(y_far) - float(y_zero)), 1)
+    if passo_px:
+        esito["pitch_px"] = round(float(passo_px), 2)
+    if not depth_mm or float(depth_mm) <= 0:
+        esito["verdict"] = "senza depth confermata non c'e' niente con cui confrontare"
+        return esito
+    depth_mm = float(depth_mm)
+    esito["depth_mm"] = depth_mm
+
+    if mm_per_px_etichette and mm_per_px_etichette > 0:
+        mm_per_px = float(mm_per_px_etichette)
+        esito["source"] = "etichette"
+    elif esito.get("span_px"):
+        mm_per_px = depth_mm / esito["span_px"]
+        esito["source"] = "barra"
+    else:
+        esito["verdict"] = "manca la barra"
+        return esito
+    esito["mm_per_px"] = round(mm_per_px, 5)
+
+    # Il fondo che la depth impone: e' un conto, non una stima.
+    verso = 1.0
+    if y_far is not None and float(y_far) < float(y_zero):
+        verso = -1.0
+    span_atteso = depth_mm / mm_per_px
+    esito["span_expected_px"] = round(span_atteso, 1)
+    if esito.get("span_px"):
+        scarto_barra = abs(esito["span_px"] - span_atteso) / span_atteso
+        esito["span_off"] = round(scarto_barra, 3)
+        if esito["source"] == "etichette" and scarto_barra > 0.03:
+            esito["y_far_suggested"] = round(float(y_zero) + verso * span_atteso, 1)
+
+    if passo_px and passo_px > 0:
+        passo_mm = float(passo_px) * mm_per_px
+        vicino, scarto = _passo_vicino(passo_mm)
+        esito.update({"step_mm_raw": round(passo_mm, 3), "step_mm": vicino,
+                      "step_off": round(scarto, 3)})
+        if scarto > 0.02:
+            esito["pitch_suggested"] = round(vicino / mm_per_px, 2)
+        esito["ticks_expected"] = round(depth_mm / vicino, 2)
+
+    scarti = [esito.get("span_off") or 0.0, esito.get("step_off") or 0.0]
+    peggiore = max(scarti)
+    if peggiore <= 0.02:
+        esito["verdict"] = "torna"
+    elif peggiore <= 0.25:
+        esito["verdict"] = "da correggere"
+    else:
+        esito["verdict"] = "non torna"
+    # Il fattore dieci non si vede dalla barra - quella puo' essere tirata lunga - ma dai
+    # numeri stampati sul righello: una depth piu' piccola del numero piu' grande scritto
+    # sulla scala e' impossibile, e dieci volte tanto la rimette al suo posto.
+    if etichetta_max_mm and etichetta_max_mm > depth_mm * 1.05:
+        # Il fattore dieci si racconta solo se regge: il numero piu' grande stampato sta
+        # vicino al fondo scala, quindi con una depth dieci volte tanto deve caderci dentro
+        # e non troppo sotto. Un `90` con depth 40 non diventa credibile a 400 - li' e'
+        # l'etichetta a essere sbagliata, ed e' un'altra storia.
+        if depth_mm * 4.0 <= etichetta_max_mm <= depth_mm * 10.0 * 1.05:
+            esito["unit_hint"] = (
+                f"sul righello c'e' scritto {etichetta_max_mm:g} mm, piu' della depth "
+                f"confermata ({depth_mm:g} mm): la depth sembra in centimetri, "
+                f"dovrebbe essere {depth_mm * 10:g} mm")
+        else:
+            esito["unit_hint"] = (
+                f"sul righello c'e' scritto {etichetta_max_mm:g} mm, piu' della depth "
+                f"confermata ({depth_mm:g} mm): una delle due e' sbagliata")
+        if esito.get("verdict") == "torna":
+            esito["verdict"] = "da correggere"
+    return esito
 
 
 def _scale_corrections_path(project: Project) -> Path:
@@ -3999,6 +4148,334 @@ def api_scale_study_correct(project_id: str):
     return jsonify({"saved": True, "corrections": len(valore.get("corrections") or {})})
 
 
+def _dati_studio(project: Project) -> Optional[Dict]:
+    """I dati dell'ultimo studio, coi nomi relativi come li usa il resto dell'app."""
+    stadi = ((project.data.get("analysis") or {}).get("stages") or {})
+    percorso = str((stadi.get("scale_study") or {}).get("data_json") or "")
+    if not percorso or not Path(percorso).is_file():
+        return None
+    try:
+        dati = json.loads(Path(percorso).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    base = project.working_dir() or Path("")
+    for frame in dati.get("frames") or []:
+        percorso_frame = Path(str(frame.get("path") or ""))
+        try:
+            frame["name"] = str(percorso_frame.relative_to(base))
+        except ValueError:
+            frame["name"] = percorso_frame.name
+    return dati
+
+
+def _righello_effettivo(frame: Dict, correzione: Optional[Dict]) -> Dict:
+    """Il righello com'e' adesso: quello che ha trovato il modulo, con sopra le correzioni."""
+    c = correzione or {}
+    def numero(chiave: str, dal_frame: str) -> Optional[float]:
+        if c.get(chiave) not in (None, ""):
+            return float(c[chiave])
+        valore = frame.get(dal_frame)
+        return float(valore) if valore not in (None, "") else None
+
+    tacche = [float(t) for t in (c.get("ticks") or frame.get("ticks") or [])]
+    if not c.get("ticks") and (c.get("ticks_add") or c.get("ticks_del")):
+        via = {round(float(v)) for v in (c.get("ticks_del") or [])}
+        tacche = sorted([t for t in tacche if round(t) not in via]
+                        + [float(v) for v in (c.get("ticks_add") or [])])
+    passo = None
+    if len(tacche) > 1:
+        salti = sorted(tacche[k + 1] - tacche[k] for k in range(len(tacche) - 1))
+        passo = salti[len(salti) // 2]
+    return {
+        "x": numero("x", "x"),
+        "y_zero": numero("y_zero", "y_zero"),
+        "y_far": numero("y_far", "y_far"),
+        "zero_end": str(c.get("zero_end") or frame.get("B_zero_end") or "bottom"),
+        "ticks": tacche,
+        "pitch": passo if passo else (float(frame["pitch"]) if frame.get("pitch") else None),
+        # La scala del rilevatore vale per **la sua** scala di tacche. Se quella e' stata
+        # sostituita, quel numero non descrive piu' niente: si torna a misurare la barra
+        # contro la depth, che e' l'altra strada e resta valida.
+        "mm_per_px": (None if c.get("ticks")
+                      else (float(frame["mm_per_px"]) if frame.get("mm_per_px") else None)),
+        "step_mm": float(frame["D_step_mm"]) if frame.get("D_step_mm") else None,
+        "max_label_mm": ((frame.get("DE_check") or {}).get("max_label_mm")),
+    }
+
+
+def _etichette_sulle_tacche(frame: Dict, tacche: Sequence[float],
+                            tolleranza: float = 6.0) -> Dict:
+    """Quante delle scritte lette dall'OCR cadono su una tacca.
+
+    E' la verifica indipendente: le tacche le abbiamo generate da uno zero e un passo, i
+    numeri li ha letti l'OCR guardando i pixel. Se cadono uno sull'altro, due strade diverse
+    sono arrivate allo stesso posto.
+
+    Non e' un voto sul righello, e' un voto su **entrambi**: su prova_4 tre fotogrammi con
+    depth diverse riportano "9 cm" alla stessa identica altezza, il che e' impossibile e
+    dice che a sbagliare e' la lettura, non la tacca.
+    """
+    etichette = [(float(y), float(v)) for y, v in (frame.get("labels") or [])]
+    if not etichette or not tacche:
+        return {"ok": 0, "total": len(etichette)}
+    fuori: List[Dict] = []
+    dentro = 0
+    for y, valore in etichette:
+        vicina = min(tacche, key=lambda t: abs(t - y))
+        if abs(vicina - y) <= tolleranza:
+            dentro += 1
+        else:
+            fuori.append({"y": round(y, 1), "cm": valore, "nearest": round(vicina, 1),
+                          "off": round(vicina - y, 1)})
+    return {"ok": dentro, "total": len(etichette), "off": fuori[:4]}
+
+
+def _controlla_righello(frame: Dict, righello: Dict, depth_mm: Optional[float]) -> Dict:
+    """Il controllo del righello con la depth confermata, coi dati gia' pescati dal frame."""
+    return _righello_con_depth(
+        righello.get("y_zero") or 0.0, righello.get("y_far"), righello.get("pitch"),
+        depth_mm, righello.get("mm_per_px"), righello.get("max_label_mm"),
+    )
+
+
+@app.post("/api/projects/<project_id>/scale/study/ticks")
+def api_scale_study_ticks(project_id: str):
+    """Da **una** tacca, tutte le altre: dentro a un fotogramma il passo non cambia.
+
+    Si puo' dare il passo in tre modi, ed e' sempre lo stesso conto: una tacca (la distanza
+    dallo zero), il passo in pixel, o il passo in millimetri insieme alla depth confermata.
+    L'ultimo e' il piu' forte, perche' non dipende da cosa il rilevatore ha visto.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    nome = str(payload.get("name") or "").strip()
+    dati = _dati_studio(project)
+    if dati is None:
+        return jsonify({"error": "lo studio della scala non e' ancora stato fatto"}), 404
+    frame = next((f for f in (dati.get("frames") or []) if f.get("name") == nome), None)
+    if frame is None:
+        return jsonify({"error": f"fotogramma non nello studio: {nome or '(vuoto)'}"}), 400
+
+    correzioni = project.step_value("scale_study").get("corrections") or {}
+    righello = _righello_effettivo(frame, correzioni.get(nome))
+    for chiave in ("x", "y_zero", "y_far", "zero_end"):
+        if payload.get(chiave) not in (None, ""):
+            righello[chiave] = (str(payload[chiave]) if chiave == "zero_end"
+                                else float(payload[chiave]))
+    if righello.get("y_zero") is None:
+        return jsonify({"error": "serve almeno lo zero del righello"}), 400
+
+    depth = _depth_confermate(project).get(nome)
+    controllo = _controlla_righello(frame, righello, depth)
+
+    # Il passo, per ordine di forza.
+    passo = None
+    da_dove = ""
+    if payload.get("tick") not in (None, ""):
+        passo = _passo_da_tacca(righello["y_zero"], float(payload["tick"]), righello.get("pitch"))
+        da_dove = "dalla tacca che hai segnato"
+    elif payload.get("pitch") not in (None, ""):
+        passo = float(payload["pitch"])
+        da_dove = "dal passo che hai scritto"
+    elif payload.get("step_mm") not in (None, "") and controllo.get("mm_per_px"):
+        passo = float(payload["step_mm"]) / controllo["mm_per_px"]
+        da_dove = f"da {float(payload['step_mm']):g} mm di passo e la scala del righello"
+    elif controllo.get("pitch_suggested"):
+        passo = controllo["pitch_suggested"]
+        da_dove = "dal passo che fa tornare i conti con la depth confermata"
+    elif righello.get("pitch"):
+        passo = righello["pitch"]
+        da_dove = "dal passo che aveva trovato il modulo"
+    if not passo or passo <= 2:
+        return jsonify({"error": "non c'e' un passo con cui generare le tacche"}), 400
+
+    # Il fondo: se le etichette e la depth dicono che la barra e' tirata troppo, si accorcia.
+    # Ma non quando il controllo ha appena detto che la depth stessa non torna: una proposta
+    # calcolata su un numero sbagliato e' un errore travestito da conto. Su prova_4 la depth
+    # confermata dice 10 mm dove il righello ne misura 113, e il "fondo suggerito" avrebbe
+    # accorciato la barra a due tacche.
+    if payload.get("use_depth") and controllo.get("unit_hint"):
+        return jsonify({
+            "error": "la depth confermata non torna col righello, quindi non si puo' usarla "
+                     "per il fondo: " + controllo["unit_hint"],
+            "check": controllo,
+        }), 400
+    if payload.get("use_depth") and controllo.get("y_far_suggested") is not None:
+        righello["y_far"] = controllo["y_far_suggested"]
+        da_dove += "; fondo dalla depth confermata"
+    if righello.get("y_far") is None:
+        return jsonify({"error": "serve il fondo del righello"}), 400
+
+    # Il fondo e' un dato quando viene dalla depth confermata, o quando il controllo dice
+    # che la barra e' gia' lunga giusta: allora la scala ci finisce sopra esatta.
+    aggancia = bool(payload.get("use_depth")) or (controllo.get("span_off") or 1.0) <= 0.02
+    tacche = _griglia_tacche(righello["y_zero"], righello["y_far"], passo, aggancia)
+    if not tacche:
+        return jsonify({"error": "con questo passo non viene fuori nessuna tacca"}), 400
+    if aggancia and len(tacche) > 1:
+        passo = abs(tacche[1] - tacche[0])
+    righello["ticks"] = tacche
+    righello["pitch"] = passo
+    dopo = _controlla_righello(frame, righello, depth)
+
+    dopo["labels_on_ticks"] = _etichette_sulle_tacche(frame, tacche)
+    if payload.get("preview"):
+        return jsonify({"name": nome, "ticks": tacche, "pitch": round(passo, 2),
+                        "y_far": righello["y_far"], "from": da_dove,
+                        "check": dopo, "check_before": controllo, "saved": False})
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        tutte = dict(value.get("corrections") or {})
+        voce = dict(tutte.get(nome) or {})
+        voce.update({"x": righello.get("x"), "y_zero": righello["y_zero"],
+                     "y_far": righello["y_far"], "zero_end": righello["zero_end"],
+                     "ticks": tacche, "pitch": round(passo, 2),
+                     "ts": datetime.now().isoformat(timespec="seconds")})
+        voce.pop("ticks_add", None)
+        voce.pop("ticks_del", None)
+        tutte[nome] = voce
+        value["corrections"] = tutte
+        return value
+
+    _write_step(project_id, "scale_study", mutate, status="corrected", source="user")
+    _write_scale_corrections(_project(project_id))
+    return jsonify({"name": nome, "ticks": tacche, "pitch": round(passo, 2),
+                    "y_far": righello["y_far"], "from": da_dove,
+                    "check": dopo, "check_before": controllo, "saved": True})
+
+
+@app.post("/api/projects/<project_id>/scale/study/propagate")
+def api_scale_study_propagate(project_id: str):
+    """Da un fotogramma sistemato a tutti gli altri.
+
+    Quello che si porta in giro **non e' il passo in pixel**: quello cambia da immagine a
+    immagine, perche' cambia la depth. Sono di cartella la colonna, lo zero, il verso e il
+    passo in **millimetri** - la macchina mette le tacche ogni tot millimetri e non cambia
+    idea a meta' cartella. Il passo in pixel si ricalcola per ogni fotogramma dalla sua
+    depth confermata: `passo_px = passo_mm * (fondo - zero) / depth`.
+
+    Chi ha gia' una correzione a mano non si tocca: e' verita', non un'ipotesi da rifare.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    modello_nome = str(payload.get("from") or "").strip()
+    dati = _dati_studio(project)
+    if dati is None:
+        return jsonify({"error": "lo studio della scala non e' ancora stato fatto"}), 404
+    frames = dati.get("frames") or []
+    correzioni = project.step_value("scale_study").get("corrections") or {}
+    modello_frame = next((f for f in frames if f.get("name") == modello_nome), None)
+    if modello_frame is None:
+        return jsonify({"error": f"fotogramma non nello studio: {modello_nome or '(vuoto)'}"}), 400
+
+    confermate = _depth_confermate(project)
+    modello = _righello_effettivo(modello_frame, correzioni.get(modello_nome))
+    controllo_modello = _controlla_righello(modello_frame, modello,
+                                            confermate.get(modello_nome))
+    if controllo_modello.get("unit_hint") and not payload.get("force"):
+        return jsonify({"error": "il fotogramma di riferimento non torna con la sua depth "
+                                 "confermata: " + controllo_modello["unit_hint"],
+                        "check": controllo_modello}), 400
+    passo_mm = (float(payload["step_mm"]) if payload.get("step_mm") not in (None, "")
+                else controllo_modello.get("step_mm") or modello.get("step_mm"))
+    if not passo_mm:
+        return jsonify({"error": "non si sa di quanti millimetri e' il passo: "
+                                 "sistemalo prima sul fotogramma di riferimento"}), 400
+    if modello.get("x") is None or modello.get("y_zero") is None:
+        return jsonify({"error": "il fotogramma di riferimento non ha colonna e zero"}), 400
+
+    sovrascrivi = bool(payload.get("overwrite"))
+    esiti: List[Dict] = []
+    nuove: Dict[str, Dict] = {}
+    for frame in frames:
+        nome = str(frame.get("name") or "")
+        if nome == modello_nome:
+            continue
+        gia = correzioni.get(nome) or {}
+        if gia and not gia.get("from_propagation") and not sovrascrivi:
+            esiti.append({"name": nome, "done": False, "why": "corretto a mano, lasciato stare"})
+            continue
+        righello = _righello_effettivo(frame, None)
+        righello["x"] = modello["x"]
+        righello["y_zero"] = modello["y_zero"]
+        righello["zero_end"] = modello["zero_end"]
+        verso = 1.0 if modello["zero_end"] == "top" else -1.0
+        depth = confermate.get(nome)
+        controllo = _controlla_righello(frame, righello, depth)
+        # Una depth che non torna col righello non e' un dato: e' un problema da sistemare
+        # prima. Meglio fermarsi su quel fotogramma che propagarci sopra.
+        if controllo.get("unit_hint"):
+            esiti.append({"name": nome, "done": False, "why": controllo["unit_hint"]})
+            continue
+        if not depth:
+            esiti.append({"name": nome, "done": False,
+                          "why": "manca la depth confermata: confermala nella sezione prima"})
+            continue
+
+        # La barra e' di cartella. La macchina la disegna alla stessa altezza sempre: a
+        # cambiare con la depth non e' la sua lunghezza, e' la scala. Il fondo suo lo si
+        # tiene solo se regge il confronto con la sua depth; se no vale quello del modello,
+        # che e' stato guardato.
+        span_modello = abs(float(modello["y_far"]) - float(modello["y_zero"]))
+        suo = righello.get("y_far")
+        span = span_modello
+        da_dove_fondo = "barra di cartella"
+        if suo is not None and (controllo.get("span_off") is not None
+                                and controllo["span_off"] <= 0.03):
+            span = abs(float(suo) - float(modello["y_zero"]))
+            da_dove_fondo = "barra sua, che torna con la sua depth"
+        y_far = modello["y_zero"] + verso * span
+        altezza = float(frame.get("h") or 0)
+        if altezza and not (0 <= y_far <= altezza):
+            esiti.append({"name": nome, "done": False,
+                          "why": f"il fondo cadrebbe fuori dall'immagine ({y_far:.0f} px)"})
+            continue
+        # E qui sta il punto: il passo in pixel non si copia, si ricalcola. Stesso passo in
+        # millimetri, stessa barra, depth diversa - quindi passo in pixel diverso.
+        passo_px = passo_mm * span / depth
+        if not passo_px or passo_px <= 2:
+            esiti.append({"name": nome, "done": False,
+                          "why": f"il passo verrebbe {passo_px:.1f} px, troppo fitto"})
+            continue
+        tacche = _griglia_tacche(modello["y_zero"], y_far, passo_px, True)
+        if len(tacche) > 1:
+            passo_px = abs(tacche[1] - tacche[0])
+        if not tacche:
+            esiti.append({"name": nome, "done": False, "why": "nessuna tacca con questo passo"})
+            continue
+        nuove[nome] = {
+            "x": modello["x"], "y_zero": modello["y_zero"], "y_far": round(y_far, 1),
+            "zero_end": modello["zero_end"], "ticks": tacche, "pitch": round(passo_px, 2),
+            "from_propagation": modello_nome,
+            "ts": datetime.now().isoformat(timespec="seconds"),
+        }
+        esiti.append({"name": nome, "done": True, "ticks": len(tacche),
+                      "pitch": round(passo_px, 2), "y_far": round(y_far, 1),
+                      "depth_mm": depth, "mm_per_px": round(depth / span, 5),
+                      "labels": _etichette_sulle_tacche(frame, tacche),
+                      "why": f"{da_dove_fondo}; passo {passo_mm:g} mm su {depth:g} mm di depth"})
+
+    if payload.get("preview"):
+        return jsonify({"from": modello_nome, "step_mm": passo_mm, "preview": True,
+                        "would_change": len(nuove), "results": esiti})
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        tutte = dict(value.get("corrections") or {})
+        for nome, voce in nuove.items():
+            fusa = dict(tutte.get(nome) or {})
+            fusa.update(voce)
+            fusa.pop("ticks_add", None)
+            fusa.pop("ticks_del", None)
+            tutte[nome] = fusa
+        value["corrections"] = tutte
+        return value
+
+    _write_step(project_id, "scale_study", mutate, status="corrected", source="user")
+    _write_scale_corrections(_project(project_id))
+    return jsonify({"from": modello_nome, "step_mm": passo_mm,
+                    "changed": len(nuove), "results": esiti})
+
+
 @app.post("/api/projects/<project_id>/scale/study/accept")
 def api_scale_study_accept(project_id: str):
     """Accetta i righelli proposti: su un fotogramma, o su tutti quelli falliti in un colpo.
@@ -4209,12 +4686,20 @@ def api_scale_study(project_id: str):
         nome for nome, voce in correzioni.items()
         if not quando or str(voce.get("ts") or "") > quando
     )
+    confermate = _depth_confermate(project)
     per_nome = {}
     for frame in dati.get("frames") or []:
         # Lo stato del modulo resta visibile in `detector_status`: serve a vedere se la
         # detection da sola migliora, che e' l'altra domanda.
         frame["detector_status"] = str(frame.get("status") or "")
         frame["status"] = _stato_effettivo(frame, correzioni.get(frame["name"]))
+        # Il confronto con la depth confermata, fotogramma per fotogramma: e' il dato
+        # esterno che dice se il righello e' al posto giusto, e va visto accanto a lui.
+        righello = _righello_effettivo(frame, correzioni.get(frame["name"]))
+        controllo = _controlla_righello(frame, righello, confermate.get(frame["name"]))
+        controllo["labels_on_ticks"] = _etichette_sulle_tacche(frame, righello["ticks"])
+        frame["depth_check"] = controllo
+        frame["ruler"] = righello
         per_nome[frame["name"]] = frame
     for cambio in ultima.get("improved") or []:
         frame = per_nome.get(cambio["name"])

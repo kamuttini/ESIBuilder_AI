@@ -277,14 +277,15 @@ async function createScaleViewer(projectId) {
       }
       disegna(); return;
     }
-    if (event.shiftKey) aggiungiTacca(y);
+    if (event.shiftKey) generaDaTacca(y);
   });
   stage.addEventListener('dblclick', (event) => {
-    // Doppio clic sull'immagine: aggiunge una tacca. Piu' facile da scoprire di shift+clic,
-    // che resta perche' e' piu' rapido quando se ne aggiungono parecchie.
+    // Doppio clic su una tacca: da li' viene fuori tutta la scala. Con alt si aggiunge la
+    // singola tacca e basta, che serve quando la scala non e' regolare - ma e' il caso raro.
     if (event.target.closest('.scala-tacca, .scala-numero') || corrente().x == null) return;
     const s = scala();
-    aggiungiTacca(Math.round((event.clientY - stage.getBoundingClientRect().top) / (s || 1)));
+    const y = Math.round((event.clientY - stage.getBoundingClientRect().top) / (s || 1));
+    if (event.altKey) aggiungiTacca(y); else generaDaTacca(y);
   });
   const aggiungiTacca = (y) => {
     const f = corrente();
@@ -292,6 +293,31 @@ async function createScaleViewer(projectId) {
     f.ticks = [...(f.ticks || []), y].sort((a, b) => a - b);
     salva({ ticks_add: [...(correzione().ticks_add || []), y] });
     disegna(); aggiornaZoom();
+  };
+
+  /* Una tacca sola, e le altre vengono da se'.
+
+     Dentro a un fotogramma il passo non cambia mai: e' l'unica promessa che un righello fa
+     sempre. Quindi segnarne una vuol dire averle segnate tutte, e chiederle una per una
+     sarebbe far ripetere a mano un conto che si sa fare. Il conto lo fa il server, che ha
+     anche la depth confermata con cui verificarlo. */
+  const generaDaTacca = async (y) => {
+    const f = corrente();
+    if (f.y_zero == null) { stato('prima lo zero'); return; }
+    ricorda();
+    try {
+      const esito = await api(`/projects/${projectId}/scale/study/ticks`,
+        { body: { name: f.name, tick: y } });
+      f.ticks = esito.ticks;
+      f.pitch = esito.pitch;
+      f.y_far = esito.y_far;
+      f.depth_check = esito.check;
+      dati.corrections = dati.corrections || {};
+      dati.corrections[f.name] = { ...(dati.corrections[f.name] || {}),
+        ticks: esito.ticks, pitch: esito.pitch, y_far: esito.y_far };
+      stato(`${esito.ticks.length} tacche a passo ${esito.pitch} px — ${esito.from}`);
+      disegna(); aggiornaZoom(); renderPasso(); renderDati(); renderLista();
+    } catch (errore) { stato(errore.message); toast(errore.message, true); }
   };
 
   const indicaRighello = (inizio, yFondo) => {
@@ -577,6 +603,131 @@ async function createScaleViewer(projectId) {
     }
   };
 
+  /* Il passo, la verifica con la depth confermata, e la propagazione.
+
+     Sono la stessa cosa vista da tre lati. Il passo in millimetri e' di cartella: la
+     macchina mette le tacche ogni tot e non cambia idea a meta' cartella. Il passo in
+     **pixel** invece e' di questo fotogramma soltanto, perche' dipende dalla sua depth. E
+     la depth confermata e' il metro esterno: dice quanto deve valere la barra, e da li' si
+     vede se il righello e' al posto giusto o no. */
+  const passoBox = el('div', { class: 'scala-passo' });
+  const VERDETTI = {
+    torna: ['#3fb950', 'torna con la depth confermata'],
+    'da correggere': ['#d29922', 'quasi: c\'e' + ' un pelo da sistemare'],
+    'non torna': ['#f85149', 'non torna con la depth confermata'],
+  };
+
+  const chiamaTacche = async (corpo, messaggio) => {
+    const f = corrente();
+    try {
+      const esito = await api(`/projects/${projectId}/scale/study/ticks`,
+        { body: { name: f.name, ...corpo } });
+      f.ticks = esito.ticks; f.pitch = esito.pitch; f.y_far = esito.y_far;
+      f.depth_check = esito.check;
+      stato(messaggio ? `${messaggio} — ${esito.from}` : esito.from);
+      disegna(); aggiornaZoom(); renderPasso(); renderDati(); renderLista();
+    } catch (errore) { stato(errore.message); toast(errore.message, true); }
+  };
+
+  const renderPasso = () => {
+    passoBox.innerHTML = '';
+    const f = corrente();
+    const check = f.depth_check || {};
+    const ru = f.ruler || {};
+    if (f.x == null) { passoBox.style.display = 'none'; return; }
+    passoBox.style.display = '';
+
+    const [colore, testo] = VERDETTI[check.verdict] || ['var(--muted)', check.verdict || ''];
+    const riga = el('div', { class: 'row' });
+    riga.append(el('span', { class: 'scala-verdetto', style: `color:${colore};border-color:${colore}` },
+      testo || 'senza depth confermata'));
+    if (check.depth_mm) {
+      riga.append(el('span', { class: 'hint' },
+        `depth ${check.depth_mm} mm · barra ${check.span_px || '—'} px`
+        + (check.span_expected_px && Math.abs((check.span_off || 0)) > 0.02
+          ? ` (ne servirebbero ${check.span_expected_px})` : '')
+        + (check.step_mm ? ` · passo ${check.step_mm} mm = ${ru.pitch ? Math.round(ru.pitch * 10) / 10 : '—'} px` : '')));
+    }
+    const et = check.labels_on_ticks || {};
+    if (et.total) {
+      const buone = et.ok === et.total;
+      riga.append(el('span', {
+        class: 'hint',
+        style: `color:${buone ? '#3fb950' : 'var(--warn)'}`,
+        title: (et.off || []).map((o) => `${o.cm} cm letto a y=${o.y}, tacca a ${o.nearest}`).join('\n'),
+      }, ` · ${et.ok} numeri su ${et.total} cadono sulle tacche`));
+    }
+    passoBox.append(riga);
+
+    if (check.unit_hint) {
+      passoBox.append(el('div', { class: 'scala-avviso' }, check.unit_hint));
+    }
+
+    const comandi = el('div', { class: 'row' });
+    const rigenera = el('button', { class: 'ghost' }, 'Rigenera le tacche a passo costante');
+    rigenera.addEventListener('click', () => chiamaTacche({}, 'tacche rigenerate'));
+    comandi.append(rigenera);
+
+    if (check.y_far_suggested != null && !check.unit_hint) {
+      const fondo = el('button', { class: 'ghost' },
+        `Porta il fondo a ${check.y_far_suggested} px (dalla depth)`);
+      fondo.addEventListener('click', () => chiamaTacche({ use_depth: true }, 'fondo dalla depth'));
+      comandi.append(fondo);
+    }
+
+    const passoMm = el('select', {});
+    for (const v of [1, 2, 2.5, 5, 10, 20, 25, 50]) {
+      passoMm.append(el('option', { value: String(v),
+        ...(check.step_mm === v ? { selected: 'selected' } : {}) }, `${v} mm`));
+    }
+    passoMm.addEventListener('change', () => chiamaTacche(
+      { step_mm: parseFloat(passoMm.value) }, `passo ${passoMm.value} mm`));
+    comandi.append(el('span', { class: 'hint' }, 'passo'), passoMm);
+    passoBox.append(comandi);
+
+    // La propagazione: da questo fotogramma a tutti gli altri.
+    const propaga = el('div', { class: 'row' });
+    const dice = el('span', { class: 'hint' });
+    const guarda = el('button', { class: 'ghost' }, 'Propaga a tutte le immagini');
+    guarda.addEventListener('click', async () => {
+      guarda.disabled = true;
+      try {
+        const prima = await api(`/projects/${projectId}/scale/study/propagate`,
+          { body: { from: f.name, preview: true } });
+        const fatti = (prima.results || []).filter((r) => r.done);
+        const fermi = (prima.results || []).filter((r) => !r.done);
+        dice.innerHTML = '';
+        dice.append(el('div', {},
+          `${fatti.length} fotogrammi prenderebbero questa colonna, questo zero e il passo `
+          + `di ${prima.step_mm} mm, ciascuno col suo passo in pixel ricavato dalla sua depth`));
+        for (const r of fermi.slice(0, 6)) {
+          dice.append(el('div', { style: 'color:var(--warn)' }, `${r.name.split('/').pop()}: ${r.why}`));
+        }
+        if (!fatti.length) return;
+        dice.append(confermaInDueTempi(`Applica a ${fatti.length} fotogrammi`,
+          'ognuno prende la barra di cartella e il passo che gli tocca. '
+          + 'Quelli corretti a mano restano come sono.',
+          async () => {
+            try {
+              const esito = await api(`/projects/${projectId}/scale/study/propagate`,
+                { body: { from: f.name } });
+              dati = await api(`/projects/${projectId}/scale/study`);
+              frames = dati.frames || [];
+              await caricaSuggerimenti();
+              toast(`propagato a ${esito.changed} fotogrammi`);
+              mostra();
+            } catch (errore) { toast(errore.message, true); }
+          }));
+      } catch (errore) { dice.textContent = errore.message; toast(errore.message, true); }
+      finally { guarda.disabled = false; }
+    });
+    propaga.append(guarda, dice);
+    passoBox.append(propaga);
+    passoBox.append(el('div', { class: 'hint' },
+      'doppio clic su una tacca: da quella vengono fuori tutte le altre, perche\' dentro a '
+      + 'un\'immagine il passo non cambia. Con alt si aggiunge la singola tacca.'));
+  };
+
   const azioni = el('div', { class: 'row' });
   const renderAzioni = () => {
     azioni.innerHTML = '';
@@ -664,7 +815,7 @@ async function createScaleViewer(projectId) {
     if (f.x == null) {
       didascalia.append(el('span', {}, ' · righello non trovato: due clic per indicarlo'));
     }
-    disegna(); aggiornaZoom(); renderDati(); renderAzioni(); renderLista();
+    disegna(); aggiornaZoom(); renderDati(); renderPasso(); renderAzioni(); renderLista();
   };
   const passo = (delta) => {
     const elenco = visibili();
@@ -751,7 +902,7 @@ async function createScaleViewer(projectId) {
         el('div', { class: 'scala-zoom-coppia' }, zoomZero, zoomFondo),
         stage,
         el('div', { class: 'ov-under' },
-          el('div', { class: 'ov-under-text' }, datiBox, azioni,
+          el('div', { class: 'ov-under-text' }, passoBox, datiBox, azioni,
             el('div', { class: 'row' }, rifai, avanzamento)))),
       el('div', { class: 'ov-side' }, listBox)),
   );
