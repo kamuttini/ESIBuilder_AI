@@ -73,7 +73,11 @@ nav {
    c'era una colonna di testo; adesso c'e' un'immagine su cui si lavora, e ogni pixel che
    le si toglie e' un pixel in meno per vedere dove cade un bordo. Un tetto largo resta,
    per non far diventare le righe di testo lunghissime su uno schermo molto grande. */
-section#panel { flex: 1; padding: 20px 26px; max-width: 1900px; }
+/* `min-width: 0` non e' un dettaglio: un elemento flex, di suo, si rifiuta di stringersi
+   sotto la larghezza minima del suo contenuto. Bastava una tabella o una riga lunga dentro
+   al pannello per farlo diventare piu' largo della finestra, e la colonna degli strumenti
+   finiva mezza fuori dallo schermo. */
+section#panel { flex: 1; min-width: 0; padding: 20px 26px; max-width: 1900px; }
 /* Il testo discorsivo pero' resta leggibile: righe corte anche su schermi larghi. */
 section#panel > p.hint, section#panel > ul.problems { max-width: 900px; }
 
@@ -122,8 +126,12 @@ pre.out {
 }
 
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-top: 12px; }
-.kv { display: flex; gap: 8px; }
-.kv span:first-child { color: var(--muted); min-width: 190px; }
+/* Una riga «nome: valore». Il valore va a capo invece di allargare la pagina: un percorso
+   di file lungo non ha spazi dove spezzarsi, e da solo faceva diventare il pannello piu'
+   largo della finestra - portandosi fuori schermo la colonna degli strumenti. */
+.kv { display: flex; gap: 8px; min-width: 0; }
+.kv span:first-child { color: var(--muted); min-width: 190px; flex: 0 0 auto; }
+.kv span:last-child { min-width: 0; overflow-wrap: anywhere; }
 
 .toast {
   position: fixed; bottom: 18px; right: 18px; padding: 10px 14px;
