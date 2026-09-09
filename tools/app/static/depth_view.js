@@ -743,7 +743,12 @@ async function createDepthViewer(projectId, sampleSize) {
       riquadro.append(el('div', { class: 'hint' },
         `riquadro di cartella preso da ${modello.from}, applicato a ${modello.applied} immagini`
         + `${modello.unit_factor === 10 ? ' (letto in cm)' : ''}`
-        + `${(modello.failed || []).length ? `, ${modello.failed.length} senza numero` : ''}.`));
+        + `${(modello.failed || []).length ? `, ${modello.failed.length} senza numero` : ''}.`
+        // Quanto reggeva alla prova su immagini sparse: e' il motivo per cui questo
+        // riquadro e' stato scelto e non un altro.
+        + `${modello.checked_ratio != null
+          ? ` Provato prima su immagini sparse: profondita' credibili nel `
+            + `${Math.round(modello.checked_ratio * 100)}% dei casi.` : ''}`));
       riquadro.append(el('div', { class: 'row' }, confermaInDueTempi(
         'Torna ai riquadri del modulo', 'il riquadro di cartella viene tolto.',
         async () => {

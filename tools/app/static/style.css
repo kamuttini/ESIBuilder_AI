@@ -112,6 +112,9 @@ table.lines td.val { word-break: break-all; }
 table.lines tr.empty td.val { color: var(--warn); }
 
 ul.problems { margin: 8px 0; padding-left: 18px; }
+/* Quello che si perde in mezzo agli altri testi: una correzione salvata ma non applicata. */
+p.avviso { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--warn);
+           background: rgba(210, 153, 34, 0.10); color: var(--warn); max-width: 900px; }
 ul.problems li { color: var(--warn); }
 .ok-badge { color: var(--ok); }
 .err-badge { color: var(--err); }

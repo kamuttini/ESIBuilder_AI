@@ -103,6 +103,7 @@ async function openProject(projectId) {
   state.project = data.project;
   state.status = data.status;
   state.advancedStages = data.advanced_stages || { ready: true, blocked_reason: '' };
+  state.splitPending = data.split_pending || null;
   state.fssPath = data.fss_path;
   $('#project-select').value = projectId;
   render();
@@ -490,6 +491,18 @@ function panelImport(panel) {
     if (value.plane === 'T' || (state.project.source || {}).plane === 'T') {
       pianiBox.append(el('p', { class: 'hint' },
         'questo e\' il progetto della T, nato dallo sdoppiamento.'));
+    }
+    // Correggere un piano non sposta l'immagine da sola: finche' non si riconferma la
+    // divisione, i moduli continuano a girare su quella di prima - e non si vedeva.
+    const sospese = state.splitPending || {};
+    if (sospese.to_send || sospese.to_take) {
+      const quante = (sospese.to_send || 0) + (sospese.to_take || 0);
+      pianiBox.append(el('p', { class: 'avviso' },
+        `${quante} immagini stanno ancora nel progetto sbagliato: le tue correzioni sono `
+        + 'salvate ma non applicate. Premi «Conferma la divisione» qui sotto, altrimenti i '
+        + 'moduli continuano a girare anche su quelle dell\'altro piano.'
+        + ((sospese.examples || []).length
+          ? ` Per esempio: ${(sospese.examples || []).join(', ')}.` : '')));
     }
     const riconosci = el('button', { class: 'ghost' },
       Object.keys(conteggi).length ? 'Rifai il riconoscimento del piano' : 'Riconosci il piano di ogni immagine');

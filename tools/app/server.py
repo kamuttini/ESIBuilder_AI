@@ -919,34 +919,54 @@ def _run_advanced_stages(
             # scala riceve piu' fotogrammi per ogni depth.
             righe_depth = list(depth.get("rows") or [])
             letture: Dict[str, Dict] = {}
-            riferimento = _riquadro_depth_di_riferimento(_righe_depth_per_nome(project, righe_depth))
-            if riferimento is not None:
-                nome_rif, box_rif, testo_rif, valore_rif = riferimento
-                numero = _rileggi_nel_riquadro(base_moduli / nome_rif, box_rif)
-                if numero is not None:
-                    fattore = _fattore_unita(testo_rif, valore_rif, numero["value"])
-                    tutti = list(project.dedup_names())
-                    _job_update(job_id, stage=f"depth: la stessa etichetta su {len(tutti)} immagini",
-                                done=0, total=len(tutti))
-                    letture, falliti = _leggi_riquadro_su(
-                        base_moduli, box_rif, fattore, tutti,
-                        progress=lambda fatte, quante: _job_update(job_id, done=fatte),
-                    )
-                    if letture:
-                        def salva_letture(_p: Project, value: Dict) -> Dict:
-                            value["depth_box_template"] = {
-                                "box": box_rif, "from": nome_rif, "unit_factor": fattore,
-                                "scope": "auto", "applied": len(letture), "targets": len(tutti),
-                                "failed": falliti,
-                                "at": datetime.now().isoformat(timespec="seconds"),
-                            }
-                            value["depth_box_reads"] = letture
-                            return value
+            tutti = list(project.dedup_names())
+            _job_update(job_id, stage="depth: quale etichetta regge su tutta la cartella")
+            scelta = _riferimento_che_regge(
+                base_moduli, _righe_depth_per_nome(project, righe_depth), tutti,
+            )
+            results["depth"]["box_reference"] = "" if scelta is None else scelta[0]
+            if scelta is None:
+                # Nessuna etichetta regge: si porta via anche quella di un giro precedente,
+                # altrimenti la sezione continua a mostrare le sue letture come se valessero.
+                def butta_propagazione(_p: Project, value: Dict) -> Dict:
+                    if (value.get("depth_box_template") or {}).get("scope") == "auto":
+                        value.pop("depth_box_template", None)
+                        value.pop("depth_box_reads", None)
+                    return value
 
-                        _write_step(project_id, "depth_scale", salva_letture,
-                                    status="proposed", source="model")
-                        results["depth"]["box_reads"] = len(letture)
-                        results["depth"]["box_failed"] = len(falliti)
+                _write_step(project_id, "depth_scale", butta_propagazione,
+                            status="proposed", source="model")
+            if scelta is not None:
+                nome_rif, box_rif, fattore, quota = scelta
+                _job_update(job_id, stage=f"depth: la stessa etichetta su {len(tutti)} immagini",
+                            done=0, total=len(tutti))
+                letture, falliti = _leggi_riquadro_su(
+                    base_moduli, box_rif, fattore, tutti,
+                    progress=lambda fatte, quante: _job_update(job_id, done=fatte),
+                )
+                # Dove l'etichetta non c'e' - un fotogramma di un'altra schermata - resta
+                # comunque un numero, ed e' un numero qualsiasi. Fuori dai millimetri di una
+                # profondita' e' meglio nessuna lettura che una sbagliata.
+                fuori_scala = [n for n, l in letture.items()
+                               if not 5.0 <= float(l.get("depth_mm") or 0) <= 500.0]
+                for nome in fuori_scala:
+                    letture.pop(nome, None)
+                falliti = list(falliti) + fuori_scala
+                if letture:
+                    def salva_letture(_p: Project, value: Dict) -> Dict:
+                        value["depth_box_template"] = {
+                            "box": box_rif, "from": nome_rif, "unit_factor": fattore,
+                            "scope": "auto", "applied": len(letture), "targets": len(tutti),
+                            "failed": falliti, "checked_ratio": round(quota, 2),
+                            "at": datetime.now().isoformat(timespec="seconds"),
+                        }
+                        value["depth_box_reads"] = letture
+                        return value
+
+                    _write_step(project_id, "depth_scale", salva_letture,
+                                status="proposed", source="model")
+                    results["depth"]["box_reads"] = len(letture)
+                    results["depth"]["box_failed"] = len(falliti)
 
         if "scala" in quali:
             if "depth" not in quali:
@@ -1251,6 +1271,7 @@ def api_project(project_id: str):
                 "ready": not stages_blocked_reason,
                 "blocked_reason": stages_blocked_reason,
             },
+            "split_pending": _divisione_da_riapplicare(project),
             "fss_path": str(project.fss_path()),
         }
     )
@@ -1456,6 +1477,39 @@ def _piani_salvati(project: Project) -> Dict[str, str]:
     for nome, scelto in (valore.get("plane_corrections") or {}).items():
         piani[nome] = {"plane": scelto, "confidence": None, "source": "user"}
     return piani
+
+
+def _divisione_da_riapplicare(project: Project) -> Dict:
+    """Quante immagini stanno nel progetto sbagliato rispetto alla divisione di adesso.
+
+    Correggere un piano scrive la correzione e basta: i due progetti restano com'erano
+    finche' non si riconferma la divisione. Senza dirlo, una correzione sembra fatta e
+    invece le immagini dell'altro piano continuano a girare nei moduli - e' cosi' che
+    cinquantasei T sono rimaste nel progetto L di Esaote.
+    """
+    gemello = str(project.source.get("split_into") or project.source.get("derived_from") or "")
+    mio = str(project.source.get("plane") or "")
+    if not gemello or mio not in ("L", "T"):
+        return {}
+    piani = _piani_salvati(project)
+    if not piani:
+        return {}
+    qui = set(project.dedup_names())
+    try:
+        la = set(_project(gemello).dedup_names())
+    except FileNotFoundError:
+        return {}
+    def piano_di(nome: str) -> str:
+        return str((piani.get(nome) or {}).get("plane") or "")
+
+    # Le immagini senza piano stanno con la L, che e' il progetto principale.
+    altro = "T" if mio == "L" else "L"
+    da_mandare = sorted(n for n in qui if piano_di(n) == altro)
+    da_prendere = sorted(n for n in la if (piano_di(n) or "L") == mio)
+    if not da_mandare and not da_prendere:
+        return {}
+    return {"to_send": len(da_mandare), "to_take": len(da_prendere),
+            "examples": [n.split("/")[-1] for n in (da_mandare + da_prendere)[:3]]}
 
 
 @app.post("/api/projects/<project_id>/planes")
@@ -5827,12 +5881,18 @@ def _stringi_sui_pixel(image_path: Path, box: Dict, caratteri: int) -> Dict:
     righe = [y for y in range(altezza) if any(acceso(px[x, y]) for x in range(da, a + 1))]
     if not righe:
         return box
-    return {
+    stretto = {
         "left": int(box["left"] + da),
         "right": int(box["left"] + a + 1),
         "top": int(box["top"] + righe[0]),
         "bottom": int(box["top"] + righe[-1] + 1),
     }
+    # Una cifra non e' mai alta 2 px: quando l'inchiostro trovato e' questo, quello che si e'
+    # letto non era un numero, e il riquadro da tenere e' quello di partenza - almeno si
+    # vede cosa e' stato guardato.
+    if stretto["right"] - stretto["left"] < 4 or stretto["bottom"] - stretto["top"] < 5:
+        return box
+    return stretto
 
 
 def _inchiostro_fra(image_path: Path, box: Dict, x_da: float, x_a: float) -> Optional[Dict]:
@@ -6009,7 +6069,8 @@ def _riquadro_sulle_cifre(image_path: Path, box: Dict, cifre: str,
     return _inchiostro_fra(image_path, largo, scelto["da"], scelto["a"])
 
 
-def _rileggi_nel_riquadro(image_path: Path, box: Dict, timeout: float = 8.0) -> Optional[Dict]:
+def _rileggi_nel_riquadro(image_path: Path, box: Dict, timeout: float = 8.0,
+                          accettabile=None) -> Optional[Dict]:  # noqa: ANN001
     """Rileggi il numero dentro al riquadro, lasciandogli spazio per crescere di cifre.
 
     Il riquadro che l'utente stringe e' quello di *una* immagine: altrove il numero puo'
@@ -6041,6 +6102,19 @@ def _rileggi_nel_riquadro(image_path: Path, box: Dict, timeout: float = 8.0) -> 
     if not candidati:
         return None
     candidati.sort(key=lambda c: (c["distanza"], 0 if c["variante"] == "base" else 1))
+    # Chi chiama puo' dire cosa si aspetta - una profondita' di lavoro, per esempio. Fra le
+    # sei passate dell'OCR ce n'e' spesso una che legge `120` e un'altra che ci attacca
+    # l'asterisco di `*mm` e fa `1200`: senza questo filtro vince la piu' vicina al bordo,
+    # che puo' essere la seconda, e l'immagine resta senza numero.
+    if accettabile is not None:
+        # Solo fra quelli che stanno **nello stesso posto**: piu' in la' c'e' sempre un altro
+        # numero (il `13` di `TLC3-13`, a ottantotto pixel), e ripescare quello sarebbe
+        # peggio che restare senza.
+        vicino = candidati[0]["distanza"] + max(10.0, 1.5 * altezza)
+        buoni = [c for c in candidati
+                 if c["distanza"] <= vicino and accettabile(c["value"])]
+        if buoni:
+            candidati = buoni
     scelto = candidati[0]
     stessi = [
         c for c in candidati
@@ -6548,7 +6622,10 @@ def _leggi_riquadro_su(base: Path, box: Dict, fattore: float, nomi: Sequence[str
     fatte = 0
 
     def leggi(n: str) -> Tuple[str, Optional[Dict]]:
-        return n, _rileggi_nel_riquadro(base / n, box)
+        return n, _rileggi_nel_riquadro(
+            base / n, box,
+            accettabile=lambda v: _depth_credibile(v * fattore),
+        )
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         for n, esito in pool.map(leggi, nomi):
@@ -6562,6 +6639,91 @@ def _leggi_riquadro_su(base: Path, box: Dict, fattore: float, nomi: Sequence[str
                           "depth_mm": round(esito["value"] * fattore, 2),
                           "ocr_text": esito["text"]}
     return letture, falliti
+
+
+def _depth_credibile(valore: Optional[float]) -> bool:
+    """Una profondita' di lavoro: fra 1 e 40 cm.
+
+    Niente regola sui passi tondi: l'Esaote Nine scrive `*D 46 *mm`, la profondita' si muove
+    di continuo e i valori tondi sono solo i piu' frequenti, non gli unici.
+    """
+    try:
+        misura = float(valore)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+    return 10.0 <= misura <= 400.0
+
+
+def _campione_sparso(nomi: Sequence[str], quante: int) -> List[str]:
+    """Nomi presi a distanza regolare: una cartella e' fatta di acquisizioni in fila."""
+    elenco = list(nomi)
+    if len(elenco) <= quante:
+        return elenco
+    passo = len(elenco) / float(quante)
+    return [elenco[int(indice * passo)] for indice in range(quante)]
+
+
+def _riferimento_che_regge(
+    base: Path, righe: Sequence[Dict], nomi: Sequence[str], prove: int = 8,
+) -> Optional[Tuple[str, Dict, float, float]]:
+    """Quale etichetta propagare: quella che si legge davvero **anche sulle altre immagini**.
+
+    Prendere il riquadro piu' stretto fra quelli del modulo era una scelta al buio. Su
+    Esaote Nine il modulo aveva messo dieci riquadri su due bottoni dell'interfaccia
+    (`*Image`), il piu' stretto era uno di quelli, e propagandolo la cartella intera leggeva
+    3, 28, 293, 3293. Qui ogni candidato si prova su un pugno di immagini sparse e si tiene
+    quello che ne fa uscire profondita' credibili; se non regge nessuno non si propaga
+    niente, e restano le righe del modulo - poche e da correggere, ma vere.
+    """
+    utili = [
+        r for r in righe
+        if r.get("mode") in DEPTH_BOX_MODES and r.get("box")
+        and (r["box"]["right"] - r["box"]["left"]) >= 8
+        and (r["box"]["bottom"] - r["box"]["top"]) >= 6
+    ]
+    if not utili:
+        return None
+
+    def area(riga: Dict) -> int:
+        b = riga["box"]
+        return (b["right"] - b["left"]) * (b["bottom"] - b["top"])
+
+    # Immagini della stessa interfaccia danno lo stesso riquadro: si prova una volta sola.
+    visti: set = set()
+    candidati: List[Dict] = []
+    for riga in sorted(utili, key=area):
+        b = riga["box"]
+        chiave = (b["left"] // 8, b["top"] // 8, b["right"] // 8, b["bottom"] // 8)
+        if chiave in visti:
+            continue
+        visti.add(chiave)
+        candidati.append(riga)
+        if len(candidati) >= 6:
+            break
+
+    campione = _campione_sparso(nomi, prove)
+    migliore: Optional[Tuple[float, int, str, Dict, float]] = None
+    for riga in candidati:
+        letto = _rileggi_nel_riquadro(base / riga["name"], riga["box"])
+        if letto is None:
+            continue
+        fattore = _fattore_unita(riga.get("ocr_text"), riga.get("depth_mm"), letto["value"])
+        valori: List[float] = []
+        for nome in campione:
+            esito = _rileggi_nel_riquadro(base / nome, riga["box"])
+            if esito is not None:
+                valori.append(round(esito["value"] * fattore, 2))
+        if len(valori) < 3:
+            continue
+        quota = sum(1 for v in valori if _depth_credibile(v)) / float(len(valori))
+        if quota < 0.6:
+            continue
+        voto = (quota, -area(riga), riga["name"], riga["box"], fattore)
+        if migliore is None or voto[:2] > migliore[:2]:
+            migliore = voto
+    if migliore is None:
+        return None
+    return migliore[2], migliore[3], migliore[4], migliore[0]
 
 
 def _riquadro_depth_di_riferimento(righe: Sequence[Dict]) -> Optional[Tuple[str, Dict, str, Optional[float]]]:
