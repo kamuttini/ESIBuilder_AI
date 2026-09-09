@@ -425,6 +425,77 @@ function panelImport(panel) {
     }
   }
 
+  /* I due piani.
+
+     Una cartella puo' contenere sia L sia T: la sonda e' la stessa ma sono due studi
+     diversi, e finche' stanno insieme ogni modulo li mescola - il rettangolo esce mediato
+     fra due ventagli, la depth su due scale. Si riconosce dopo dedup e rotazione, perche'
+     la rete guarda dentro al rettangolo. */
+  panel.append(el('h3', {}, 'Piano L / T'));
+  const pianiBox = el('div', {});
+  panel.append(pianiBox);
+  const renderPiani = () => {
+    pianiBox.innerHTML = '';
+    const conteggi = value.plane_counts || {};
+    const quantiL = conteggi.L || 0;
+    const quantiT = conteggi.T || 0;
+    const senza = conteggi['?'] || 0;
+    const stato = el('span', { class: 'hint' });
+    if (!Object.keys(conteggi).length) {
+      pianiBox.append(el('p', { class: 'hint' },
+        'non ancora riconosciuto. Serve il rettangolo ecografico, perche\' la rete guarda '
+        + 'li\' dentro.'));
+    } else {
+      pianiBox.append(el('div', { class: 'kv' }, el('span', {}, 'immagini in L'),
+        el('span', {}, String(quantiL))));
+      pianiBox.append(el('div', { class: 'kv' }, el('span', {}, 'immagini in T'),
+        el('span', {}, String(quantiT))));
+      if (senza) {
+        pianiBox.append(el('div', { class: 'kv' }, el('span', {}, 'senza piano riconosciuto'),
+          el('span', { style: 'color:var(--warn)' }, String(senza))));
+      }
+    }
+    if (value.plane === 'T' || (state.project.source || {}).plane === 'T') {
+      pianiBox.append(el('p', { class: 'hint' },
+        'questo e\' il progetto della T, nato dallo sdoppiamento.'));
+    }
+    const riconosci = el('button', { class: 'ghost' },
+      Object.keys(conteggi).length ? 'Rifai il riconoscimento del piano' : 'Riconosci il piano di ogni immagine');
+    riconosci.addEventListener('click', async () => {
+      riconosci.disabled = true;
+      try {
+        const avvio = await api(`/projects/${state.projectId}/planes`, { body: {} });
+        const job = await pollJob(avvio.job_id, stato);
+        stato.textContent = '';
+        const c = (job.result || {}).counts || {};
+        toast(`L: ${c.L || 0} · T: ${c.T || 0}${c['?'] ? ` · senza piano: ${c['?']}` : ''}`);
+        await reload();
+      } catch (errore) { toast(errore.message, true); stato.textContent = errore.message; }
+      finally { riconosci.disabled = false; }
+    });
+    const riga = el('div', { class: 'row' }, riconosci, stato);
+    if (quantiL && quantiT && !(state.project.source || {}).split_into) {
+      riga.append(confermaInDueTempi(`Sdoppia: ${quantiL} in L qui, ${quantiT} in T in un progetto nuovo`,
+        'la L resta in questo progetto, la T ne apre uno accanto che eredita codici, '
+        + 'vendor col suo template, sonda, rettangolo e il rapporto pixel/mm della scala. '
+        + 'E\' una copia: da li\' in poi le due configurazioni vivono per conto loro.',
+        async () => {
+          try {
+            const esito = await api(`/projects/${state.projectId}/split`, { body: {} });
+            toast(`creato ${esito.created}: ${esito.T} immagini in T`);
+            await refreshProjects();
+            await reload();
+          } catch (errore) { toast(errore.message, true); }
+        }));
+    }
+    if ((state.project.source || {}).split_into) {
+      riga.append(el('span', { class: 'hint' },
+        `gia' sdoppiato: la T sta in «${(state.project.source || {}).split_into}»`));
+    }
+    pianiBox.append(riga);
+  };
+  renderPiani();
+
   if (analysis.vendor || analysis.probe) {
     panel.append(el('h3', {}, 'riconoscimento'));
     const box = el('div', { class: 'card' });

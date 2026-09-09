@@ -383,6 +383,42 @@ class Engine:
             "checkpoint": str(self.paths.lt),
         }
 
+    def predict_lt_each(self, paths: Sequence[Path], rect: Dict[str, int],
+                        batch: int = 8, progress=None) -> List[Dict]:  # noqa: ANN001
+        """L/T **per immagine**, non il voto della cartella.
+
+        `predict_lt` risponde alla domanda "di che piano e' questa acquisizione". Ma una
+        cartella puo' contenerne due, ed e' proprio il caso da cui nascono due progetti: li
+        serve sapere di che piano e' ogni singolo fotogramma.
+        """
+        torch = self._setup()
+        model = self._load_lt()
+        if model is None:
+            return []
+        righe: List[Dict] = []
+        for start in range(0, len(paths), batch):
+            fetta = list(paths[start : start + batch])
+            tensori, validi = [], []
+            for path in fetta:
+                try:
+                    tensori.append(self._crop_tensor(path, rect, LT_IMAGE_SIZE))
+                    validi.append(path)
+                except Exception:  # noqa: BLE001, PERF203
+                    righe.append({"path": str(path), "plane": None, "confidence": None})
+            if tensori:
+                with torch.no_grad():
+                    probs = torch.softmax(
+                        model(torch.stack(tensori).to(self._device)), dim=1).cpu()
+                for path, row in zip(validi, probs):
+                    indice = int(row.argmax())
+                    etichetta = (self._lt_classes[indice] if indice < len(self._lt_classes)
+                                 else str(indice))
+                    righe.append({"path": str(path), "plane": etichetta,
+                                  "confidence": round(float(row[indice]), 4)})
+            if progress is not None:
+                progress(min(start + batch, len(paths)), len(paths))
+        return righe
+
     # -- SU/GIU ------------------------------------------------------------
     def predict_su_giu(self, paths: Sequence[Path], rect: Dict[str, int], batch: int = 8) -> Dict:
         """Up/down per frame on the rect crops: one row per image, as the scale stage wants."""

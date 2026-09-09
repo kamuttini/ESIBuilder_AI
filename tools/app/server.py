@@ -1235,6 +1235,221 @@ def api_step_confirm(project_id: str, step_id: str):
     return jsonify({"confirmed": not annulla, "status": _project(project_id).status_report()})
 
 
+# --- il piano L/T, e i due progetti che ne nascono ------------------------
+#
+# Una cartella di acquisizioni puo' contenere due piani: la sonda e' la stessa, ma le
+# immagini in L e quelle in T sono due studi diversi e vanno in due configurazioni diverse.
+# Finche' stanno insieme ogni modulo le mescola: il rettangolo esce mediato fra due ventagli,
+# la depth su due scale, l'orientamento su due geometrie.
+#
+# Il piano si riconosce **dopo** dedup e rotazione, perche' la rete guarda dentro al
+# rettangolo e il rettangolo si legge su immagini gia' dritte.
+
+STEP_EREDITATI = ("codes", "vendor", "probe", "rect")
+# Della scala si eredita quello che e' della macchina, non quello che e' del fotogramma:
+# il rapporto pixel/mm e la riga della scala restano, le depth lette immagine per immagine
+# no - quelle immagini nel progetto nuovo non ci sono nemmeno.
+CHIAVI_SCALA_EREDITATE = ("pixel_ratio_x", "pixel_ratio_y", "scale_lines", "scale_module")
+
+
+def _piani_salvati(project: Project) -> Dict[str, str]:
+    """Il piano di ogni immagine: quello riconosciuto, con sopra le correzioni a mano."""
+    valore = project.step_value("import")
+    piani = dict((valore.get("planes") or {}))
+    for nome, scelto in (valore.get("plane_corrections") or {}).items():
+        piani[nome] = {"plane": scelto, "confidence": None, "source": "user"}
+    return piani
+
+
+@app.post("/api/projects/<project_id>/planes")
+def api_planes(project_id: str):
+    """Riconosci il piano L/T di ogni immagine della cartella."""
+    _project(project_id)
+    return jsonify({"job_id": _start_job(_run_planes, project_id)})
+
+
+def _run_planes(job_id: str, project_id: str) -> None:
+    try:
+        project = _project(project_id)
+        rect = project.step_value("rect").get("rect_echo")
+        if not rect:
+            raise ValueError("serve prima il rettangolo ecografico: la rete L/T guarda li' dentro")
+        base = project.working_dir()
+        immagini = project.dedup_images()
+        if not immagini:
+            raise ValueError("nessuna immagine da classificare")
+        _job_update(job_id, stage=f"piano L/T su {len(immagini)} immagini", total=len(immagini))
+        righe = _inference_engine().predict_lt_each(
+            immagini, rect,
+            progress=lambda fatte, quante: _job_update(job_id, done=fatte, total=quante),
+        )
+        piani: Dict[str, Dict] = {}
+        for riga in righe:
+            percorso = Path(riga["path"])
+            try:
+                nome = str(percorso.relative_to(base))
+            except ValueError:
+                nome = percorso.name
+            piani[nome] = {"plane": riga.get("plane"), "confidence": riga.get("confidence")}
+        conteggi: Dict[str, int] = {}
+        for voce in piani.values():
+            chiave = voce.get("plane") or "?"
+            conteggi[chiave] = conteggi.get(chiave, 0) + 1
+
+        def mutate(_p: Project, value: Dict) -> Dict:
+            value["planes"] = piani
+            value["plane_counts"] = conteggi
+            return value
+
+        _write_step(project_id, "import", mutate, status="proposed", source="model")
+        _job_update(job_id, status="done", stage="fatto", result={"counts": conteggi})
+    except Exception as error:  # noqa: BLE001
+        _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
+@app.post("/api/projects/<project_id>/planes/correct")
+def api_planes_correct(project_id: str):
+    """Correggi a mano il piano di un'immagine."""
+    _project(project_id)
+    payload = _payload()
+    nome = str(payload.get("name") or "").strip()
+    piano = str(payload.get("plane") or "").strip().upper()
+    if not nome:
+        return jsonify({"error": "manca l'immagine"}), 400
+    if not payload.get("reset") and piano not in ("L", "T"):
+        return jsonify({"error": "il piano puo' essere L o T"}), 400
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        fatte = dict(value.get("plane_corrections") or {})
+        if payload.get("reset"):
+            fatte.pop(nome, None)
+        else:
+            fatte[nome] = piano
+        value["plane_corrections"] = fatte
+        return value
+
+    _write_step(project_id, "import", mutate, status="corrected", source="user")
+    return jsonify({"saved": True})
+
+
+@app.post("/api/projects/<project_id>/split")
+def api_split_planes(project_id: str):
+    """Da una cartella con due piani, due progetti: la L resta qui, la T nasce accanto.
+
+    Il progetto nuovo non riparte da zero: eredita quello che e' della **macchina** e non
+    del piano - i codici, il vendor col suo template, la sonda, il rettangolo, e della scala
+    il rapporto pixel/mm. E' una copia, non un legame: da qui in poi le due configurazioni
+    vivono per conto loro, e resta scritto da dove viene.
+    """
+    project = _project(project_id)
+    piani = _piani_salvati(project)
+    if not piani:
+        return jsonify({"error": "il piano non e' ancora stato riconosciuto"}), 400
+    tutte = project.dedup_names()
+    nomi = {"L": [], "T": []}
+    senza = []
+    for nome in tutte:
+        piano = (piani.get(nome) or {}).get("plane")
+        if piano in ("L", "T"):
+            nomi[piano].append(nome)
+        else:
+            senza.append(nome)
+    if not nomi["L"] or not nomi["T"]:
+        return jsonify({"error": "in questa cartella c'e' un piano solo: non c'e' niente da "
+                                 "sdoppiare"}), 400
+
+    # Le immagini senza piano restano con la L, che e' il progetto principale: buttarle
+    # sarebbe peggio che tenerle dove si possono ancora guardare.
+    nomi["L"].extend(senza)
+
+    nome_base = str(project.codes.get("project_name") or project.root.name)
+    nuovo = Project.create(_projects_root, f"{nome_base} T")
+    nuovo.source.update({
+        **{k: v for k, v in project.source.items() if k != "split_into"},
+        "plane": "T",
+        "images_total": len(nomi["T"]),
+        "derived_from": project.root.name,
+        "derived_at": datetime.now().isoformat(timespec="seconds"),
+    })
+    nuovo.codes.update({k: v for k, v in project.codes.items() if k != "project_name"})
+    nuovo.codes["project_name"] = f"{nome_base} T"
+    nuovo.save()
+    nuovo.save_dedup_images(sorted(nomi["T"]))
+
+    def _import_del_piano(valore: Dict, elenco: Sequence[str]) -> Dict:
+        """Il riepilogo della cartella riscritto per il piano che quel progetto ha davvero.
+
+        Senza, dopo lo sdoppiamento la scheda continuava a dire «56 immagini tenute» in un
+        progetto che ne ha 28 - il numero della cartella, non del progetto.
+        """
+        fuori = dict(valore)
+        fuori["images_total"] = len(elenco)
+        fuori["images"] = [{"name": n} for n in list(elenco)[:60]]
+        fuori["images_listed"] = min(len(elenco), 60)
+        return fuori
+
+    def _anteprima_valida(valore: Dict, disponibili: Sequence[str]) -> Dict:
+        """L'anteprima deve essere un'immagine che quel progetto ha davvero.
+
+        Dopo lo sdoppiamento quella di prima puo' essere finita dall'altra parte: il
+        pannello mostrerebbe un buco, e i riquadri disegnati sopra non si vedrebbero.
+        """
+        attuale = valore.get("preview_image")
+        if attuale and attuale in disponibili:
+            return valore
+        if disponibili:
+            valore = dict(valore)
+            valore["preview_image"] = disponibili[0]
+        return valore
+
+    nomi_t = sorted(nomi["T"])
+    for step_id in STEP_EREDITATI:
+        if step_id == "codes":
+            continue
+        valore = dict(project.step_value(step_id) or {})
+        if valore:
+            nuovo.set_step(step_id, _anteprima_valida(valore, nomi_t),
+                           status="proposed", source="ereditato")
+    nuovo.set_step("import", _import_del_piano(project.step_value("import") or {}, nomi_t),
+                   status="proposed", source="ereditato")
+    scala = project.step_value("depth_scale") or {}
+    ereditata = {k: scala[k] for k in CHIAVI_SCALA_EREDITATE if scala.get(k)}
+    if ereditata:
+        nuovo.set_step("depth_scale", ereditata, status="proposed", source="ereditato")
+    nuovo.save()
+    nuovo.dedup_link_dir()
+
+    # E la L resta qui, con le sue sole immagini - anteprime comprese: anche di qua quella
+    # di prima puo' essere una che ora sta di la'.
+    project = _project(project_id)
+    nomi_l = sorted(nomi["L"])
+    for step_id in STEP_EREDITATI:
+        if step_id == "codes":
+            continue
+        valore = dict(project.step_value(step_id) or {})
+        if valore and valore.get("preview_image") not in nomi_l:
+            stato = (project.steps.get(step_id) or {})
+            project.set_step(step_id, _anteprima_valida(valore, nomi_l),
+                             status=stato.get("status") or "proposed",
+                             source=stato.get("source") or "model")
+    project.save_dedup_images(nomi_l)
+    stato_import = (project.steps.get("import") or {})
+    project.set_step("import", _import_del_piano(project.step_value("import") or {}, nomi_l),
+                     status=stato_import.get("status") or "proposed",
+                     source=stato_import.get("source") or "import")
+    project.source.update({"plane": "L", "images_total": len(nomi["L"]),
+                           "split_into": nuovo.root.name})
+    project.save()
+    specchio = project.root / project.DEDUP_LINKS
+    if specchio.exists():
+        shutil.rmtree(specchio, ignore_errors=True)
+    project.dedup_link_dir()
+
+    return jsonify({"created": nuovo.root.name, "L": len(nomi["L"]), "T": len(nomi["T"]),
+                    "without_plane": len(senza),
+                    "inherited": list(STEP_EREDITATI) + (["scala"] if ereditata else [])})
+
+
 @app.post("/api/projects/<project_id>/import/timestamp")
 def api_import_timestamp(project_id: str):
     """L'area dell'orologio, e la deduplicazione rifatta ignorandola.
