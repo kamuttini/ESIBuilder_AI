@@ -375,6 +375,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     renderList();
     renderLegend();
     paintWarning();
+    renderConsegnato();
     loadLimits();
     renderCorrections(fresh.corrections_detail || []);
   };
@@ -1237,20 +1238,42 @@ async function createOrientationViewer(projectId, sampleSize) {
     );
   };
 
-  const ft = data.folder_template || {};
-  const val = data.validation || {};
-  let headerCard = null;
-  if (ft.url || (val.coverage_by_group && Object.keys(val.coverage_by_group).length)) {
-    const card = el('div', { class: 'card' });
-    card.append(el('h3', { style: 'margin-top:0' }, 'ritaglio consegnato e copertura'));
+  /* Il ritaglio consegnato e la copertura.
+
+     Si rifa' a ogni rielaborazione, e non e' un dettaglio: prima si costruiva una volta
+     sola all'apertura della sezione, cosi' dopo aver stretto il marker si continuava a
+     vedere il ritaglio vecchio - proprio la cosa che si era appena cambiata. E l'immagine
+     porta un contrassegno che cambia col ritaglio: il PNG sta sempre allo stesso indirizzo,
+     e senza quello il browser mostrerebbe comunque quello di prima. */
+  const consegnatoCard = el('div', { class: 'card' });
+  const renderConsegnato = () => {
+    const ft = data.folder_template || {};
+    const val = data.validation || {};
+    const copertura = val.coverage_by_group || {};
+    consegnatoCard.innerHTML = '';
+    if (!ft.url && !Object.keys(copertura).length) {
+      consegnatoCard.style.display = 'none';
+      return;
+    }
+    consegnatoCard.style.display = '';
+    consegnatoCard.append(el('h3', { style: 'margin-top:0' }, 'ritaglio consegnato e copertura'));
     const body = el('div', { style: 'display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap' });
     if (ft.url) {
+      // Il contrassegno e' il momento in cui il PNG e' stato scritto: e' l'unica cosa che
+      // cambia di sicuro quando cambia il ritaglio, e sta sempre allo stesso indirizzo.
+      const marca = ft.mtime || (data.marker_override || {}).ts || '';
       const shipped = el('div', { class: 'template-card' });
-      shipped.append(el('img', { src: ft.url, alt: 'ritaglio consegnato' }));
+      shipped.append(el('img', {
+        src: `${ft.url}?v=${encodeURIComponent(marca || String(Date.now()))}`,
+        alt: 'ritaglio consegnato',
+      }));
       shipped.append(el('div', { class: 'hint' },
         el('strong', {}, `${(ft.size || []).join('x')} px`), el('br'),
-        `innesco ${ft.seed_bank_template || '?'}`, el('br'),
-        `scala ${ft.seed_scale ?? '?'}`));
+        ft.from_user_marker ? 'dal marker che hai indicato tu' : `innesco ${ft.seed_bank_template || '?'}`,
+        el('br'),
+        ft.from_user_marker
+          ? `da ${(ft.source_image || '').split('/').pop() || '?'}`
+          : `scala ${ft.seed_scale ?? '?'}`));
       body.append(shipped);
     }
     const table = el('table', { class: 'lines', style: 'flex:1;min-width:320px' });
@@ -1260,7 +1283,7 @@ async function createOrientationViewer(projectId, sampleSize) {
       el('td', { class: 'name' }, 'mediana'),
       el('td', { class: 'name' }, 'minimo')));
     for (const group of Object.keys(GROUP_COLORS)) {
-      const c = (val.coverage_by_group || {})[group];
+      const c = copertura[group];
       if (!c) continue;
       const pct = Math.round(c.coverage * 100);
       table.append(el('tr', {},
@@ -1271,13 +1294,13 @@ async function createOrientationViewer(projectId, sampleSize) {
         el('td', { class: 'val' }, String(c.min ?? '—'))));
     }
     body.append(table);
-    card.append(body);
-    card.append(el('p', { class: 'hint' },
+    consegnatoCard.append(body);
+    consegnatoCard.append(el('p', { class: 'hint' },
       'la copertura e\' il ritaglio consegnato cercato DENTRO l\'envelope del suo gruppo, ' +
       `soglia ${val.min_score ?? '?'}: e\' la previsione di cosa fara\' ESI, che a runtime ` +
       'usera\' proprio questo PNG. Sotto il 95% quel gruppo e\' a rischio.'));
-    headerCard = card;
-  }
+  };
+  renderConsegnato();
 
   /* --- i controlli, compatti: una barra sola per filtri, ordine, navigazione e azioni.
      Prima erano quattro righe piu' due copie di filtri e ordine, e l'immagine finiva
@@ -1424,6 +1447,12 @@ async function createOrientationViewer(projectId, sampleSize) {
     mine.append(mineImage, el('div', { class: 'hint' },
       el('strong', {}, 'immagine corrente'), el('br'),
       'il glifo vero, tagliato dove lo vedi riquadrato'));
+    // Il ritaglio consegnato sta anche qui, accanto al riferimento della banca e al glifo
+    // di questa immagine. Anche questo si rinfresca: e' il PNG che finisce in DB_echo, e
+    // dopo averlo stretto deve essere quello nuovo a farsi vedere.
+    const shippedImage = el('img', { alt: 'consegnato' });
+    const shippedNote = el('div', { class: 'hint' });
+    const shipped = el('div', { class: 'template-card' }, shippedImage, shippedNote);
     compareRefresh = () => {
       const row = byName.get(names[index]);
       mineImage.style.display = row && row.box ? 'block' : 'none';
@@ -1431,17 +1460,17 @@ async function createOrientationViewer(projectId, sampleSize) {
         mineImage.src = `/api/projects/${projectId}/orientation/crop` +
           `?name=${encodeURIComponent(names[index])}&scale=6&pad=2&t=${Date.now()}`;
       }
+      const attuale = data.folder_template || {};
+      shipped.style.display = attuale.url ? '' : 'none';
+      if (!attuale.url) return;
+      const marca = attuale.mtime || (data.marker_override || {}).ts || Date.now();
+      shippedImage.src = `${attuale.url}?v=${encodeURIComponent(marca)}`;
+      shippedNote.innerHTML = '';
+      shippedNote.append(el('strong', {}, 'consegnato'), el('br'),
+        `${(attuale.size || []).join('x')} px`, el('br'),
+        'e\' questo che finisce in DB_echo');
     };
-    if (ft.url) {
-      const shipped = el('div', { class: 'template-card' });
-      shipped.append(el('img', { src: ft.url, alt: 'consegnato' }));
-      shipped.append(el('div', { class: 'hint' },
-        el('strong', {}, 'consegnato'),
-        el('br'), 'e\' questo che finisce in DB_echo'));
-      side.append(bank, shipped, mine);
-    } else {
-      side.append(bank, mine);
-    }
+    side.append(bank, shipped, mine);
     compare.append(side);
     compare.append(el('p', { class: 'hint' },
       'la banca e\' costruita dagli orientation_*.png delle configurazioni storiche: il ' +
@@ -1546,7 +1575,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     fold('chi fissa i bordi degli envelope', limitsTag, limitsCard),
     fold('correzioni manuali', corrTag, corrHost),
     fold('ultima rielaborazione in background', bgTag, bgReportHost),
-    headerCard ? fold('ritaglio consegnato e copertura', null, headerCard) : null,
+    fold('ritaglio consegnato e copertura', null, consegnatoCard),
     fold('confronto: banca, consegnato, immagine corrente', null, compare),
   ));
 

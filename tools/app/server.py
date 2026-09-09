@@ -1425,6 +1425,14 @@ def api_orientation(project_id: str):
                     if folder_template.get("path")
                     else None
                 ),
+                # Il PNG sta sempre allo stesso indirizzo: senza sapere **quando** e' stato
+                # riscritto, il browser continuerebbe a mostrare quello di prima proprio
+                # dopo averlo cambiato.
+                "mtime": (
+                    int(Path(folder_template["path"]).stat().st_mtime)
+                    if folder_template.get("path") and Path(folder_template["path"]).is_file()
+                    else 0
+                ),
             },
             "validation": validation,
             "marker_warning": stored.get("marker_warning") or {},
