@@ -768,10 +768,25 @@ async function createDepthViewer(projectId, sampleSize) {
         : 'queste depth valgono come confermate: lo studio della scala le usera\' come dato certo.',
       async () => {
         try {
-          await api(`/projects/${projectId}/depth/confirm`,
+          const esito = await api(`/projects/${projectId}/depth/confirm`,
             { body: data.confirmed ? { reset: true } : {} });
           toast(data.confirmed ? 'conferma tolta' : 'depth confermata');
           await rileggiTutto();
+          // Confermare la depth fa ripartire da solo il quarto giro del rettangolo, che
+          // rimisura le corde sulle immagini con la depth piu' bassa. Si aspetta qui: e'
+          // corto, e senza dirlo la sezione del rettangolo sembrerebbe ferma a prima.
+          if (esito && esito.rect_job) {
+            const stato = el('span', { class: 'hint' });
+            coperturaBox.append(el('div', { class: 'row' },
+              el('span', { class: 'hint' }, 'rifaccio le corde del rettangolo sulle depth '
+                + 'piu\' basse:'), stato));
+            try {
+              await pollJob(esito.rect_job, stato);
+              toast('corde rimisurate: la proposta e\' nella sezione del rettangolo '
+                + 'ecografico');
+            } catch (errore) { toast(errore.message, true); }
+            await rileggiTutto();
+          }
         } catch (errore) { toast(errore.message, true); }
       }));
     coperturaBox.append(riga);

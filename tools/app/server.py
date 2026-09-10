@@ -4913,6 +4913,9 @@ def api_rect_chain(project_id: str):
             # ma va controllato su tutte
             "images_by_group": _images_by_group(project),
             "available": disponibile,
+            # Quando la depth e' stata confermata l'ultima volta: se e' dopo il giro sulla
+            # depth, quel giro racconta corde misurate su immagini che non sono piu' quelle.
+            "depth_confirmed_at": (project.steps.get("depth_scale") or {}).get("ts"),
             "groups": sorted((orientation.get("groups") or {}).keys()),
             "plane": (analysis.get("plane") or {}).get("plane"),
             "passes": passi,
@@ -6620,7 +6623,20 @@ def api_depth_confirm(project_id: str):
     valore = _write_step(project_id, "depth_scale", lambda _p, v: v,
                          status="proposed" if annulla else "confirmed",
                          source="model" if annulla else "user")
-    return jsonify({"confirmed": not annulla, "values": len(valore.get("depths") or [])})
+    # Confermare la depth **e'** il via al quarto giro del rettangolo: e' l'unica cosa che
+    # quel giro aspettava. Lasciarlo da lanciare a mano, in un'altra sezione, voleva dire
+    # che lo studio del rettangolo continuava a mostrare le corde misurate dal giro prima,
+    # su immagini a 29 mm invece che sulle 22 appena confermate.
+    # Propone soltanto: il rettangolo non si muove finche' non applichi la proposta.
+    lavoro = None
+    if not annulla:
+        progetto = _project(project_id)
+        pronto = bool(_depth_confermate(progetto)) and bool(_groups_of_images(progetto)) \
+            and bool(progetto.step_value("rect").get("rect_echo"))
+        if pronto:
+            lavoro = _start_job(_run_rect_depth, project_id, 3)
+    return jsonify({"confirmed": not annulla, "values": len(valore.get("depths") or []),
+                    "rect_job": lavoro})
 
 
 # --- il riquadro della depth letta dall'interfaccia ------------------------

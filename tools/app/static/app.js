@@ -1365,8 +1365,15 @@ function rectChainCard(panel, ganciRect) {
         (!pass.missing.length && !(pass.saved && pass.saved.proposal))
           ? el('div', { class: 'hint' },
               pass.id === 'depth'
-                ? 'questo giro si lancia a mano, dopo aver confermato la depth'
+                ? 'parte da solo quando confermi la depth; da qui si rifa\''
                 : 'gira da solo insieme all\'analisi; qui si rifa\' quando serve')
+          : null,
+        // Un giro fatto prima dell'ultima conferma racconta corde misurate su immagini che
+        // non sono piu' quelle scelte dalla depth: dirlo, o si legge come se fosse attuale.
+        (pass.id === 'depth' && pass.saved && pass.saved.ts && chain.depth_confirmed_at
+         && pass.saved.ts < chain.depth_confirmed_at)
+          ? el('div', { class: 'hint', style: 'color:var(--warn)' },
+              'da rifare: la depth e\' stata confermata dopo questo giro')
           : null,
         // Quale depth ha scelto per ogni gruppo: e' il motivo per cui la corda e' quella.
         (pass.saved && pass.saved.depth_by_group)
