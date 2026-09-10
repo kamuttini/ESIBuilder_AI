@@ -976,10 +976,33 @@ img.depth-crop {
   position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px dashed #40d0ff;
   transform: translateX(-1px);
 }
+/* La tacca dentro alla finestra ingrandita e' un comando, non un disegno: si prende, si
+   trascina, si toglie. La striscia trasparente sotto al segno e' la presa - senza, un
+   bersaglio alto un pixel si manca. */
 .scala-zoom-tacca {
-  position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid #40d0ff;
-  opacity: .55;
+  position: absolute; left: 0; right: 34%; height: 0; border-top: 1px solid #40d0ff;
+  opacity: .55; cursor: ns-resize;
 }
+.scala-zoom-tacca::after {
+  content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 13px;
+}
+.scala-zoom-tacca:hover { opacity: 1; border-top-width: 2px; }
+.scala-zoom-via {
+  position: absolute; right: -18px; top: -9px; width: 16px; height: 16px; padding: 0;
+  line-height: 14px; text-align: center; border-radius: 50%; cursor: pointer;
+  background: #161b22; color: var(--muted); border: 1px solid var(--line);
+  font-size: 11px; opacity: 0;
+}
+.scala-zoom-tacca:hover .scala-zoom-via { opacity: 1; }
+.scala-zoom-via:hover { color: #f85149; border-color: #f85149; }
+/* Il numero della tacca, a destra: si legge e si riscrive senza uscire dalla finestra. */
+.scala-zoom-numero {
+  position: absolute; right: 4px; transform: translateY(-50%); z-index: 2;
+  font-size: 11px; padding: 0 4px; border-radius: 3px; cursor: pointer;
+  background: rgba(0, 0, 0, .6); border: 1px solid #40d0ff; color: #40d0ff;
+}
+.scala-zoom-numero.calcolato { opacity: .5; border-style: dashed; }
+.scala-zoom-numero:hover { opacity: 1; }
 .scala-stato { color: var(--accent); }
 .scala-numero-campo {
   width: 52px; padding: 0 2px; font-size: 11px; background: #000; color: #40d0ff;

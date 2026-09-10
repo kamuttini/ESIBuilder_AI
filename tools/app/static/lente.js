@@ -225,6 +225,10 @@ lavorando, oppure torna indietro.</div>
       const da = { x: ev.clientX, y: ev.clientY };
       const inizio = [...finestra];
       const [W, H] = ctx.size || [0, 0];
+      // Un clic senza trascinamento e' un punto indicato, non una vista spostata: e' il
+      // gesto con cui si dice «lo zero sta qui», «la tacca sta qui». Lo si riconosce alla
+      // fine, dal fatto che il puntatore non si e' mosso.
+      let mosso = false;
       scena.classList.add('trascina');
       scena.setPointerCapture(ev.pointerId);
       const muovi = (e) => {
@@ -235,17 +239,26 @@ lavorando, oppure torna indietro.</div>
         let x0 = inizio[0] + dx, y0 = inizio[1] + dy;
         x0 = Math.max(0, Math.min(x0, (W || x0 + largo) - largo));
         y0 = Math.max(0, Math.min(y0, (H || y0 + alto) - alto));
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) mosso = true;
+        if (!mosso) return;
         finestra = [x0, y0, x0 + largo, y0 + alto];
         finestraManuale = true;
         miraScelta = '';
         zoomServito = 0;      // la striscia e' un'altra: va richiesta
         disegna();
       };
-      const molla = () => {
+      const molla = (e) => {
         scena.classList.remove('trascina');
         scena.removeEventListener('pointermove', muovi);
         scena.removeEventListener('pointerup', molla);
         scena.removeEventListener('pointercancel', molla);
+        if (mosso || !ctx || !ctx.onPunto || !e || e.type !== 'pointerup') return;
+        const r = img.getBoundingClientRect();
+        ctx.onPunto({
+          x: Math.round(finestra[0] + (e.clientX - r.left) / (s || 1)),
+          y: Math.round(finestra[1] + (e.clientY - r.top) / (s || 1)),
+          alt: !!e.altKey, shift: !!e.shiftKey, target: miraScelta,
+        });
       };
       scena.addEventListener('pointermove', muovi);
       scena.addEventListener('pointerup', molla);
@@ -657,7 +670,9 @@ lavorando, oppure torna indietro.</div>
           ? ` · frecce: ${NOMI_LATO[latoScelto] || latoScelto} (shift = 10 px)`
           : ' · trascina un lato per muoverlo, poi le frecce')
         : '')
-      + (ctx.onDraw ? ' · tira qui dentro per disegnarlo, alt+trascina per spostare la vista' : '');
+      + (ctx.onDraw ? ' · tira qui dentro per disegnarlo, alt+trascina per spostare la vista' : '')
+      + (ctx.onPunto && !ctx.onDraw
+        ? ` · clic: ${ctx.puntoLabel || 'indica il punto'} · trascina: sposta la vista` : '');
   };
 
   /* Il contesto arriva da una sezione, e ogni sezione ha il suo `source`. Cambiandolo si

@@ -25,8 +25,10 @@ function legenda() {
     ['trascina una tacca', 'le altre si rimettono a quel passo'],
     ['alt + trascina', 'la tacca da sola · dalla colonna, tutto il righello'],
     ['doppio clic', 'aggiunge una tacca'],
-    ['× sulla tacca', 'la toglie'],
-    ['clic sul numero', 'lo scrivi tu: da li\' esce la scala'],
+    ['× sulla tacca', 'la toglie, col suo numero'],
+    ['clic sul numero', 'lo scrivi tu: da li\' esce la scala; vuoto lo toglie'],
+    ['nelle finestre ingrandite', 'clic mette zero o fondo, shift+clic una tacca'],
+    ['nella lente', 'scegli in alto cosa indichi, poi clicca'],
     ['shift+↑↓ · alt+↑↓', 'zero · fondo, un pixel per volta'],
     ['← →', 'cambia fotogramma'],
     ['cmd+Z', 'annulla'],
@@ -191,13 +193,17 @@ async function createScaleViewer(projectId) {
      scala vera non e' 4 ma `larghezza / finestra`; e la finestra va ritagliata sui bordi
      dell'immagine con la stessa regola del server — spostandola, non stringendola —
      altrimenti client e server parlano di due ritagli diversi. */
-  const LARGA_ZOOM = 150;
-  const ALTA_ZOOM = 44;
+  /* Quanta immagine sta nella finestra: meno ne sta, piu' e' ingrandita. Quarantaquattro
+     pixel di altezza vanno bene per lo zero, ma quando le tacche sono fitte servono meno,
+     e quando il righello e' da ritrovare ne servono di piu'. */
+  let VICINANZA = 1;
+  const LARGA_ZOOM = () => Math.round(150 * VICINANZA);
+  const ALTA_ZOOM = () => Math.round(44 * VICINANZA);
   const zoom = {};
 
   const finestraZoom = (f, y) => {
-    const larghezza = Math.min(LARGA_ZOOM, f.w || LARGA_ZOOM);
-    const altezza = Math.min(ALTA_ZOOM, f.h || ALTA_ZOOM);
+    const larghezza = Math.min(LARGA_ZOOM(), f.w || LARGA_ZOOM());
+    const altezza = Math.min(ALTA_ZOOM(), f.h || ALTA_ZOOM());
     let x0 = Math.round(f.x - larghezza / 3);
     let y0 = Math.round(y - altezza / 2);
     x0 = Math.max(0, Math.min(x0, (f.w || larghezza) - larghezza));
@@ -210,22 +216,76 @@ async function createScaleViewer(projectId) {
     return (z.img.clientWidth || 1) / (z.finestra[2] - z.finestra[0]);
   };
 
+  /* Le due finestre ingrandite non sono un'anteprima: sono il posto dove si corregge.
+
+     A grandezza naturale una tacca e' alta due pixel e lo zero e' un segno fra due segni:
+     si trascinava a fatica sull'immagine intera e si sbagliava di tre pixel. Qui c'e' il
+     quadruplo, quindi qui dentro si fa tutto — si indica lo zero e il fondo con un clic, si
+     aggiunge e si toglie una tacca, si scrive e si cancella il numero. L'immagine intera
+     resta per guardare il righello per intero, non per lavorarci di precisione. */
   const creaZoom = (chiave, etichetta, colore) => {
     const scatola = el('div', { class: 'scala-zoom' });
     const img = el('img', { alt: '' });
     const titolo = el('div', { class: 'scala-zoom-titolo' }, etichetta);
     const piano = el('div', { class: 'scala-zoom-piano' });
     scatola.append(titolo, img, piano);
-    piano.addEventListener('pointerdown', (e) => trascina(e, chiave, () => ({
-      x: scalaZoom(chiave), y: scalaZoom(chiave),
-    })));
+    piano.addEventListener('pointerdown', (e) => {
+      // Sopra una tacca o un numero comandano loro: qui si prende solo il vuoto.
+      if (e.target.closest('.scala-zoom-tacca, .scala-zoom-numero')) return;
+      const partenza = { x: e.clientX, y: e.clientY };
+      let mosso = false;
+      const muovi = (ev) => {
+        if (Math.abs(ev.clientY - partenza.y) > 3 || Math.abs(ev.clientX - partenza.x) > 3) {
+          mosso = true;
+          piano.removeEventListener('pointermove', muovi);
+          piano.removeEventListener('pointerup', molla);
+          // Trascinare resta trascinare: la mira segue il dito come prima.
+          trascina(e, chiave, () => ({ x: scalaZoom(chiave), y: scalaZoom(chiave) }));
+        }
+      };
+      const molla = (ev) => {
+        piano.removeEventListener('pointermove', muovi);
+        piano.removeEventListener('pointerup', molla);
+        if (mosso) return;
+        // Un clic secco dice «sta qui»: e' il gesto piu' preciso che c'e', perche' si mira
+        // invece di inseguire.
+        const y = puntoZoom(chiave, ev);
+        if (y == null) return;
+        if (ev.shiftKey) { aggiungiTacca(y); return; }
+        const f = corrente();
+        ricorda();
+        f[chiave] = y;
+        salva({ [chiave]: y });
+        stato(`${etichetta} a y=${y}`);
+        disegna(); aggiornaZoom(); renderDati(); renderPasso();
+      };
+      piano.addEventListener('pointermove', muovi);
+      piano.addEventListener('pointerup', molla);
+    });
     zoom[chiave] = { scatola, img, piano, titolo, colore, etichetta, finestra: null };
     if (window.ResizeObserver) new ResizeObserver(() => aggiornaZoom()).observe(img);
     img.addEventListener('load', () => aggiornaZoom());
     return scatola;
   };
+  /* La y nativa sotto al puntatore dentro a una delle due finestre. */
+  const puntoZoom = (chiave, ev) => {
+    const z = zoom[chiave];
+    if (!z || !z.finestra) return null;
+    const r = z.img.getBoundingClientRect();
+    const s = scalaZoom(chiave);
+    return Math.round(z.finestra[1] + (ev.clientY - r.top) / (s || 1));
+  };
   const zoomZero = creaZoom('y_zero', 'zero', '#3fb950');
   const zoomFondo = creaZoom('y_far', 'fondo', '#d29922');
+  const vicinanzaSel = el('select', { style: 'width:92px' },
+    ...[['0.5', 'molto vicino'], ['1', 'vicino'], ['2', 'largo'], ['4', 'tutta la barra']]
+      .map(([v, etichetta]) => el('option',
+        { value: v, ...(v === '1' ? { selected: '' } : {}) }, etichetta)));
+  vicinanzaSel.addEventListener('change', () => {
+    VICINANZA = parseFloat(vicinanzaSel.value) || 1;
+    for (const chiave of ['y_zero', 'y_far']) zoom[chiave].finestra = null;
+    aggiornaZoom();
+  });
 
   const aggiornaZoom = () => {
     const f = corrente();
@@ -249,11 +309,46 @@ async function createScaleViewer(projectId) {
       const colonna = el('div', { class: 'scala-zoom-colonna' });
       colonna.style.left = `${(f.x - z.finestra[0]) * s}px`;
       z.piano.append(colonna);
+      // Le tacche dentro alla finestra, con tutto quello che ci si fa sopra: trascinare
+      // (e le altre seguono il passo), togliere, scrivere il numero. E' il posto giusto per
+      // farlo: qui una tacca e' alta otto pixel invece di due.
+      const lette = new Map((f.labels || []).map(([yy, v]) => [Math.round(yy), v]));
+      const passoMm = (f.ruler || {}).step_mm || f.D_step_mm || null;
       for (const t of f.ticks || []) {
         if (t < z.finestra[1] || t > z.finestra[3]) continue;
-        const tacca = el('div', { class: 'scala-zoom-tacca' });
+        const tacca = el('div', { class: 'scala-zoom-tacca',
+          title: 'trascina: da qui il passo · alt+trascina: solo questa' },
+          el('button', { class: 'scala-zoom-via', title: 'togli la tacca e il suo numero' }, '×'));
         tacca.style.top = `${(t - z.finestra[1]) * s}px`;
+        tacca.addEventListener('pointerdown', (e) => {
+          if (e.target.closest('.scala-zoom-via')) return;
+          e.stopPropagation();
+          trascinaTacca(e, t, s);
+        });
+        tacca.querySelector('.scala-zoom-via').addEventListener('click', (e) => {
+          e.stopPropagation(); togliTacca(t);
+        });
         z.piano.append(tacca);
+
+        const vicina = [...lette.keys()].find((yy) => Math.abs(yy - t) <= 6);
+        const cm = vicina !== undefined ? lette.get(vicina) : null;
+        const passi = passoMm && f.y_zero != null && (f.ruler || {}).pitch
+          ? Math.round(Math.abs(t - f.y_zero) / f.ruler.pitch) : null;
+        const calcolato = (cm == null && passoMm != null && passi != null)
+          ? (passi * passoMm) / 10 : null;
+        const mostrato = cm != null ? cm : calcolato;
+        if (mostrato == null) continue;
+        const numero = el('div', {
+          class: 'scala-zoom-numero' + (cm == null ? ' calcolato' : ''),
+          title: cm == null ? 'calcolato dal passo: clic per scriverlo tu'
+                            : 'letto dall\'immagine: clic per correggerlo, vuoto per toglierlo',
+        }, `${Number(mostrato.toFixed(2))} cm`);
+        numero.style.top = `${(t - z.finestra[1]) * s}px`;
+        numero.addEventListener('pointerdown', (e) => e.stopPropagation());
+        numero.addEventListener('click', (e) => {
+          e.stopPropagation(); cambiaNumero(numero, t, mostrato);
+        });
+        z.piano.append(numero);
       }
       const mira = el('div', { class: 'scala-mira', style: `border-top-color:${z.colore}` });
       mira.style.top = `${(y - z.finestra[1]) * s}px`;
@@ -337,6 +432,7 @@ async function createScaleViewer(projectId) {
     f.ticks = [...(f.ticks || []), y].sort((a, b) => a - b);
     salva({ ticks_add: [...(correzione().ticks_add || []), y] });
     disegna(); aggiornaZoom();
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
   };
 
   /* Una tacca sola, e le altre vengono da se'.
@@ -361,6 +457,7 @@ async function createScaleViewer(projectId) {
         ticks: esito.ticks, pitch: esito.pitch, y_far: esito.y_far };
       stato(`${esito.ticks.length} tacche a passo ${esito.pitch} px — ${esito.from}`);
       disegna(); aggiornaZoom(); renderPasso(); renderDati(); renderLista();
+      if (Lente.viva()) Lente.aggiorna(contestoLente());
     } catch (errore) { stato(errore.message); toast(errore.message, true); }
   };
 
@@ -430,10 +527,12 @@ async function createScaleViewer(projectId) {
 
      Con alt si muove solo quella: serve quando il righello *non* e' regolare, che e' il
      caso raro ma esiste. */
-  function trascinaTacca(event, y) {
+  function trascinaTacca(event, y, scalaPropria) {
     event.preventDefault();
     const f = corrente();
-    const s = scala();
+    // La scala e' quella di dove si sta trascinando: sull'immagine intera un pixel di
+    // schermo e' un pixel e mezzo di immagine, dentro alla finestra ingrandita e' un quarto.
+    const s = scalaPropria || scala();
     const partenza = event.clientY;
     const originale = y;
     const passi = event.altKey || f.y_zero == null ? 0 : passiDalloZero(f, y);
@@ -522,12 +621,40 @@ async function createScaleViewer(projectId) {
     disegna(); aggiornaZoom();
   };
 
+  /* Togliere una tacca porta via anche il suo numero.
+
+     Il numero non e' un'etichetta appesa all'immagine: e' il valore *di quella tacca*.
+     Toglievo la tacca e il numero restava li' a mezz'aria, a raccontare una scala che non
+     c'era piu' - e siccome dai numeri esce la calibrazione, quel resto continuava anche a
+     contare. */
   const togliTacca = (y) => {
     const f = corrente();
     ricorda();
+    const vicino = (yy) => Math.abs(yy - y) <= 6;
     f.ticks = (f.ticks || []).filter((t) => Math.round(t) !== Math.round(y));
-    salva({ ticks_del: [...(correzione().ticks_del || []), Math.round(y)] });
-    disegna();
+    const aveva = (f.labels || []).some(([yy]) => vicino(yy));
+    f.labels = (f.labels || []).filter(([yy]) => !vicino(yy));
+    const campi = { ticks_del: [...(correzione().ticks_del || []), Math.round(y)] };
+    if (aveva || (correzione().nums || []).some(([yy]) => vicino(yy))) {
+      campi.nums = (correzione().nums || []).filter(([yy]) => !vicino(yy));
+      // Una lista vuota non e' «nessuna correzione»: e' «i numeri li ho tolti io». Il
+      // server toglie il campo quando arriva vuoto, quindi ci si mette uno zero fittizio
+      // solo se serve — qui basta mandarla, anche vuota, dentro alla stessa scrittura.
+    }
+    salva(campi);
+    disegna(); aggiornaZoom(); renderDati();
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    stato(aveva ? 'tacca e numero tolti' : 'tacca tolta');
+  };
+  const taccaVicina = (y, quanto = 12) => {
+    const f = corrente();
+    let migliore = null;
+    for (const t of f.ticks || []) {
+      if (Math.abs(t - y) <= quanto && (migliore === null || Math.abs(t - y) < Math.abs(migliore - y))) {
+        migliore = t;
+      }
+    }
+    return migliore;
   };
 
   /* --- i numeri si riscrivono dove stanno, senza finestrelle di sistema -------------- */
@@ -536,7 +663,20 @@ async function createScaleViewer(projectId) {
     nodo.replaceChildren(campo);
     campo.focus(); campo.select();
     const chiudi = (salvare) => {
-      const cm = parseFloat(campo.value.replace(',', '.'));
+      const scritto = campo.value.trim();
+      const cm = parseFloat(scritto.replace(',', '.'));
+      // Campo svuotato: il numero va via. Serve quando l'OCR ha letto una cifra che li' non
+      // c'e', e finora l'unico modo era scriverci sopra un numero inventato.
+      if (salvare && !scritto) {
+        const f = corrente();
+        ricorda();
+        const vicino = (yy) => Math.abs(yy - y) <= 6;
+        f.labels = (f.labels || []).filter(([yy]) => !vicino(yy));
+        salva({ nums: (correzione().nums || []).filter(([yy]) => !vicino(yy)) });
+        stato('numero tolto');
+        disegna(); aggiornaZoom(); renderDati();
+        return;
+      }
       if (salvare && isFinite(cm)) {
         const f = corrente();
         ricorda();
@@ -554,6 +694,11 @@ async function createScaleViewer(projectId) {
     campo.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); chiudi(true); }
       if (e.key === 'Escape') { e.preventDefault(); chiudi(false); }
+      // Canc su un campo gia' vuoto: togli il numero e passa oltre, senza dover confermare
+      // il vuoto con Invio.
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !campo.value.trim()) {
+        e.preventDefault(); chiudi(true);
+      }
     });
     campo.addEventListener('blur', () => chiudi(true));
   };
@@ -1084,6 +1229,44 @@ async function createScaleViewer(projectId) {
   /* Cosa vede la lente qui: la colonna del righello, con le tacche e i due estremi. Non
      c'e' un riquadro da trascinare - il righello e' una riga di segni - quindi si guarda e
      basta, ma il tasto sta dove sta in tutte le altre sezioni. */
+  /* La lente sul righello: non una vetrina, uno strumento.
+
+     E' la finestra dove il righello si vede davvero — dieci volte piu' grande, su un
+     secondo schermo se c'e'. Quindi e' li' che si deve poter lavorare: si sceglie in alto
+     cosa si sta indicando (zero, fondo, tacca, passo) e un clic lo mette. Alt+clic toglie
+     la tacca vicina, col suo numero.
+
+     Prima da qui si poteva solo guardare, e per spostare una tacca di due pixel si tornava
+     sull'immagine piccola — cioe' proprio dove non si vedeva. */
+  let modoLente = 'tacca';
+  const MODI_LENTE = {
+    zero: 'clic: metti lo zero',
+    fondo: 'clic: metti il fondo',
+    tacca: 'clic: aggiungi una tacca · alt+clic: togli quella vicina',
+    passo: 'clic su una tacca giusta: le altre si rimettono a quel passo',
+  };
+  const applicaPuntoLente = (modo, y, alt) => {
+    const f = corrente();
+    if (alt || modo === 'togli') {
+      const vicina = taccaVicina(y, 14);
+      if (vicina == null) { stato('nessuna tacca li\' vicino'); return; }
+      togliTacca(vicina);
+    } else if (modo === 'zero' || modo === 'fondo') {
+      const chiave = modo === 'zero' ? 'y_zero' : 'y_far';
+      ricorda();
+      f[chiave] = y;
+      salva({ [chiave]: y });
+      stato(`${modo} a y=${y}`);
+      disegna(); aggiornaZoom(); renderDati(); renderPasso();
+    } else if (modo === 'passo') {
+      generaDaTacca(y);
+      return;
+    } else {
+      aggiungiTacca(y);
+      stato(`tacca a y=${y}`);
+    }
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
+  };
   const contestoLente = () => {
     const f = corrente();
     if (f.x == null) return { source: 'scala', projectId, name: f.name, boxes: [] };
@@ -1091,6 +1274,8 @@ async function createScaleViewer(projectId) {
     const ys = [f.y_zero, f.y_far].filter((v) => v != null).map(Number);
     const su = ys.length ? Math.min(...ys) : 0;
     const giu = ys.length ? Math.max(...ys) : (f.h || 0);
+    const attorno = (y, meta) => ({ left: x - 60, right: x + 60,
+                                    top: Math.round(y - meta), bottom: Math.round(y + meta) });
     return {
       source: 'scala',
       projectId, name: f.name, size: [f.w || 0, f.h || 0],
@@ -1104,6 +1289,24 @@ async function createScaleViewer(projectId) {
       ],
       focus: { left: x - 70, right: x + 70, top: su - 20, bottom: giu + 20 },
       caption: `${(f.ticks || []).length} tacche`,
+      // I bersagli fanno due mestieri insieme: portano la vista dove serve e dicono cosa
+      // fara' il prossimo clic. Sono la stessa cosa, in fondo: si va dove si vuole agire.
+      targets: [
+        ...(f.y_zero != null ? [{ id: 'zero', label: 'zero', box: attorno(f.y_zero, 40) }] : []),
+        ...(f.y_far != null ? [{ id: 'fondo', label: 'fondo', box: attorno(f.y_far, 40) }] : []),
+        { id: 'tacca', label: 'tacche',
+          box: { left: x - 60, right: x + 60, top: su, bottom: giu } },
+        { id: 'passo', label: 'passo',
+          box: { left: x - 60, right: x + 60, top: su, bottom: giu } },
+      ],
+      onTarget: (voce) => {
+        modoLente = voce.id;
+        // Il cartellino in alto dice cosa fara' il prossimo clic: se non si rinfresca,
+        // resta quello di prima e si clicca credendo di fare un'altra cosa.
+        if (Lente.viva()) Lente.aggiorna(contestoLente());
+      },
+      onPunto: ({ y, alt, target }) => applicaPuntoLente(target || modoLente, y, alt),
+      puntoLabel: MODI_LENTE[modoLente] || MODI_LENTE.tacca,
     };
   };
 
@@ -1173,6 +1376,11 @@ async function createScaleViewer(projectId) {
     el('div', { class: 'ov-body' },
       el('div', { class: 'ov-main' },
         barraImmagine,
+        el('div', { class: 'row', style: 'margin:0 0 4px' },
+          el('span', { class: 'hint' }, 'finestre ingrandite:'), vicinanzaSel,
+          el('span', { class: 'hint' },
+            'clic mette lo zero o il fondo · shift+clic aggiunge una tacca · '
+            + 'trascina una tacca per il passo · × la toglie col suo numero')),
         el('div', { class: 'scala-zoom-coppia' }, zoomZero, zoomFondo),
         stage),
       el('div', { class: 'ov-side' }, passoBox, datiBox, azioni,
