@@ -1133,11 +1133,19 @@ def _run_advanced_stages(
             # stesso contesto dello stadio, cosi' i due guardano gli stessi fotogrammi ed e'
             # possibile confrontarli tacca per tacca.
             if scale.get("output_dir"):
-                _job_update(job_id, stage="scala: studio del righello, tacca per tacca")
+                # Un fotogramma per depth, sullo stesso orientamento: la stessa regola del
+                # bottone «rifai lo studio». Da qui non passava, e rilanciare il modulo della
+                # scala rimetteva in scena i quattro orientamenti delle prime depth -
+                # cancellando la scelta appena fatta senza dire niente.
+                solo_righelli = _un_fotogramma_per_depth(_project(project_id))
+                _job_update(job_id, stage="scala: studio del righello, tacca per tacca"
+                            + (f" ({len(solo_righelli)} depth)" if solo_righelli else ""))
                 studio = stages_mod.run_scale_study(
                     context_dir=Path(scale["output_dir"]), python_bin=python_bin,
-                    vendor=vendor, max_images=max(14, sample),
+                    vendor=vendor,
+                    max_images=len(solo_righelli) or max(14, sample),
                     corrections=_write_scale_corrections(_project(project_id)),
+                    only=solo_righelli or None,
                 )
                 results["scale_study"] = {
                     k: studio.get(k)
