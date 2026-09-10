@@ -47,6 +47,9 @@ async function createDepthViewer(projectId, sampleSize) {
     if (!filtro) return true;
     if (filtro.startsWith('mode:')) return r.mode === filtro.slice(5);
     if (filtro.startsWith('stato:')) return r.status === filtro.slice(6);
+    // Guardate o no: e' il filtro con cui si finisce il lavoro, perche' dice cosa manca.
+    if (filtro === 'rivista:si') return !!r.reviewed;
+    if (filtro === 'rivista:no') return r.depth_mm != null && !r.reviewed && !r.corrected;
     return true;
   };
   const visibili = () => names.filter(passa);
@@ -375,6 +378,9 @@ async function createDepthViewer(projectId, sampleSize) {
         r.depth_mm == null ? 'nessuna depth' : `${r.depth_mm} mm`),
       el('span', {}, ` · ${m.label || r.mode || '—'}`),
     );
+    if (r.reviewed) {
+      caption.append(el('span', { style: 'color:var(--ok)' }, ' · confermata'));
+    }
     if (r.corrected) {
       caption.append(el('span', { class: 'score-fixed', style: 'margin-left:6px' }, 'corretta'));
     }
@@ -853,21 +859,68 @@ async function createDepthViewer(projectId, sampleSize) {
      La conferma in due tempi resta dov'e' pericolosa - tutto quello che tocca piu' di
      un'immagine. Una correzione singola si vede subito e si disfa con un bottone. */
   const correzione = el('div', {});
+  // I valori scritti a mano in questa seduta: ci restano anche se sono su una sola
+  // immagine, perche' sono proprio quelli che serve riusare su quella dopo.
+  const usati = new Set();
+  const aggiornaDopoScrittura = (fresca) => {
+    for (const riga of fresca.rows || []) byName.set(riga.name, riga);
+    conteggi = { by_mode: fresca.by_mode || {}, by_status: fresca.by_status || {} };
+    data.values_mm = fresca.values_mm || data.values_mm;
+    data.coherence = fresca.coherence;
+    rifaiChips();
+    renderCoerenza();
+  };
+  /* Passare oltre senza toccare il numero non e' correggerlo: e' dire che va bene.
+
+     Segnarlo come «corretto» sarebbe una bugia - non e' stato corretto niente - e chi legge
+     il progetto crederebbe che il modulo avesse sbagliato quattrocento volte. Ma nemmeno
+     lasciarlo com'era va bene: al giro dopo non si sa piu' quali si erano gia' guardate.
+     Quindi conferma, che porta con se' il valore di allora e decade se quello cambia. */
+  const confermaUna = async (avanti) => {
+    const r = byName.get(names[index]) || {};
+    if (r.depth_mm == null) { toast('questa immagine non ha ancora una depth', true); return; }
+    try {
+      await api(`/projects/${projectId}/depth/reviewed`,
+        { body: { name: names[index], depth_mm: r.depth_mm } });
+      aggiornaDopoScrittura(await api(`/projects/${projectId}/depth`));
+      toast(`${r.depth_mm} mm confermata`);
+      if (avanti) passo(1); else mostra();
+    } catch (error) { toast(error.message, true); }
+  };
   const salvaUna = async (valore, avanti) => {
     if (Number.isNaN(valore)) { toast('scrivi prima la depth in millimetri', true); return; }
+    const r = byName.get(names[index]) || {};
+    // Stesso numero: non c'e' niente da correggere, e' una conferma.
+    if (r.depth_mm != null && Math.abs(r.depth_mm - valore) < 1e-6) {
+      await confermaUna(avanti);
+      return;
+    }
     try {
       await api(`/projects/${projectId}/depth/correct`,
         { body: { name: names[index], depth_mm: valore } });
-      const fresca = await api(`/projects/${projectId}/depth`);
-      for (const riga of fresca.rows || []) byName.set(riga.name, riga);
-      conteggi = { by_mode: fresca.by_mode || {}, by_status: fresca.by_status || {} };
-      data.values_mm = fresca.values_mm || data.values_mm;
-      data.coherence = fresca.coherence;
-      rifaiChips();
-      renderCoerenza();
+      usati.add(valore);
+      aggiornaDopoScrittura(await api(`/projects/${projectId}/depth`));
       toast(`${valore} mm`);
       if (avanti) passo(1); else mostra();
     } catch (error) { toast(error.message, true); }
+  };
+  /* Le scorciatoie: i dieci valori piu' usati della cartella, piu' quelli scritti a mano.
+
+     Solo i piu' usati non bastava: una depth nuova nasce su una immagine sola, finisce
+     undicesima e sparisce dall'elenco proprio mentre serve per le immagini accanto. */
+  const valoriScorciatoia = () => {
+    const conta = Object.entries(data.values_mm || {})
+      .map(([v, quante]) => [Number(v), quante])
+      .filter(([v]) => !Number.isNaN(v));
+    const insieme = new Map(conta.sort((a, b) => b[1] - a[1]).slice(0, 10));
+    for (const v of usati) insieme.set(v, insieme.get(v) || 0);
+    for (const nome of names) {
+      const r = byName.get(nome);
+      if (r && r.corrected && r.depth_mm != null) {
+        insieme.set(r.depth_mm, insieme.get(r.depth_mm) || 0);
+      }
+    }
+    return [...insieme.entries()].sort((a, b) => a[0] - b[0]);
   };
   const renderCorrezione = () => {
     correzione.innerHTML = '';
@@ -878,59 +931,69 @@ async function createDepthViewer(projectId, sampleSize) {
       type: 'number', step: '0.5', style: 'width:96px',
       value: r.depth_mm != null ? String(r.depth_mm) : '',
     });
-    // Invio salva e va avanti: e' il gesto di chi sta scorrendo la cartella e correggendo.
+    const uguale = () => {
+      const v = parseFloat(campo.value);
+      return r.depth_mm != null && !Number.isNaN(v) && Math.abs(r.depth_mm - v) < 1e-6;
+    };
+    const salva = el('button', {});
+    const etichettaSalva = () => {
+      salva.textContent = nuova ? 'Indica e vai avanti'
+        : (uguale() ? 'Conferma e vai avanti' : 'Salva e vai avanti');
+    };
+    etichettaSalva();
+    campo.addEventListener('input', etichettaSalva);
+    // Invio salva e va avanti: e' il gesto di chi sta scorrendo la cartella.
     campo.addEventListener('keydown', (event) => {
       if (event.key !== 'Enter') return;
       event.preventDefault();
       salvaUna(parseFloat(campo.value), true);
     });
-    const salva = el('button', {}, nuova ? 'Indica e vai avanti' : 'Salva e vai avanti');
     salva.addEventListener('click', () => salvaUna(parseFloat(campo.value), true));
     correzione.append(el('div', { class: 'row' },
       el('span', { class: 'hint' }, nuova ? 'depth di questa immagine (mm)' : 'depth corretta (mm)'),
       campo, salva,
-      el('span', { class: 'hint' }, 'Invio salva e passa alla prossima')));
+      el('span', { class: 'hint' }, r.reviewed
+        ? 'gia\' confermata · Invio passa avanti'
+        : 'Invio salva e passa avanti; se il numero non cambia vale come conferma')));
 
-    // Le depth gia' viste nella cartella: quasi sempre quella giusta e' una di queste, e
-    // un bottone e' piu' svelto e piu' sicuro che riscrivere il numero. Ci sono sempre,
-    // anche quando una depth c'e' gia': e' correggendo che servono di piu'.
-    // Le piu' usate, non le piu' piccole: su Esaote i 46 mm sono duecentocinquanta
-    // immagini e i 2 mm sono un errore di un giro vecchio, e l'ordine per valore metteva
-    // l'errore per primo e i 120 fuori dall'elenco.
-    const noti = Object.entries(data.values_mm || {})
-      .map(([v, quante]) => [Number(v), quante])
-      .filter(([v]) => !Number.isNaN(v))
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10)
-      .sort((a, b) => a[0] - b[0]);
+    const noti = valoriScorciatoia();
     if (noti.length) {
       const scorciatoie = el('div', { class: 'row', style: 'gap:4px; margin-top:4px' },
         el('span', { class: 'hint' }, 'gia\' nella cartella:'));
       for (const [v, quante] of noti) {
         const b = el('button', { class: 'ghost sq2' + (v === r.depth_mm ? ' on' : ''),
-                                 title: `${quante} immagini` }, `${v}`);
+                                 title: quante ? `${quante} immagini` : 'scritta da te' }, `${v}`);
         b.addEventListener('click', () => salvaUna(v, true));
         scorciatoie.append(b);
       }
       correzione.append(scorciatoie);
     }
 
+    if (r.reviewed) {
+      const b = el('button', { class: 'ghost sq2' }, 'Togli la conferma');
+      b.addEventListener('click', async () => {
+        try {
+          await api(`/projects/${projectId}/depth/reviewed`,
+            { body: { name: names[index], reset: true } });
+          aggiornaDopoScrittura(await api(`/projects/${projectId}/depth`));
+          toast('conferma tolta');
+          mostra();
+        } catch (error) { toast(error.message, true); }
+      });
+      correzione.append(el('div', { class: 'row', style: 'margin-top:4px' }, b));
+    }
     if (r.corrected) {
-      correzione.append(el('div', { class: 'row', style: 'margin-top:4px' },
-        (() => {
-          const b = el('button', { class: 'ghost sq2' }, 'Torna al valore del modulo');
-          b.addEventListener('click', async () => {
-            try {
-              await api(`/projects/${projectId}/depth/correct`,
-                { body: { name: names[index], reset: true } });
-              const fresca = await api(`/projects/${projectId}/depth`);
-              for (const riga of fresca.rows || []) byName.set(riga.name, riga);
-              toast('correzione tolta');
-              mostra();
-            } catch (error) { toast(error.message, true); }
-          });
-          return b;
-        })()));
+      const b = el('button', { class: 'ghost sq2' }, 'Torna al valore del modulo');
+      b.addEventListener('click', async () => {
+        try {
+          await api(`/projects/${projectId}/depth/correct`,
+            { body: { name: names[index], reset: true } });
+          aggiornaDopoScrittura(await api(`/projects/${projectId}/depth`));
+          toast('correzione tolta');
+          mostra();
+        } catch (error) { toast(error.message, true); }
+      });
+      correzione.append(el('div', { class: 'row', style: 'margin-top:4px' }, b));
     }
 
     // In blocco: quando la depth e' la stessa per tutta l'acquisizione - ed e' il caso
@@ -999,6 +1062,11 @@ async function createDepthViewer(projectId, sampleSize) {
         `${m.label} ${(conteggi.by_mode || {})[id] || 0}`]),
       ...Object.keys(etichetteStato).map((s) => [`stato:${s}`,
         `${etichetteStato[s]} ${(conteggi.by_status || {})[s] || 0}`]),
+      ['rivista:si', `confermate ${names.filter((n) => (byName.get(n) || {}).reviewed).length}`],
+      ['rivista:no', `da guardare ${names.filter((n) => {
+        const r = byName.get(n) || {};
+        return r.depth_mm != null && !r.reviewed && !r.corrected;
+      }).length}`],
     ];
     const bottoni = [];
     for (const [chiave, etichetta] of filtri) {

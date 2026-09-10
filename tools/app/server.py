@@ -5725,6 +5725,18 @@ def api_depth(project_id: str):
                 r.update({"depth_mm": fix.get("depth_mm"), "corrected": True,
                           "status": "corrected", "note": fix.get("note", "")})
 
+    # Guardata e va bene cosi'. Non e' una correzione - non c'e' niente da correggere - ma
+    # nemmeno un numero che nessuno ha ancora verificato: e' la differenza fra «il modulo
+    # dice 46» e «46 e' giusto». Vale per il valore di allora: se poi cambia, la conferma
+    # non vale piu' e l'immagine torna da guardare.
+    conferme = valore_step.get("depth_reviewed") or {}
+    for r in righe:
+        segno = conferme.get(r["name"])
+        r["reviewed"] = bool(
+            segno and r["depth_mm"] is not None
+            and abs(float(segno.get("depth_mm") or 0) - float(r["depth_mm"])) < 1e-6
+        )
+
     valori: Dict[str, int] = {}
     for r in righe:
         if r["depth_mm"] is not None:
@@ -5744,6 +5756,7 @@ def api_depth(project_id: str):
                 for s in ("accepted", "review", "reject", "corrected", "box", "missing")
             },
             "values_mm": valori,
+            "reviewed_count": sum(1 for r in righe if r.get("reviewed")),
             "images_total": len(project.dedup_images()),
             "coverage": _copertura_depth(project, righe),
             "coherence": _coerenza_depth(righe),
@@ -7094,6 +7107,58 @@ def _run_depth_only(job_id: str, project_id: str, sample: int) -> None:
                             ("status", "images", "accepted", "acceptance_ratio", "depths_mm")})
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
+@app.post("/api/projects/<project_id>/depth/reviewed")
+def api_depth_reviewed(project_id: str):
+    """«Questo numero e' giusto»: una conferma per immagine, non una correzione.
+
+    Da non confondere con `/depth/confirm`, che conferma la depth di tutta la cartella e
+    manda avanti lo step. Qui si segna una immagine per volta, scorrendole.
+
+    Scorrendo la cartella la maggior parte delle immagini e' gia' giusta, e passare oltre
+    non lasciava traccia: al giro dopo non si sapeva piu' quali erano state guardate.
+    Segnarle come «corrette» sarebbe una bugia - non e' stato corretto niente, e chi legge
+    il progetto crederebbe che il modulo avesse sbagliato quattrocento volte.
+
+    La conferma porta con se' il valore di allora: se la depth cambia, decade.
+    """
+    progetto = _project(project_id)
+    payload = _payload()
+    nomi = [str(n).strip() for n in (payload.get("names") or []) if str(n).strip()]
+    if not nomi:
+        uno = (payload.get("name") or "").strip()
+        nomi = [uno] if uno else []
+    if not nomi:
+        return jsonify({"error": "manca l'immagine"}), 400
+    # Lo stato dello step resta quello di adesso: una conferma per immagine non lo promuove
+    # ne' lo retrocede, e riscriverlo cancellerebbe il «confermata» della cartella.
+    stato_step = progetto.steps.get("depth_scale") or {}
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        conferme = dict(value.get("depth_reviewed") or {})
+        if payload.get("reset"):
+            for nome in nomi:
+                conferme.pop(nome, None)
+        else:
+            try:
+                misura = float(payload.get("depth_mm"))
+            except (TypeError, ValueError):
+                raise ValueError("serve la depth confermata")
+            adesso = datetime.now().isoformat(timespec="seconds")
+            for nome in nomi:
+                conferme[nome] = {"depth_mm": misura, "ts": adesso}
+        value["depth_reviewed"] = conferme
+        return value
+
+    try:
+        value = _write_step(project_id, "depth_scale", mutate,
+                            status=str(stato_step.get("status") or "proposed"),
+                            source=str(stato_step.get("source") or "model"))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
+    return jsonify({"saved": True, "applied": len(nomi),
+                    "reviewed": len(value.get("depth_reviewed") or {})})
 
 
 @app.post("/api/projects/<project_id>/depth/correct")
