@@ -20,19 +20,25 @@ async function createDepthViewer(projectId, sampleSize) {
   let names = rows.map((r) => r.name);
   let index = 0;
   let filtro = '';
-  /* Il riquadro si stringe solo dove la depth e' scritta a schermo: la label sta sempre
-     nello stesso posto e cambia solo di larghezza, quindi un riquadro stretto sul numero
-     vale per tutta la cartella. Sulla scala il numero cambia posto ad ogni immagine. */
+  /* La label stabile si puo' propagare a tutta la cartella. Sulla scala il numero cambia
+     posto ad ogni immagine, ma puo' comunque essere indicato e corretto nel suo frame. */
   let modiBox = data.box_modes || ['direct_label'];
   let modello = data.box_template || null;
   let conteggi = { by_mode: data.by_mode || {}, by_status: data.by_status || {} };
   let bozza = null;
+  let timerSalvaBox = null;
+  let salvaBoxInCorso = false;
+  let boxDaRiscrivere = false;
+  const statoSalvataggioBox = el('span', { class: 'hint' });
   /* Il riquadro si puo' stringere dove la depth sta nell'interfaccia. Un'immagine che il
      modulo non ha esaminato non ha un metodo, ma la cartella si': se li' la depth e' una
      label, la label c'e' anche in questa, e il riquadro ci si puo' mettere. */
   const propagabile = () => !!(data.coverage || {}).can_propagate;
   const modificabile = () => {
     const r = byName.get(names[index]) || {};
+    // Anche una depth dedotta dalla scala puo' avere il suo numero nell'interfaccia.
+    // Il box in quel caso e' solo di questa immagine: non lo si propaga mai al resto.
+    if (r.mode === 'scale') return true;
     if (modiBox.includes(r.mode)) return true;
     // Il criterio e' il riquadro, non lo stato: un'immagine che il modulo non ha esaminato
     // resta senza riquadro anche dopo che lei le ha scritto la depth a mano, e allora non
@@ -217,6 +223,36 @@ async function createDepthViewer(projectId, sampleSize) {
     return box;
   };
 
+  const salvaRiquadroAutomatico = () => {
+    const r = byName.get(names[index]) || {};
+    if (!bozza || !names[index]) return;
+    if (timerSalvaBox) clearTimeout(timerSalvaBox);
+    statoSalvataggioBox.textContent = 'salvataggio automatico…';
+    const nome = names[index];
+    const box = { ...bozza };
+    timerSalvaBox = setTimeout(async () => {
+      if (salvaBoxInCorso) { boxDaRiscrivere = true; return; }
+      salvaBoxInCorso = true;
+      try {
+        await api(`/projects/${projectId}/depth/box/save`, {
+          body: { name: nome, box, depth_mm: r.depth_mm },
+        });
+        const riga = byName.get(nome);
+        if (riga) { riga.box = box; riga.from_box = true; }
+        statoSalvataggioBox.textContent = 'riquadro salvato';
+      } catch (errore) {
+        statoSalvataggioBox.textContent = errore.message;
+        toast(errore.message, true);
+      } finally {
+        salvaBoxInCorso = false;
+        if (boxDaRiscrivere) {
+          boxDaRiscrivere = false;
+          salvaRiquadroAutomatico();
+        }
+      }
+    }, 450);
+  };
+
   /* Spostare non e' ridimensionare. Contro un bordo `normalizza` fermerebbe un lato e
      lascerebbe correre l'altro, e il riquadro si schiaccerebbe: su `prova` la depth sta a
      1251-1275 di 1280, cioe' a cinque pixel dal bordo destro, e trascinandolo a destra si
@@ -258,6 +294,7 @@ async function createDepthViewer(projectId, sampleSize) {
       window.removeEventListener('pointerup', molla);
       trascinando = false;
       disegnaZoom();
+      salvaRiquadroAutomatico();
     };
     trascinando = true;
     window.addEventListener('pointermove', muovi);
@@ -331,6 +368,7 @@ async function createDepthViewer(projectId, sampleSize) {
       disegna();
       disegnaZoom();
       renderRiquadro();
+      salvaRiquadroAutomatico();
     };
     trascinando = true;
     window.addEventListener('pointermove', muovi);
@@ -356,6 +394,7 @@ async function createDepthViewer(projectId, sampleSize) {
         disegna();
         disegnaZoom();
         renderRiquadro();
+        salvaRiquadroAutomatico();
       } : null,
     };
   };
@@ -784,7 +823,10 @@ async function createDepthViewer(projectId, sampleSize) {
     }
     if (!bozza) {
       riquadro.append(el('p', { class: 'hint' },
-        r.status === 'missing'
+        r.mode === 'scale'
+          ? 'questa depth e\' dedotta dalla scala, ma puoi disegnare qui il numero che vedi '
+            + 'nell\'interfaccia: il riquadro viene salvato solo su questa immagine.'
+          : r.status === 'missing'
           ? 'nessun riquadro ancora: stringine uno su un\'immagine dove la depth e\' stata '
             + 'trovata, e da li\' si applica anche a questa.'
           : 'nessun riquadro su questa immagine'));
@@ -792,19 +834,17 @@ async function createDepthViewer(projectId, sampleSize) {
     }
     if (!r.box) {
       riquadro.append(el('div', { class: 'depth-prestito' },
-        'questa immagine un riquadro suo non ce l\'ha: il modulo non l\'ha esaminata. '
-        + `Quello qui sopra e' il riquadro di cartella, preso da ${modello.from}: `
-        + 'spostalo se serve, poi applicalo.'));
+        r.mode === 'scale'
+          ? 'questo e\' il riquadro che hai appena disegnato: resta legato soltanto a questa '
+            + 'immagine, perche\' sulla scala il numero puo\' cambiare posizione.'
+          : modello
+            ? 'questa immagine un riquadro suo non ce l\'ha: il modulo non l\'ha esaminata. '
+              + `Quello qui sopra e' il riquadro di cartella, preso da ${modello.from}: `
+              + 'spostalo se serve, poi applicalo.'
+            : 'questo riquadro e\' locale a questa immagine.'));
     }
     const misura = el('span', { class: 'hint' },
       `${bozza.right - bozza.left} x ${bozza.bottom - bozza.top} px`);
-    /* Il riquadro dell'OCR e' quello di *parola*, e la parola comprende cio' che sta
-       attaccato al numero: l'unita', una sigla, la tacca del righello. Il tasto le fa
-       tutte: l'etichetta e' nello stesso posto in ogni fotogramma, e stringerne una alla
-       volta sarebbe solo fatica. */
-    const stringi = el('button', { class: 'ghost' }, 'Stringi sul numero, tutte le immagini');
-    const esitoStretto = el('span', { class: 'hint' });
-    stringi.addEventListener('click', () => stringiTutti(stringi, esitoStretto));
     const campi = el('div', { class: 'row' });
     for (const lato of ['left', 'top', 'right', 'bottom']) {
       const campo = el('input', {
@@ -815,16 +855,33 @@ async function createDepthViewer(projectId, sampleSize) {
         disegna();
         disegnaZoom();
         renderRiquadro();
+        salvaRiquadroAutomatico();
       });
       campi.append(el('span', { class: 'hint' }, lato), campo);
     }
+    if (r.mode === 'scale') {
+      riquadro.append(
+        el('div', { class: 'hint' },
+          'trascina, disegna o usa le coordinate: ogni modifica viene salvata automaticamente '
+          + 'solo per questa immagine; il valore dedotto dalla scala non viene alterato.'),
+        el('div', { class: 'row' }, misura, statoSalvataggioBox), campi,
+      );
+      return;
+    }
+    /* Il riquadro dell'OCR e' quello di *parola*, e la parola comprende cio' che sta
+       attaccato al numero: l'unita', una sigla, la tacca del righello. Il tasto le fa
+       tutte: l'etichetta e' nello stesso posto in ogni fotogramma, e stringerne una alla
+       volta sarebbe solo fatica. */
+    const stringi = el('button', { class: 'ghost' }, 'Stringi sul numero, tutte le immagini');
+    const esitoStretto = el('span', { class: 'hint' });
+    stringi.addEventListener('click', () => stringiTutti(stringi, esitoStretto));
     riquadro.append(
       el('div', { class: 'hint' },
         'il riquadro si disegna: tira col mouse sull\'immagine o sulla striscia ingrandita, '
         + 'e quello e\' il riquadro nuovo. Un clic secco ci porta quello di adesso senza '
         + 'cambiargli misura; le maniglie lo stringono sul solo numero, e piu\' e\' stretto '
         + 'piu\' il match tiene su tutte le immagini.'),
-      el('div', { class: 'row' }, misura),
+      el('div', { class: 'row' }, misura, statoSalvataggioBox),
       el('div', { class: 'row' }, stringi, esitoStretto),
       campi,
       el('div', { class: 'row' }, ambitoSel,
@@ -910,6 +967,9 @@ async function createDepthViewer(projectId, sampleSize) {
   };
   const salvaUna = async (valore, avanti) => {
     if (Number.isNaN(valore)) { toast('scrivi prima la depth in millimetri', true); return; }
+    // Una misura digitata e' gia' un valore della cartella, anche se coincide con una
+    // proposta del modulo e quindi diventa una conferma anziche' una correzione.
+    usati.add(valore);
     const r = byName.get(names[index]) || {};
     // Stesso numero: non c'e' niente da correggere, e' una conferma.
     if (r.depth_mm != null && Math.abs(r.depth_mm - valore) < 1e-6) {
@@ -1277,6 +1337,7 @@ async function createDepthViewer(projectId, sampleSize) {
       disegna();
       disegnaZoom();
       renderRiquadro();
+      salvaRiquadroAutomatico();
       return;
     }
     if (event.key === 'ArrowLeft') passo(-1);

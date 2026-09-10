@@ -7308,6 +7308,58 @@ def api_depth_box(project_id: str):
     })
 
 
+@app.post("/api/projects/<project_id>/depth/box/save")
+def api_depth_box_save(project_id: str):
+    """Salva subito il riquadro di *questa* immagine, senza propagarlo.
+
+    Le depth dedotte dalla scala possono comunque avere il numero scritto nell'interfaccia,
+    ma quel numero non sta nella stessa posizione in tutti i frame. Qui il box resta quindi
+    locale all'immagine; il comando esplicito `/depth/box` continua a essere quello che
+    propaga una label stabile alla cartella.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    nome = str(payload.get("name") or "").strip()
+    if nome not in set(project.dedup_names()):
+        return jsonify({"error": "immagine non nella cartella"}), 400
+    grezzo = payload.get("box") or {}
+    try:
+        box = {k: int(round(float(grezzo[k]))) for k in ("top", "left", "bottom", "right")}
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "serve un riquadro completo (top/left/bottom/right)"}), 400
+    if box["right"] - box["left"] < 3 or box["bottom"] - box["top"] < 3:
+        return jsonify({"error": "il riquadro e' troppo piccolo"}), 400
+    try:
+        valore_inviato = payload.get("depth_mm")
+        depth_inviata = float(valore_inviato) if valore_inviato is not None else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "la depth deve essere un numero"}), 400
+    righe, _stage = _depth_module_rows(project)
+    riga = next((row for row in righe if row.get("name") == nome), {})
+    valore_corrente = riga.get("depth_mm")
+
+    def salva(_project: Project, value: Dict) -> Dict:
+        letture = dict(value.get("depth_box_reads") or {})
+        prima = dict(letture.get(nome) or {})
+        letture[nome] = {
+            **prima,
+            "box": box,
+            # Il riquadro non deve inventare un valore nuovo: conserva quello dedotto dalla
+            # scala finche' l'utente non lo corregge nel campo numerico.
+            "depth_mm": depth_inviata if depth_inviata is not None else (
+                prima.get("depth_mm") if prima.get("depth_mm") is not None else valore_corrente),
+            "ocr_text": prima.get("ocr_text") or riga.get("ocr_text") or "",
+            "source": "user_box",
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+        value["depth_box_reads"] = letture
+        return value
+
+    value = _write_step(project_id, "depth_scale", salva, status="corrected", source="user")
+    return jsonify({"saved": True, "name": nome,
+                    "box": (value.get("depth_box_reads") or {}).get(nome, {}).get("box")})
+
+
 def _leggi_riquadro_su(base: Path, box: Dict, fattore: float, nomi: Sequence[str],
                        progress=None) -> Tuple[Dict[str, Dict], List[str]]:  # noqa: ANN001
     """La rilettura nel riquadro su un elenco di immagini, in parallelo. 0.4 s l'una."""
