@@ -590,6 +590,54 @@ def _advanced_stages_block_reason(project: Project) -> str:
     return ""
 
 
+def _marker_nel_rettangolo(righe: Dict[str, Dict], rect: Dict,
+                           margine: int = 60) -> Tuple[Dict[str, Dict], int]:
+    """Solo le detection che cadono nel rettangolo ecografico, col suo margine.
+
+    La banca cerca il glifo sulla meta' alta o bassa del frame **intero**. Su Esaote Nine
+    (prova 5) prendeva una lettera della data in alto a destra, con 0.70 di punteggio, su
+    ventotto immagini: l'envelope del gruppo NF diventava 752x195 px - mezzo schermo -
+    invece dei venti pixel del pallino rosso. Un envelope cosi' e' un invito a sbagliare,
+    perche' ESI dentro ci cerchera' il marker.
+
+    Il rettangolo e' quello dell'abbozzo - lo studio raffinato viene dopo, perche' dipende
+    proprio dall'orientamento - e per questo il taglio e' largo e non e' assoluto: se di un
+    gruppo non resta niente si tengono le sue righe com'erano. Ci sono setup legacy, l'80 e
+    l'81, dove il marker sta davvero fuori dal rettangolo, e perderli sarebbe peggio del
+    rumore.
+    """
+    try:
+        limiti = {
+            "top": int(rect["top"]) - margine, "left": int(rect["left"]) - margine,
+            "bottom": int(rect["bottom"]) + margine, "right": int(rect["right"]) + margine,
+        }
+    except (KeyError, TypeError, ValueError):
+        return righe, 0
+
+    def dentro(box: Dict) -> bool:
+        cx = (int(box["left"]) + int(box["right"])) / 2.0
+        cy = (int(box["top"]) + int(box["bottom"])) / 2.0
+        return (limiti["left"] <= cx <= limiti["right"]
+                and limiti["top"] <= cy <= limiti["bottom"])
+
+    per_gruppo: Dict[str, List[str]] = {}
+    for nome, riga in righe.items():
+        per_gruppo.setdefault(str(riga.get("group") or ""), []).append(nome)
+
+    tenute: Dict[str, Dict] = {}
+    scartate = 0
+    for gruppo, nomi in per_gruppo.items():
+        buone = [n for n in nomi if dentro(righe[n]["box"])]
+        if not buone:
+            # Tutto il gruppo e' fuori: o il marker sta davvero li', o il rettangolo e'
+            # sbagliato. In tutti e due i casi buttare via il gruppo e' la mossa peggiore.
+            tenute.update({n: righe[n] for n in nomi})
+            continue
+        tenute.update({n: righe[n] for n in buone})
+        scartate += len(nomi) - len(buone)
+    return tenute, scartate
+
+
 def _marker_vendor_exclusion(project: Project, margin_fraction: float = 0.75) -> Optional[Dict]:
     """Il template ecografo #13 non puo' mai essere scambiato per il marker."""
     box = project.step_value("vendor").get("rect_name_echo") or {}
@@ -728,6 +776,10 @@ def _run_advanced_stages(
                 rows_by_name = {
                     name: row for name, row in rows_by_name.items() if name in useful_names
                 }
+                # E dentro al rettangolo: la banca cerca sulla meta' alta o bassa del frame
+                # intero, e cio' che trova fuori dall'immagine ecografica non e' il marker.
+                rows_by_name, fuori_rect = _marker_nel_rettangolo(rows_by_name, final_rect)
+                results["marker"]["outside_rect"] = fuori_rect
                 template_info: Dict = {}
                 override = previous.get("marker_override") or {}
                 override_rows: Dict[str, Dict] = {}

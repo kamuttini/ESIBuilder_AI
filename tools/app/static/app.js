@@ -2510,6 +2510,9 @@ function panelModuleStage(panel, step) {
       ['esito', `${m.status}${m.error ? ' — ' + m.error : ''}`],
       ['gruppi trovati', (m.groups || []).join(' · ') || '—'],
       ['gruppi assenti', (m.missing_groups || []).join(' · ') || 'nessuno'],
+      // La banca cerca sul frame intero: cio' che trova lontano dall'immagine ecografica
+      // gonfia l'envelope, ed e' dentro l'envelope che ESI cerchera' il marker.
+      ['scartate fuori dal rettangolo', m.outside_rect || 0],
       ['#16 completata copiando', (m.filled_groups || []).length
         ? `${m.filled_groups.join(' · ')} da ${m.filled_from}`
         : 'nessuna copia: tutti e quattro trovati'],
