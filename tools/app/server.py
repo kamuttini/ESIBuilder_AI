@@ -3822,10 +3822,13 @@ RECT_PASSES = (
     },
     {
         "id": "depth",
-        "label": "4 · incrocio con la depth",
-        "needs": ("orientation", "plane", "depth"),
-        "what": "la scala e la depth dicono dove finisce l'immagine utile: da usare per "
-                "chiudere il rettangolo in verticale",
+        "label": "4 · corde sulle immagini a depth piu' bassa",
+        # il piano non si aspetta: dopo lo sdoppiamento il progetto e' gia' di un piano solo,
+        # e prima lo si riconosce immagine per immagine dentro al rettangolo provvisorio
+        "needs": ("orientation", "depth"),
+        "what": "a depth bassa la macchina ingrandisce, e la corda piu' larga del ventaglio "
+                "arriva davvero al bordo: per ogni orientamento si rimisura sulle immagini "
+                "con la depth confermata piu' bassa, e i bordi si posano su una misura",
     },
 )
 
@@ -4335,6 +4338,134 @@ def _run_rect_segments(job_id: str, project_id: str, per_group: int) -> None:
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
 
+def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
+    """Giro 4: le corde misurate sulle immagini con la depth **piu' bassa**.
+
+    A depth bassa la macchina ingrandisce: lo stesso ventaglio occupa piu' pixel, e la sua
+    corda piu' larga arriva davvero al bordo del rettangolo. Il giro del segmento le
+    immagini le prendeva a passo fisso nella cartella, senza sapere quali fossero le piu'
+    informative - e su una cartella dove le depth vanno da 18 a 120 mm significa misurare
+    la corda su un'immagine rimpicciolita e chiudere il rettangolo troppo stretto.
+
+    Adesso lo dice la depth confermata: per ogni orientamento si prendono le immagini con
+    il valore piu' basso. La costruzione resta quella di sempre - l'asse verticale a meta'
+    fra la corda piu' alta di NF/LR e la piu' bassa di UD/LRUD, le due estreme sui bordi -
+    ma le corde sono misurate dove si vedono meglio.
+    """
+    try:
+        project = _project(project_id)
+        confermate = _depth_confermate(project)
+        if not confermate:
+            raise ValueError(
+                "serve la depth confermata: vai nella sezione depth, controlla i valori e "
+                "premi «Conferma la depth»"
+            )
+        gruppi = _groups_of_images(project)
+        if not gruppi:
+            raise ValueError("serve prima l'orientamento")
+        folder = _require_folder(project)
+        imported = project.step_value("import")
+        width, height = (imported.get("image_sample_size") or [0, 0])[:2]
+        corrente = project.step_value("rect").get("rect_echo")
+        if not width or not height or not corrente:
+            raise ValueError("servono il rettangolo di adesso e la dimensione dell'immagine")
+        rect_norm = {
+            "x": corrente["left"] / float(width),
+            "y": corrente["top"] / float(height),
+            "w": (corrente["right"] - corrente["left"] + 1) / float(width),
+            "h": (corrente["bottom"] - corrente["top"] + 1) / float(height),
+        }
+        base = project.dedup_link_dir() or folder
+        stimatore = _segment_estimator()
+        engine = _inference_engine()
+
+        # Per gruppo: le immagini con la depth piu' bassa fra quelle confermate.
+        scelte: Dict[str, Dict] = {}
+        for nome, gruppo in gruppi.items():
+            if gruppo not in marker_refine.GROUP_ORDER or nome not in confermate:
+                continue
+            scelte.setdefault(gruppo, {}).setdefault(confermate[nome], []).append(nome)
+        if not scelte:
+            raise ValueError(
+                "nessuna immagine ha insieme un orientamento e una depth confermata"
+            )
+
+        misure: Dict[str, Dict] = {}
+        for indice, (gruppo, per_valore) in enumerate(sorted(scelte.items())):
+            minima = min(per_valore)
+            nomi = sorted(per_valore[minima])[:max(1, per_group)]
+            _job_update(job_id, stage=f"corde nel gruppo {gruppo} a {minima:g} mm",
+                        done=indice, total=len(scelte))
+            etichetta = "su" if gruppo in ("NF", "LR") else "giu"
+            trovati = []
+            for nome in nomi:
+                percorso = base / nome
+                if not percorso.exists():
+                    continue
+                seg = stimatore(image_path=percorso, rect_norm=rect_norm,
+                                orientation_label=etichetta)
+                if not seg:
+                    continue
+                trovati.append({
+                    "image": nome,
+                    "plane": engine.predict_lt([percorso], corrente).get("plane"),
+                    "x1": float(seg["x1"]), "x2": float(seg["x2"]), "y": float(seg["y"]),
+                    "length_norm": float(seg["length_norm"]),
+                    "length_px": round(float(seg["length_norm"]) * width, 1),
+                    "depth_mm": minima,
+                })
+            if not trovati:
+                continue
+            piani: Dict[str, int] = {}
+            for s in trovati:
+                if s["plane"]:
+                    piani[s["plane"]] = piani.get(s["plane"], 0) + 1
+            dominante = max(piani, key=piani.get) if piani else None
+            nel_piano = [s for s in trovati if not dominante or s["plane"] == dominante]
+            misure[gruppo] = {
+                "segment": max(nel_piano, key=lambda s: s["length_norm"]),
+                "plane": dominante,
+                "planes": piani,
+                "depth_mm": minima,
+                "depths_available": sorted(per_valore),
+                "tried": len(nomi),
+                "found": len(trovati),
+                "median_length_px": round(
+                    statistics.median([s["length_px"] for s in nel_piano]), 1),
+                "all": nel_piano,
+            }
+
+        if not misure:
+            raise ValueError("nessuna corda misurata sulle immagini a depth piu' bassa")
+
+        risultato = _segments_analysis(misure, width, height, corrente, rect_norm)
+        risultato["chosen_by"] = "depth"
+        risultato["depth_by_group"] = {g: m["depth_mm"] for g, m in misure.items()}
+        _job_update(job_id, status="done", stage="fatto", result=risultato)
+
+        def mutate(project: Project, value: Dict) -> Dict:
+            catena = dict(value.get("chain") or {})
+            passi = dict(catena.get("passes") or {})
+            passi["depth"] = {
+                "state": "proposed",
+                "proposal": risultato["proposal"],
+                "pairs": {k: v["max_px"] for k, v in risultato["pairs"].items()},
+                "per_group": {g: m["segment"]["length_px"] for g, m in misure.items()},
+                "depth_by_group": risultato["depth_by_group"],
+                "ts": datetime.now().isoformat(timespec="seconds"),
+            }
+            catena["passes"] = passi
+            value["chain"] = catena
+            # Lo studio delle corde diventa questo: e' lo stesso studio, misurato dove si
+            # vede meglio. La sezione del rettangolo mostra sempre l'ultimo.
+            value["study"] = {"segments": risultato}
+            return value
+
+        _write_step(project_id, "rect", mutate)
+    except Exception as error:  # noqa: BLE001
+        _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
 def _images_by_group(project: Project) -> Dict[str, List[str]]:
     """Le immagini della cartella divise per orientamento, in ordine."""
     out: Dict[str, List[str]] = {}
@@ -4354,7 +4485,9 @@ def api_rect_chain(project_id: str):
     disponibile = {
         "orientation": bool(orientation.get("groups")),
         "plane": bool((analysis.get("plane") or {}).get("plane")),
-        "depth": bool(project.step_value("depth_scale").get("depths")),
+        # Non «c'e' una depth», ma «la depth e' confermata»: e' quella che sceglie le
+        # immagini su cui rimisurare le corde.
+        "depth": bool(_depth_confermate(project)),
     }
     stato_passi = (rect_value.get("chain") or {}).get("passes") or {}
     passi = []
@@ -4363,8 +4496,6 @@ def api_rect_chain(project_id: str):
         mancano = [n for n in spec["needs"] if not disponibile.get(n)]
         if spec["id"] == "rete":
             stato = "done" if rect_value.get("rect_echo") else "available"
-        elif spec["id"] == "depth":
-            stato = "todo"
         elif mancano:
             stato = "waiting"
         else:
@@ -4686,7 +4817,8 @@ def api_rect_refine(project_id: str):
     """Lancia un giro di raffinamento. Non applica niente: propone e basta."""
     _project(project_id)
     passo = (_payload().get("pass") or "").strip()
-    lavori = {"specularita": _run_rect_specularity, "segmento": _run_rect_segments}
+    lavori = {"specularita": _run_rect_specularity, "segmento": _run_rect_segments,
+              "depth": _run_rect_depth}
     if passo not in lavori:
         return jsonify({"error": f"raffinamento non disponibile: {passo or '(vuoto)'}"}), 400
     per_group = int(_payload().get("per_group") or 8)

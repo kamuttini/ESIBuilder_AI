@@ -52,7 +52,28 @@ async function createDepthViewer(projectId, sampleSize) {
     if (filtro === 'rivista:no') return r.depth_mm != null && !r.reviewed && !r.corrected;
     return true;
   };
-  const visibili = () => names.filter(passa);
+  /* L'ordine dell'elenco. Per nome e' l'ordine della cartella - va bene per controllare
+     un'acquisizione alla volta - ma per **giudicare** le letture serve l'ordine per valore:
+     i due estremi finiscono agli estremi, e una depth sbagliata di dieci volte si vede
+     subito perche' e' l'unica lassu'. Serve anche al rettangolo, che dalla depth piu' bassa
+     prende l'immagine con la corda piu' lunga. */
+  let ordine = 'nome';
+  const visibili = () => {
+    const elenco = names.filter(passa);
+    if (ordine === 'nome') return elenco;
+    const verso = ordine === 'giu' ? -1 : 1;
+    return elenco.slice().sort((a, b) => {
+      const va = (byName.get(a) || {}).depth_mm;
+      const vb = (byName.get(b) || {}).depth_mm;
+      // Le immagini senza depth stanno in fondo in tutti e due i versi: sono da riempire,
+      // non sono ne' le piu' piccole ne' le piu' grandi.
+      if (va == null && vb == null) return a < b ? -1 : 1;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      if (va !== vb) return (va - vb) * verso;
+      return a < b ? -1 : 1;
+    });
+  };
 
   const stage = el('div', { class: 'editor-stage' });
   const image = el('img', { alt: '' });
@@ -1169,6 +1190,22 @@ async function createDepthViewer(projectId, sampleSize) {
     riepilogo.append(griglia);
   };
 
+  // --- l'ordine con cui si scorrono le immagini
+  const ordineRow = el('div', { class: 'row' },
+    el('span', { class: 'hint' }, 'ordine:'));
+  for (const [chiave, etichetta] of [['nome', 'per nome'], ['su', 'depth crescente'],
+                                     ['giu', 'depth decrescente']]) {
+    const b = el('button', { class: 'chip' + (chiave === ordine ? ' on' : '') }, etichetta);
+    b.addEventListener('click', () => {
+      ordine = chiave;
+      for (const altro of ordineRow.querySelectorAll('button')) {
+        altro.className = 'chip' + (altro.textContent === etichetta ? ' on' : '');
+      }
+      if (vista === 'riepilogo') renderRiepilogo(); else mostra();
+    });
+    ordineRow.append(b);
+  }
+
   // --- le due viste: una per una, oppure tutte le depth trovate in un colpo d'occhio
   let vista = 'singola';
   /* Immagine a sinistra, strumenti a destra: la stessa forma di tutte le sezioni. Prima i
@@ -1212,6 +1249,7 @@ async function createDepthViewer(projectId, sampleSize) {
       el('span', { class: 'hint' }, 'filtra le immagini per nome: serve per applicare un '
         + 'secondo riquadro a una parte sola della cartella')),
     vistaBtn,
+    ordineRow,
     corpo,
     riepilogo,
   );

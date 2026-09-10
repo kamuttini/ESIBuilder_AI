@@ -1227,10 +1227,11 @@ function rectChainCard(panel, ganciRect) {
       'la corda e\' il segmento piu\' largo del ventaglio, cercata nel piano giusto. Fissa '
       + 'l\'ampiezza orizzontale, e le due della coppia devono essere speculari: quanto si '
       + 'scostano dice se il rettangolo e\' al posto giusto.'));
-    // Solo il giro delle corde: e' lo studio di questa sezione. Gli altri girano lo stesso
-    // - da soli, con l'analisi - ma raccontarli qui riempiva la pagina di roba che non
+    // I due giri che misurano le corde: quello che gira da solo con l'analisi, e quello
+    // che si lancia dopo aver confermato la depth e le rimisura dove si vedono meglio.
+    // Gli altri girano lo stesso, ma raccontarli qui riempiva la pagina di roba che non
     // riguarda quello che si sta guardando.
-    for (const pass of chain.passes.filter((p) => p.id === 'segmento')) {
+    for (const pass of chain.passes.filter((p) => p.id === 'segmento' || p.id === 'depth')) {
       const [label, color] = STATE_LABEL[pass.state] || [pass.state, 'var(--muted)'];
       const riga = el('div', { class: 'chain-step' });
       riga.append(el('span', { class: 'chain-state', style: `color:${color};border-color:${color}` }, label));
@@ -1245,17 +1246,28 @@ function rectChainCard(panel, ganciRect) {
         // la sezione vuota come "il modulo non sa rispondere".
         (!pass.missing.length && !(pass.saved && pass.saved.proposal))
           ? el('div', { class: 'hint' },
-              'gira da solo insieme all\'analisi; qui si rifa\' quando serve')
+              pass.id === 'depth'
+                ? 'questo giro si lancia a mano, dopo aver confermato la depth'
+                : 'gira da solo insieme all\'analisi; qui si rifa\' quando serve')
+          : null,
+        // Quale depth ha scelto per ogni gruppo: e' il motivo per cui la corda e' quella.
+        (pass.saved && pass.saved.depth_by_group)
+          ? el('div', { class: 'hint' }, 'misurate a '
+              + Object.entries(pass.saved.depth_by_group)
+                .map(([g, mm]) => `${g} ${mm} mm`).join(' · '))
           : null));
-      if (!pass.missing.length) {
+      if (!pass.missing.length && pass.id !== 'rete') {
         const run = el('button', { class: 'ghost' },
-          pass.saved && pass.saved.proposal ? 'Rifai la misura delle corde' : 'Cerca le corde');
+          (pass.saved && pass.saved.proposal ? 'Rifai' : 'Fai')
+          + (pass.id === 'depth' ? ' il giro sulla depth' : ' la misura delle corde'));
         const stato = el('span', { class: 'hint' });
         run.addEventListener('click', async () => {
           run.disabled = true;
           try {
+            // Ogni giro lancia **se stesso**: il bottone mandava sempre «segmento», quindi
+            // il giro sulla depth rifaceva quello di prima.
             const started = await api(`/projects/${state.projectId}/rect/refine`,
-              { body: { pass: 'segmento', per_group: 6 } });
+              { body: { pass: pass.id, per_group: pass.id === 'depth' ? 3 : 6 } });
             const job = await pollJob(started.job_id, stato);
             stato.textContent = '';
             showSegments(job.result);
@@ -1430,12 +1442,25 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     const corde = zonaCorde();
     if (corde) bersagli.push({ id: 'corde', label: `corda ${corrente}`, box: corde });
 
+    const boxes = rect ? [{ box: rect, color: '#ffffff', label: 'rettangolo (#11)' }] : [];
+    const salvato = gancio.leggiSalvato ? gancio.leggiSalvato() : null;
+    if (salvato && rect && (salvato.left !== rect.left || salvato.right !== rect.right
+        || salvato.top !== rect.top || salvato.bottom !== rect.bottom)) {
+      boxes.push({ box: salvato, color: '#3fb950', label: 'rettangolo coi margini' });
+    }
+    const anteprima = attivi.candidato === '__costruito'
+      ? rettCostruito()
+      : (attivi.candidato === 'ampiezza' ? rettAllaCordaPiuLarga() : null);
+    if (anteprima) {
+      boxes.push({ box: anteprima, color: '#d29922', label: 'rettangolo proposto' });
+    }
+
     return {
       source: 'rect',
       projectId: state.projectId,
       name: image.title || '',
       size: [(size && size[0]) || 0, (size && size[1]) || 0],
-      boxes: rect ? [{ box: rect, color: '#ffffff', label: 'rettangolo (#11)' }] : [],
+      boxes,
       lines: linee,
       segments: segmenti,
       focus: miraLente || corde || rect || null,
@@ -1530,6 +1555,34 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     x2: seg.x2 * (size ? size[0] : 1),
     y: seg.y * (size ? size[1] : 1),
   });
+  /* La proposta «allargato fino alla corda piu' larga» arrivava dal server ed era quindi
+     immobile durante una correzione: si muoveva la corda, ma il rettangolo restava quello
+     di prima fino al salvataggio. Questo e' lo stesso conto di `_segments_analysis`, fatto
+     sui segmenti visibili e sulla bozza corrente, cosi' l'anteprima segue ogni pixel. */
+  const rettAllaCordaPiuLarga = () => {
+    const base = gancio.leggiRect ? gancio.leggiRect() : chain.rect;
+    const W = size && size[0];
+    if (!study || !base || !W) return null;
+    const estremi = [];
+    for (const [group, misura] of Object.entries(study.per_group || {})) {
+      if (!misura.segment) continue;
+      const px = group === corrente && bozza ? bozza : segPx(misura.segment);
+      let left = Math.min(px.x1, px.x2);
+      let right = Math.max(px.x1, px.x2);
+      if (study.mirrored_frame && ['LR', 'LRUD'].includes(group)) {
+        [left, right] = [W - right, W - left];
+      }
+      estremi.push({ left, right });
+    }
+    if (!estremi.length) return null;
+    const margine = Number.isFinite(Number(study.margin)) ? Number(study.margin) : 0.02;
+    return {
+      ...base,
+      left: Math.max(0, Math.round(Math.min(...estremi.map((e) => e.left)) - margine * W)),
+      right: Math.min(W - 1,
+        Math.round(Math.max(...estremi.map((e) => e.right)) + margine * W)),
+    };
+  };
   const dallaPagina = (event) => {
     const r = image.getBoundingClientRect();
     const s = scala();
@@ -1559,12 +1612,15 @@ function rectStudyCard(panel, chainIniziale, ganci) {
       event.stopPropagation();
       trascino = quale;
       selezionata = quale;
+      // Se si corregge la misura, la sua conseguenza deve comparire senza un altro clic.
+      attivi.candidato = 'ampiezza';
       // Anche la corda porta la lente con se': e' l'altra cosa che si trascina qui, e
       // guardare dove si ferma il suo estremo e' esattamente il genere di cosa da
       // ingrandire.
       miraLente = { left: x - 90, top: y - 90, right: x + 90, bottom: y + 90 };
       draw();
       renderCorrezione();
+      renderCandidati();
     });
     return node;
   };
@@ -1584,11 +1640,13 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     if (selezionata !== 'y' && !orizzontale) return;
     event.preventDefault();
     bozza = bozza || segPx(m.segment);
+    attivi.candidato = 'ampiezza';
     if (selezionata === 'y') bozza.y += delta[event.key];
     else if (selezionata === 'x1') bozza.x1 += delta[event.key];
     else bozza.x2 += delta[event.key];
     draw();
     renderCorrezione();
+    renderCandidati();
   };
   window.addEventListener('keydown', tasti);
 
@@ -1677,6 +1735,11 @@ function rectStudyCard(panel, chainIniziale, ganci) {
       if (attivi.candidato === '__costruito') {
         const r = rettCostruito();
         if (r) stage.append(boxNode(r, '#d29922', true, 'costruito sugli assi'));
+      } else if (attivi.candidato === 'ampiezza') {
+        const r = rettAllaCordaPiuLarga();
+        if (r) stage.append(boxNode(r, '#d29922', true,
+          `allargato alla corda piu' larga · ${r.right - r.left}px`
+          + (bozza ? ' · anteprima' : '')));
       } else {
         const scelto = (axesData.candidates || []).find((c) => c.id === attivi.candidato);
         if (scelto) stage.append(boxNode(scelto.rect, '#d29922', true, scelto.label || scelto.id));
@@ -1826,7 +1889,13 @@ function rectStudyCard(panel, chainIniziale, ganci) {
   // La mira resta dov'era anche dopo aver mollato: dopo aver sistemato un bordo si vuole
   // continuare a guardarlo mentre lo si rifinisce coi numeri o con le frecce. Si torna alla
   // veduta d'insieme col tasto «inquadra le corde».
-  const fineTrascino = () => { trascino = null; };
+  const fineTrascino = () => {
+    if (!trascino) return;
+    trascino = null;
+    // Durante il gesto si ridisegna solo l'overlay (fluido); quando si molla si aggiornano
+    // anche coordinate e pulsante della proposta nella colonna destra.
+    renderCandidati();
+  };
   stage.addEventListener('mouseup', fineTrascino);
   stage.addEventListener('mouseleave', fineTrascino);
 
@@ -1874,7 +1943,9 @@ function rectStudyCard(panel, chainIniziale, ganci) {
             await ricarica();
           } catch (error) { toast(error.message, true); }
         }),
-        el('button', { class: 'ghost', onclick: () => { bozza = null; draw(); renderCorrezione(); } },
+        el('button', { class: 'ghost', onclick: () => {
+          bozza = null; draw(); renderCorrezione(); renderCandidati();
+        } },
           'Annulla la modifica'),
         el('span', { class: 'hint' }, misura));
       return;
@@ -1959,8 +2030,9 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     const W = c.image_size[0], H = c.image_size[1];
     const left = Math.max(0, Math.round(c.axis_x - c.half_x - margineX));
     const right = Math.min(W - 1, Math.round(c.axis_x + c.half_x + margineX));
+    const attuale = gancio.leggiRect ? gancio.leggiRect() : chain.rect;
     if (c.axis_y == null || soloOrizzontale) {
-      return { ...(chain.rect || {}), left, right };
+      return { ...(attuale || {}), left, right };
     }
     return {
       left,
@@ -2075,6 +2147,20 @@ function rectStudyCard(panel, chainIniziale, ganci) {
         slider.addEventListener('input', () => {
           scrivi(parseInt(slider.value, 10) || 0);
           valore.textContent = `${leggi()} px`;
+          // Muovere un margine equivale a chiedere «fammi vedere questo candidato»:
+          // l'utente non deve prima premere «vedi» e poi tornare allo slider.
+          attivi.candidato = '__costruito';
+          for (const altra of candidati.querySelectorAll('.proposta')) {
+            altra.classList.toggle('scelta', altra === blocco);
+          }
+          for (const bottone of candidati.querySelectorAll('.proposta .chip.on')) {
+            bottone.classList.remove('on');
+            if (bottone !== mostra && bottone.textContent === 'nascondi') {
+              bottone.textContent = 'vedi';
+            }
+          }
+          mostra.classList.add('on');
+          mostra.textContent = 'nascondi';
           aggiorna();
         });
         blocco.append(el('div', { class: 'slider-row' },
@@ -2106,7 +2192,7 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     // alla piu' larga. Il «simmetrico sull'asse del ventaglio» non serve.
     const SOLO_CORDE = ['ampiezza'];
     for (const c of axesData.candidates.filter((v) => SOLO_CORDE.includes(v.id))) {
-      const r = c.rect;
+      const r = c.id === 'ampiezza' ? (rettAllaCordaPiuLarga() || c.rect) : c.rect;
       const scelto = attivi.candidato === c.id;
       const riga = el('div', { class: 'proposta' + (scelto ? ' scelta' : '') });
       const mostraBtn = el('button', { class: 'chip' + (scelto ? ' on' : '') },
