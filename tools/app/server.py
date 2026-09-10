@@ -6157,15 +6157,50 @@ def api_scale_study_accept(project_id: str):
                     "corrections": len(valore.get("corrections") or {})})
 
 
+# L'orientamento su cui si preferisce misurare il righello. NF per primo perche' e'
+# l'immagine non ribaltata: la coordinata dello zero, nel formato legacy, e' salvata
+# «sempre come se presa in NO FLIP» (`qfileprojectfss.h`), quindi misurarla li' e' misurarla
+# senza conversioni di mezzo.
+ORIENTAMENTO_PER_RIGHELLO = ("NF", "LR", "UD", "LRUD")
+
+
+def _un_fotogramma_per_depth(project: Project) -> List[str]:
+    """Un'immagine per ogni depth, dello stesso orientamento finche' si puo'.
+
+    Il righello e' uno per depth, non uno per immagine: la macchina disegna la stessa scala
+    nei quattro orientamenti, ribaltata. Studiarli tutti e quattro vuol dire quadruplicare
+    il lavoro - del modulo e di chi rivede - per rivedere quattro volte la stessa cosa.
+    """
+    gruppi = _groups_of_images(project)
+    per_valore: Dict[float, Dict[str, List[str]]] = {}
+    for nome, valore in _depth_di_ogni_immagine(project).items():
+        per_valore.setdefault(float(valore), {}).setdefault(gruppi.get(nome) or "", []).append(nome)
+    scelti: List[str] = []
+    for valore in sorted(per_valore):
+        per_gruppo = per_valore[valore]
+        preferito = next((g for g in ORIENTAMENTO_PER_RIGHELLO if per_gruppo.get(g)), None)
+        candidati = (per_gruppo[preferito] if preferito
+                     else [n for nomi in per_gruppo.values() for n in nomi])
+        if candidati:
+            scelti.append(sorted(candidati)[0])
+    return scelti
+
+
 @app.post("/api/projects/<project_id>/scale/study/run")
 def api_scale_study_run(project_id: str):
     """Rifai lo studio del righello, con dentro le correzioni fatte finora."""
     _project(project_id)
-    quante = int(_payload().get("max_images") or 0)
-    return jsonify({"job_id": _start_job(_run_scale_study_only, project_id, quante)})
+    payload = _payload()
+    quante = int(payload.get("max_images") or 0)
+    # Di default una immagine per depth. Chi vuole gli stessi fotogrammi di prima - per
+    # confrontare il modulo con se stesso - passa `per_depth: false`.
+    per_depth = payload.get("per_depth")
+    per_depth = True if per_depth is None else bool(per_depth)
+    return jsonify({"job_id": _start_job(_run_scale_study_only, project_id, quante, per_depth)})
 
 
-def _run_scale_study_only(job_id: str, project_id: str, max_images: int) -> None:
+def _run_scale_study_only(job_id: str, project_id: str, max_images: int,
+                          per_depth: bool = True) -> None:
     try:
         project = _project(project_id)
         stadi = ((project.data.get("analysis") or {}).get("stages") or {})
@@ -6179,12 +6214,17 @@ def _run_scale_study_only(job_id: str, project_id: str, max_images: int) -> None
         correzioni_prima = sorted((project.step_value("scale_study").get("corrections") or {}))
         # Stessi fotogrammi del giro precedente, altrimenti il confronto non vuol dire niente:
         # con un insieme piu' grande i nuovi arrivati sembrerebbero comparsi dal nulla.
-        quante = max_images or max(len(prima), 14)
-        _job_update(job_id, stage=f"studio del righello su {quante} fotogrammi")
+        solo = _un_fotogramma_per_depth(project) if per_depth else None
+        if per_depth and not solo:
+            raise ValueError("per scegliere un fotogramma per depth servono l'orientamento "
+                             "e la depth: qui non ce ne sono ancora")
+        quante = max_images or (len(solo) if solo else max(len(prima), 14))
+        _job_update(job_id, stage=(f"studio del righello su {quante} fotogrammi"
+                                   + (", uno per depth" if solo else "")))
         esito = stages_mod.run_scale_study(
             context_dir=Path(contesto), python_bin=sys.executable,
             vendor=((project.data.get("analysis") or {}).get("vendor") or {}).get("vendor") or "",
-            max_images=quante, corrections=correzioni,
+            max_images=quante, corrections=correzioni, only=solo,
         )
         if esito.get("status") != "ok":
             raise ValueError(esito.get("error") or "lo studio non e' andato a buon fine")
@@ -6281,6 +6321,73 @@ def _esito_run_studio(prima: Dict[str, str], dopo: Dict[str, str],
         "accepted_total": sum(1 for v in dopo.values() if v in ("accepted", "corrected")),
         "frames": len(dopo),
     }
+
+
+def _depth_di_ogni_immagine(project: Project) -> Dict[str, float]:
+    """La depth di ogni immagine, con la solita priorita': modulo, riquadro, operatore."""
+    fuori: Dict[str, float] = {}
+    righe, _stage = _depth_module_rows(project)
+    for riga in righe:
+        if riga.get("depth_mm"):
+            fuori[riga["name"]] = float(riga["depth_mm"])
+    for nome, lettura in (project.step_value("depth_scale").get("depth_box_reads") or {}).items():
+        if lettura.get("depth_mm"):
+            fuori[nome] = float(lettura["depth_mm"])
+    fuori.update(_depth_confermate(project))
+    mie = _sue_immagini(project)
+    return {n: v for n, v in fuori.items() if not mie or n in mie}
+
+
+@app.get("/api/projects/<project_id>/scale/coverage")
+def api_scale_coverage(project_id: str):
+    """Ogni depth, in tutti gli orientamenti: quello che c'e' e quello che manca.
+
+    Il righello si costruisce una volta per depth, su un orientamento solo: gli altri tre
+    si ottengono ribaltandolo, ed e' cosi' che faceva anche il vecchio ESIBuilder (la
+    coordinata dello zero e' salvata «sempre come se presa in NO FLIP e riferita al
+    rettangolo ecografico», `qfileprojectfss.h`).
+
+    Percio' quello che conta davvero e' che la **cartella** sia completa: se una depth e'
+    stata acquisita in tre orientamenti su quattro, il ribaltamento non ha niente su cui
+    essere verificato, e l'ammanco va detto prima di mettersi a correggere i righelli.
+    """
+    project = _project(project_id)
+    gruppi = _groups_of_images(project)
+    depth = _depth_di_ogni_immagine(project)
+    presenti = [g for g in marker_refine.GROUP_ORDER if g in set(gruppi.values())]
+
+    per_valore: Dict[float, Dict[str, List[str]]] = {}
+    for nome, valore in depth.items():
+        gruppo = gruppi.get(nome)
+        if not gruppo:
+            continue
+        per_valore.setdefault(float(valore), {}).setdefault(gruppo, []).append(nome)
+
+    righe = []
+    for valore in sorted(per_valore):
+        per_gruppo = {g: sorted(n) for g, n in per_valore[valore].items()}
+        mancanti = [g for g in presenti if g not in per_gruppo]
+        righe.append({
+            "depth_mm": valore,
+            "by_group": per_gruppo,
+            "counts": {g: len(n) for g, n in per_gruppo.items()},
+            "missing": mancanti,
+            "complete": not mancanti,
+        })
+
+    # Le immagini che non entrano nel conto, e perche': senza orientamento non si sa a quale
+    # colonna appartengono, senza depth non si sa a quale riga. Sono le due cose da sistemare
+    # prima di credere alla tabella.
+    senza_gruppo = sorted(n for n in depth if not gruppi.get(n))
+    senza_depth = sorted(n for n in gruppi if n not in depth)
+    return jsonify({
+        "groups": presenti,
+        "rows": righe,
+        "incomplete": [r["depth_mm"] for r in righe if not r["complete"]],
+        "without_group": senza_gruppo,
+        "without_depth": senza_depth,
+        "depth_confirmed": bool(_depth_confermate(project)),
+    })
 
 
 @app.get("/api/projects/<project_id>/scale/study")

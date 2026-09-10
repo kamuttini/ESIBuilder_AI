@@ -6,7 +6,9 @@
 
    Quindi: si trascina direttamente (colonna, zero, fondo, o tutto il righello insieme),
    shift+clic aggiunge una tacca, clic su una tacca la toglie, doppio clic su un numero lo
-   riscrive lì dove sta. Le due finestre ingrandite su zero e fondo servono perché a
+   riscrive lì dove sta. Trascinare una tacca non sposta un segno: dice il passo, e le altre
+   tacche si rimettono in fila da sole — un righello ha le tacche equidistanti, e correggerne
+   una per una a mano sarebbe rifare a mano un conto che si sa fare. Le due finestre ingrandite su zero e fondo servono perché a
    grandezza naturale una tacca è alta due pixel e il pixel giusto non si vede.
 
    Le correzioni rientrano nel modulo alla run successiva (`--corrections`), applicate *dopo*
@@ -19,8 +21,9 @@ const COLORI_SCALA = { accepted: '#3fb950', corrected: '#40d0ff', approved: '#7e
 /* I gesti, scritti dove servono. Una riga di prosa lunga non la legge nessuno mentre corregge. */
 function legenda() {
   const voci = [
-    ['trascina', 'colonna, zero, fondo o una tacca'],
-    ['alt + trascina', 'tutto il righello insieme'],
+    ['trascina', 'colonna, zero o fondo'],
+    ['trascina una tacca', 'le altre si rimettono a quel passo'],
+    ['alt + trascina', 'la tacca da sola · dalla colonna, tutto il righello'],
     ['doppio clic', 'aggiunge una tacca'],
     ['× sulla tacca', 'la toglie'],
     ['doppio clic sul numero', 'lo riscrive'],
@@ -107,7 +110,8 @@ async function createScaleViewer(projectId) {
       strati.append(colonna);
     }
     for (const t of f.ticks || []) {
-      const tacca = el('div', { class: 'scala-tacca', title: 'trascina per spostarla' },
+      const tacca = el('div', { class: 'scala-tacca',
+        title: 'trascina: da qui il passo, e le altre tacche seguono (alt: solo questa)' },
         el('span', { class: 'scala-tacca-presa' }),
         el('button', { class: 'scala-tacca-via', title: 'togli questa tacca' }, '×'));
       tacca.style.top = `${t * s}px`;
@@ -342,12 +346,61 @@ async function createScaleViewer(projectId) {
     stato('righello indicato');
   };
 
+  /* Il passo di adesso: quello salvato, o quello che dicono le tacche che ci sono. */
+  const passoDiAdesso = (f) => {
+    if (f.pitch && f.pitch > 2) return f.pitch;
+    const t = (f.ticks || []).slice().sort((a, b) => a - b);
+    if (t.length < 2) return null;
+    return (t[t.length - 1] - t[0]) / (t.length - 1);
+  };
+  /* Quanti passi c'e' fra lo zero e questa tacca: e' il numero per cui dividere.
+
+     Si arrotonda col passo di adesso, che e' quello sbagliato che si sta correggendo - ma
+     per sbagliare il conto dovrebbe essere sbagliato di piu' di mezzo passo, e in quel caso
+     il righello non lo si aggiusta trascinando, lo si rifa'. Il numero viene scritto mentre
+     si trascina, cosi' se e' quello sbagliato si vede. */
+  const passiDalloZero = (f, y) => {
+    const passo = passoDiAdesso(f);
+    const distanza = Math.abs(y - f.y_zero);
+    if (!passo || distanza <= 0) return 0;
+    return Math.max(0, Math.round(distanza / passo));
+  };
+  /* Le tacche a passo costante dallo zero al fondo: la stessa griglia che fa il server
+     (`_griglia_tacche`), rifatta qui solo per far vedere il righello mentre si trascina. */
+  const grigliaLocale = (f, passo) => {
+    if (!passo || passo <= 2) return f.ticks || [];
+    const fondo = f.y_far != null ? f.y_far : (f.ticks || []).slice(-1)[0];
+    if (fondo == null) return f.ticks || [];
+    const verso = fondo >= f.y_zero ? 1 : -1;
+    const lunghezza = Math.abs(fondo - f.y_zero);
+    const quante = Math.round(lunghezza / passo);
+    if (quante < 1 || quante > 200) return f.ticks || [];
+    const nuove = [];
+    for (let k = 0; k <= quante; k += 1) nuove.push(Math.round(f.y_zero + verso * k * passo));
+    return nuove;
+  };
+
+  /* Trascinare una tacca vuol dire dire il passo, non spostare un segno.
+
+     Le tacche di un righello sono equidistanti: se la terza dallo zero va due pixel piu'
+     giu', ci vanno anche la quarta, la quinta e tutte le altre - di quattro, di sei, di
+     dieci. Muoverne una sola lasciava il righello storto e costava un trascinamento per
+     tacca. Adesso quella che si tiene in mano definisce il passo, e le altre si rimettono
+     in fila da se': piu' lontana e' la tacca, piu' fine e' la regolazione, perche' il passo
+     e' la distanza divisa per il numero di passi.
+
+     Con alt si muove solo quella: serve quando il righello *non* e' regolare, che e' il
+     caso raro ma esiste. */
   function trascinaTacca(event, y) {
     event.preventDefault();
     const f = corrente();
     const s = scala();
     const partenza = event.clientY;
     const originale = y;
+    const passi = event.altKey || f.y_zero == null ? 0 : passiDalloZero(f, y);
+    const insieme = passi >= 1;
+    const primaTicks = [...(f.ticks || [])];
+    const primaPitch = f.pitch;
     let attuale = y;
     let mossa = false;
     ricorda();
@@ -356,21 +409,52 @@ async function createScaleViewer(projectId) {
       if (Math.abs(dy) < 0.5 && !mossa) return;
       mossa = true;
       attuale = limita(originale + dy, f.h);
-      f.ticks = (f.ticks || [])
-        .map((t) => (Math.round(t) === Math.round(originale) ? attuale : t))
-        .sort((a, b) => a - b);
+      if (insieme) {
+        const passo = Math.abs(attuale - f.y_zero) / passi;
+        f.pitch = Math.round(passo * 10) / 10;
+        f.ticks = grigliaLocale(f, passo);
+        stato(`${passi}ª tacca dallo zero · passo ${f.pitch} px · ${f.ticks.length} tacche`);
+      } else {
+        f.ticks = (f.ticks || [])
+          .map((t) => (Math.round(t) === Math.round(originale) ? attuale : t))
+          .sort((a, b) => a - b);
+      }
       disegna(); aggiornaZoom(); renderDati();
     };
-    const molla = () => {
+    const molla = async () => {
       window.removeEventListener('pointermove', muovi);
       window.removeEventListener('pointerup', molla);
       if (!mossa) { storia.pop(); return; }
-      // Spostare una tacca, per il modulo, e' toglierla da dov'era e metterla dove sta ora.
-      salva({
-        ticks_del: [...(correzione().ticks_del || []), Math.round(originale)],
-        ticks_add: [...(correzione().ticks_add || [])
-          .filter((v) => Math.round(v) !== Math.round(originale)), Math.round(attuale)],
-      });
+      if (!insieme) {
+        // Spostare una tacca sola, per il modulo, e' toglierla da dov'era e rimetterla qui.
+        salva({
+          ticks_del: [...(correzione().ticks_del || []), Math.round(originale)],
+          ticks_add: [...(correzione().ticks_add || [])
+            .filter((v) => Math.round(v) !== Math.round(originale)), Math.round(attuale)],
+        });
+        return;
+      }
+      // Il passo lo ricalcola il server, con la stessa regola: cosi' quello salvato e'
+      // uno solo, e torna indietro anche il controllo con la depth confermata.
+      try {
+        const esito = await api(`/projects/${projectId}/scale/study/ticks`,
+          { body: { name: f.name, tick: Math.round(attuale) } });
+        f.ticks = esito.ticks;
+        f.pitch = esito.pitch;
+        f.y_far = esito.y_far;
+        f.depth_check = esito.check;
+        dati.corrections = dati.corrections || {};
+        dati.corrections[f.name] = { ...(dati.corrections[f.name] || {}),
+          ticks: esito.ticks, pitch: esito.pitch, y_far: esito.y_far };
+        stato(`${esito.ticks.length} tacche a passo ${esito.pitch} px — ${esito.from}`);
+        disegna(); aggiornaZoom(); renderPasso(); renderDati(); renderLista();
+      } catch (errore) {
+        // Il righello torna com'era: lasciarlo con le tacche nuove e la correzione vecchia
+        // farebbe credere salvato quello che non lo e'.
+        f.ticks = primaTicks; f.pitch = primaPitch;
+        disegna(); aggiornaZoom(); renderDati();
+        stato(errore.message); toast(errore.message, true);
+      }
     };
     window.addEventListener('pointermove', muovi);
     window.addEventListener('pointerup', molla);

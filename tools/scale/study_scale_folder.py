@@ -566,10 +566,17 @@ def evidence_from_pipeline(context: dict) -> Tuple[List[str], str, Dict[str, dic
 
 def study(folder: str, pattern: str, max_images: int, cap_w: int, vendor: str,
           with_depth: bool, python_bin: str, device: str,
-          corrections: str = "", pipeline_context: Optional[dict] = None) -> Optional[dict]:
+          corrections: str = "", pipeline_context: Optional[dict] = None,
+          only: Optional[Sequence[str]] = None) -> Optional[dict]:
     from_pipeline = bool(pipeline_context)
     if from_pipeline:
         paths, ctx_vendor, orient, marker, depth_info = evidence_from_pipeline(pipeline_context or {})
+        # ``only`` names the frames to study, and it is the caller that knows which ones are
+        # worth it: the ruler is built once per depth, on a single orientation, so studying
+        # all four is three quarters of the work for no extra evidence.
+        if only:
+            voluti = {os.path.basename(str(n)) for n in only}
+            paths = [p for p in paths if os.path.basename(p) in voluti]
         paths = paths[:max_images]
         vendor = vendor or ctx_vendor
         vendor_src = "dalla pipeline"
@@ -1003,6 +1010,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--corrections", default="",
                     help="JSON with the operator's corrections, fed back into this run")
     ap.add_argument("--max-images", type=int, default=14)
+    ap.add_argument("--only-file", type=Path, default=None,
+                    help="JSON list of frame file names to study, instead of the first "
+                         "--max-images of the folder.")
     ap.add_argument("--cap-width", type=int, default=1400)
     ap.add_argument("--no-depth", action="store_true", help="Skip the stage-E depth cross-check.")
     ap.add_argument("--python-bin", default=sys.executable)
@@ -1047,9 +1057,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         safe = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(folder.rstrip("/\\")))[:60]
         args.out = REPO / "artifacts" / "50_scale_study" / f"{safe or 'studio'}.html"
 
+    solo = None
+    if args.only_file is not None:
+        if not args.only_file.is_file():
+            print(f"[error] elenco dei fotogrammi non trovato: {args.only_file}")
+            return 2
+        solo = json.loads(args.only_file.read_text(encoding="utf-8"))
+        print(f"[info] studio limitato a {len(solo)} fotogrammi")
+
     data = study(args.folder, args.pattern, args.max_images, args.cap_width, args.vendor,
                  not args.no_depth, args.python_bin, args.device, args.corrections,
-                 pipeline_context=pipeline_context)
+                 pipeline_context=pipeline_context, only=solo)
     if not data:
         return 2
     if args.data_json is not None:

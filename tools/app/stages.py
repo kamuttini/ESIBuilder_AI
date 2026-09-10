@@ -354,6 +354,7 @@ def run_scale_study(
     vendor: str = "",
     max_images: int = 14,
     corrections: Optional[Path] = None,
+    only: Optional[List[str]] = None,
     timeout: float = 1800.0,
 ) -> Dict:
     """Lo studio del righello: dove sta, le tacche, lo zero, il passo, i numeri.
@@ -384,6 +385,13 @@ def run_scale_study(
     ]
     if vendor:
         cmd += ["--vendor", str(vendor)]
+    if only:
+        # I fotogrammi da studiare, scelti da chi chiama: il righello si costruisce una
+        # volta per depth, su un orientamento solo, e studiare anche gli altri tre e'
+        # lavoro in piu' che non aggiunge evidenza.
+        elenco = target / "frames_to_study.json"
+        elenco.write_text(json.dumps(list(only), ensure_ascii=False), encoding="utf-8")
+        cmd += ["--only-file", elenco.as_posix()]
     if corrections is not None and Path(corrections).is_file():
         # Le correzioni dell'operatore rientrano nel calcolo: e' cosi' che il modulo impara
         # dagli errori, e una colonna corretta su un fotogramma fa da ancora per tutta la

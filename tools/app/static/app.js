@@ -2727,6 +2727,70 @@ function panelRect(panel, step) {
   aDestra(saveRow(step.id, () => value));
 }
 
+/* --- la cartella vista dalla scala: ogni depth in tutti gli orientamenti ---------------
+   Il righello si costruisce una volta per depth, su un orientamento solo: gli altri tre si
+   ottengono ribaltandolo. Perche' il ribaltamento abbia qualcosa contro cui essere
+   verificato, pero', la depth deve essere stata acquisita in tutti e quattro - e se manca
+   va detto qui, prima di mettersi a correggere righelli. */
+async function cardCoperturaScala(host, projectId) {
+  let dati;
+  try {
+    dati = await api(`/projects/${projectId}/scale/coverage`);
+  } catch (errore) {
+    host.append(el('p', { class: 'hint' }, `copertura non leggibile: ${errore.message}`));
+    return;
+  }
+  const gruppi = dati.groups || [];
+  const righe = dati.rows || [];
+  if (!righe.length) {
+    host.append(el('p', { class: 'hint' },
+      'per la copertura servono l\'orientamento e la depth: qui non ce ne sono ancora.'));
+    return;
+  }
+  const buchi = righe.filter((r) => !r.complete);
+  const card = el('div', { class: 'card' },
+    el('div', { style: 'font-weight:600' },
+      `Le depth della cartella: ${righe.length}, in ${gruppi.length} orientamenti`));
+  if (buchi.length) {
+    card.append(el('p', { class: 'avviso' },
+      `${buchi.length === 1 ? 'Una depth non c\'e\'' : `${buchi.length} depth non ci sono`} `
+      + 'in tutti gli orientamenti: '
+      + buchi.map((r) => `${r.depth_mm} mm (manca ${r.missing.join(', ')})`).join(' · ')
+      + '. Il righello si misura su un orientamento solo, ma senza le altre acquisizioni '
+      + 'non c\'e\' modo di controllare il ribaltamento.'));
+  } else {
+    card.append(el('p', { class: 'hint' },
+      'ogni depth c\'e\' in tutti gli orientamenti.'));
+  }
+  const tabella = el('table', { class: 'lines' });
+  tabella.append(el('tr', {}, el('td', { class: 'n' }, 'mm'),
+    ...gruppi.map((g) => el('td', { class: 'name' }, g))));
+  for (const r of righe) {
+    tabella.append(el('tr', {},
+      el('td', { class: 'n' }, `${r.depth_mm}`),
+      ...gruppi.map((g) => {
+        const nomi = (r.by_group || {})[g] || [];
+        return el('td', { class: 'val', style: nomi.length ? '' : 'color:var(--warn)',
+                          title: nomi.join(', ') },
+          nomi.length ? nomi.map((n) => n.split('/').pop()).join(', ') : 'manca');
+      })));
+  }
+  card.append(tabella);
+  // Chi resta fuori dalla tabella, e perche': senza orientamento non ha colonna, senza
+  // depth non ha riga. Tacerlo farebbe leggere la tabella come se fosse tutta la cartella.
+  for (const [nomi, cosa] of [[dati.without_group || [], 'senza orientamento'],
+                              [dati.without_depth || [], 'senza depth']]) {
+    if (nomi.length) {
+      card.append(el('p', { class: 'hint', style: 'color:var(--warn)' },
+        `fuori dalla tabella, ${cosa}: ${nomi.length} immagini — `
+        + nomi.slice(0, 6).map((n) => n.split('/').pop()).join(', ')
+        + (nomi.length > 6 ? '…' : '')));
+    }
+  }
+  host.append(card);
+}
+
+
 /* --- orientamento e depth/scala: i moduli girano come sottoprocessi --- */
 function panelModuleStage(panel, step) {
   const stages = (state.project.analysis || {}).stages || {};
@@ -2736,8 +2800,10 @@ function panelModuleStage(panel, step) {
   // Lo studio del righello ha una schermata tutta sua: niente comandi dei moduli sopra,
   // ha il suo «rifai lo studio» che ci rimette dentro le correzioni.
   if (step.id === 'scale_study') {
+    const copertura = el('div', {});
     const host = el('div', {});
-    panel.append(host);
+    panel.append(copertura, host);
+    cardCoperturaScala(copertura, state.projectId);
     if (typeof createScaleViewer !== 'function') {
       // Succede con una `index.html` vecchia in cache, senza lo script della sezione: senza
       // questo controllo il pannello si fermava qui, muto.
