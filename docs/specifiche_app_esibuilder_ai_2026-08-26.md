@@ -1022,6 +1022,7 @@ L'utente indica la cartella e aspetta una volta. Dentro quel passaggio, in quest
 | scansione + dedup esatta | size + SHA-1, in parità con la pipeline | 3128 → 666 immagini |
 | (esito della dedup) | la lista delle uniche finisce in `dedup_images.json` ed è **l'unico insieme di lavoro** da qui in poi | 666 nomi |
 | rotazione | `tesseract --psm 0` su un campione, ≥2 voti e ≥60% di supporto | 0°, 12/12 voti, 0.9 s con 4 processi |
+| area data/ora + seconda dedup | OCR su 8 immagini gia' dritte; box applicato solo se ricompare nella stessa posizione su almeno 3 immagini e con supporto ≥35% | proposta visibile e correggibile nell'Import |
 | ecografo | CNN vendor `vendor_training_no_negative_v2_power`, media delle softmax | Esaote 0.65 |
 | sonda (#03) | CNN probe `probe_training_no_negative_v1` — **le classi sono gli ID sonda**, quindi il risultato è già `#03` | ID 12, conf 0.56 |
 | rettangolo (#11) | rete rect `rect_training_e40_run2` (val IoU 0.933), specializzata BK con vendor ≥ 0.70; box cartella = mediana per componente | accordo fra immagini IoU 0.9925, dispersione 3–41 px |

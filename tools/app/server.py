@@ -1836,7 +1836,14 @@ def _run_timestamp_detection(job_id: str, project_id: str, folder: str) -> None:
             return
 
         def mutate(_project_value: Project, value: Dict) -> Dict:
-            value["timestamp_detection"] = detection
+            if value.get("timestamp_box"):
+                # Una nuova lettura incerta non deve disattivare un'area gia' applicata.
+                # Si conserva la provenienza dell'area attiva e si registra solo il tentativo.
+                active = dict(value.get("timestamp_detection") or {})
+                active["last_attempt"] = detection
+                value["timestamp_detection"] = active
+            else:
+                value["timestamp_detection"] = detection
             value["timestamp_disabled"] = False
             return value
 

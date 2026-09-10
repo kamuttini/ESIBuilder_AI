@@ -73,7 +73,7 @@ Per il JavaScript non c'e' node: si controlla la sintassi con JavaScriptCore.
 
 1. deduplicazione bit a bit
 2. rotazione (OSD)
-3. deduplicazione a meno del timestamp (l'area dell'orologio si indica a mano)
+3. deduplicazione a meno del timestamp (l'area viene riconosciuta, poi resta correggibile)
 4. riconoscimento vendor — decide se usare le reti specializzate
 5. sonda
 6. abbozzo di rettangolo ecografico (mediana sui campioni) — serve solo a far girare
@@ -91,7 +91,11 @@ gira ancora dentro l'analisi iniziale, cioe' *prima* della divisione. E' il pros
 
 - **Dedup con area dell'ora**: `deduplicate(paths, timestamp_box)` confronta i **pixel** con
   un rettangolo annerito. Scarto diviso in `identiche` e `solo_timestamp`; entrambe fuori
-  dallo specchio di lavoro, elencabili nell'interfaccia.
+  dallo specchio di lavoro, elencabili nell'interfaccia. `timestamp_detection.py` legge data
+  e ora con OCR su otto immagini e applica il box solo quando ricompare nella stessa posizione
+  con supporto sufficiente. In Import l'utente vede confidenza e testi letti, puo' trascinare
+  il box, rifare il riconoscimento o disattivarlo. La correzione ricalcola sullo specchio gia'
+  ruotato e non rimischia L/T nei progetti separati.
 - **Divisione L/T**: `predict_lt_each` da' il piano immagine per immagine;
   `POST /planes` classifica, `POST /planes/correct` corregge (una o piu'), `POST /split`
   crea o **aggiorna** il progetto della T. Il T eredita codici, vendor, sonda, rettangolo e

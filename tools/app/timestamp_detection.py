@@ -62,9 +62,11 @@ def _date_spans(text: str) -> List[Tuple[int, int]]:
         # software come 27.00.10 diventino una data.
         if len(first) == 4:
             year, month, day = int(first), int(middle), int(last)
+            year_digits = len(first)
         else:
             day, month, year = int(first), int(middle), int(last)
-        if 1 <= month <= 12 and 1 <= day <= 31 and (len(str(year)) in (2, 4)):
+            year_digits = len(last)
+        if 1 <= month <= 12 and 1 <= day <= 31 and year_digits in (2, 4):
             spans.append(match.span())
     return spans
 
@@ -87,9 +89,11 @@ def _ocr_lines(path: Path) -> Tuple[Tuple[int, int], List[Dict]]:
         process = subprocess.run(
             # PSM 3 tiene data e ora sulla stessa riga anche quando sono molto in alto e
             # separate da pochi pixel (Esaote); PSM 11 tendeva a spezzare i secondi.
-            ["tesseract", str(path), "stdout", "--psm", "3", "tsv"],
+            ["tesseract", str(path.resolve()), "stdout", "--psm", "3", "tsv"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
@@ -126,26 +130,19 @@ def _ocr_lines(path: Path) -> Tuple[Tuple[int, int], List[Dict]]:
     candidates: List[Dict] = []
     for words in grouped.values():
         words.sort(key=lambda word: word["left"])
-        compact_parts: List[str] = []
-        word_spans: List[Tuple[int, int]] = []
-        offset = 0
+        relevant: List[Dict] = []
+        has_time = False
+        has_date = False
         for word in words:
             token = word["text"].replace("\\", "/")
-            compact_parts.append(token)
-            word_spans.append((offset, offset + len(token)))
-            offset += len(token)
-        compact = "".join(compact_parts)
-        time_spans = _time_spans(compact)
-        date_spans = _date_spans(compact)
-        has_time = bool(time_spans)
-        has_date = bool(date_spans)
+            word_has_time = bool(_time_spans(token))
+            word_has_date = bool(_date_spans(token))
+            if word_has_time or word_has_date:
+                relevant.append(word)
+                has_time = has_time or word_has_time
+                has_date = has_date or word_has_date
         if not (has_time or has_date):
             continue
-        matches = time_spans + date_spans
-        relevant = [
-            word for word, word_span in zip(words, word_spans)
-            if any(word_span[0] < match[1] and match[0] < word_span[1] for match in matches)
-        ]
         box = _box_union(relevant)
         box.update({
             "text": " ".join(word["text"] for word in relevant),
@@ -266,10 +263,13 @@ def detect_timestamp_box(paths: Sequence[Path], max_samples: int = MAX_SAMPLES) 
         items = cluster["items"]
         support = len(items)
         both = sum(bool(item["has_time"] and item["has_date"]) for item in items)
-        kinds = int(any(item["has_time"] for item in items)) + int(
-            any(item["has_date"] for item in items))
+        has_time = any(item["has_time"] for item in items)
+        has_date = any(item["has_date"] for item in items)
+        # Un'ora valida e' la parte che cambia fra due catture; una data isolata puo' essere
+        # anche la data di nascita del paziente. Per questo il tipo conta prima del supporto.
+        kind_rank = 2 if has_time and has_date else 1 if has_time else 0
         confidence = statistics.mean(item["ocr_confidence"] for item in items)
-        return support, kinds, both, confidence
+        return kind_rank, support, both, confidence
 
     winner = max(clusters, key=rank)
     items = winner["items"]

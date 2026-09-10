@@ -365,7 +365,9 @@ function panelImport(panel) {
   const orologio = (doppie.timestamp || []).length;
   const rilevamentoOra = value.timestamp_detection || {};
   const statoAreaOra = value.timestamp_box
-    ? (rilevamentoOra.source === 'ocr' ? 'riconosciuta automaticamente' : 'corretta dall\'utente')
+    ? (rilevamentoOra.source === 'ocr' && rilevamentoOra.reliable
+      ? 'riconosciuta automaticamente'
+      : rilevamentoOra.source === 'user' ? 'corretta dall\'utente' : 'area salvata')
     : (value.timestamp_disabled ? 'disattivata dall\'utente'
       : rilevamentoOra.box ? 'proposta da controllare' : 'non riconosciuta');
   for (const [key, val] of [
@@ -396,10 +398,13 @@ function panelImport(panel) {
   if (anteprima) {
     panel.append(el('h3', {}, 'Data e ora escluse dal confronto'));
     const descrizioneOra = el('p', { class: 'hint' });
-    if (value.timestamp_box && rilevamentoOra.source === 'ocr') {
-      descrizioneOra.textContent = 'area riconosciuta automaticamente e gia\' usata nella '
-        + 'deduplicazione. Controlla il riquadro rosa: se comprende testo sbagliato, '
-        + 'trascinalo attorno alla sola data/ora e applica la correzione.';
+    if (value.timestamp_box) {
+      descrizioneOra.textContent = rilevamentoOra.source === 'ocr' && rilevamentoOra.reliable
+        ? 'area riconosciuta automaticamente e gia\' usata nella deduplicazione. Controlla '
+          + 'il riquadro rosa: se comprende testo sbagliato, trascinalo attorno alla sola '
+          + 'data/ora e applica la correzione.'
+        : 'questa e\' l\'area scelta dall\'utente e gia\' usata nella deduplicazione. Puoi '
+          + 'ancora trascinarla e applicare una nuova correzione.';
     } else if (rilevamentoOra.box && !value.timestamp_box) {
       descrizioneOra.textContent = 'il sistema ha trovato una possibile data/ora ma non ha '
         + 'abbastanza conferme per usarla da solo. Controlla il riquadro rosa, correggilo se '
@@ -413,7 +418,8 @@ function panelImport(panel) {
     }
     panel.append(descrizioneOra);
     if (rilevamentoOra.reason) {
-      const percentuale = Number.isFinite(Number(rilevamentoOra.confidence))
+      const percentuale = rilevamentoOra.source === 'ocr'
+        && Number.isFinite(Number(rilevamentoOra.confidence))
         ? ` · confidenza ${Math.round(Number(rilevamentoOra.confidence) * 100)}%` : '';
       const letture = (rilevamentoOra.texts || []).slice(0, 3).join(' · ');
       panel.append(el('p', { class: 'hint timestamp-detection' },
@@ -457,7 +463,7 @@ function panelImport(panel) {
       } catch (errore) { toast(errore.message, true); statoOra.textContent = errore.message; }
       finally { applica.disabled = false; }
     });
-    const riconosci = el('button', { class: 'ghost' }, rilevamentoOra.box
+    const riconosci = el('button', { class: 'ghost' }, rilevamentoOra.reason
       ? 'Riconosci di nuovo' : 'Riconosci automaticamente');
     riconosci.addEventListener('click', async () => {
       riconosci.disabled = true;

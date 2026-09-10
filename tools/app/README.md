@@ -21,6 +21,7 @@ Poi apri `http://127.0.0.1:8800/`. I progetti finiscono in `artifacts/80_app_pro
 | `project.py` | `project.json`, registro degli 11 step, grafo delle dipendenze e invalidazione |
 | `importer.py` | scansione cartella, dedup esatta, metadati video dai nomi file, proposta di resize |
 | `rotation.py` | rotazione OSD con tesseract (>=2 voti, >=60% di supporto), 4 processi in parallelo |
+| `timestamp_detection.py` | proposta OCR dell'area data/ora su 8 immagini, con supporto spaziale e confidenza |
 | `anagrafica.py` | lettura/scrittura di `encoding_struct*.xlsx`: ID da modelli, candidati per sonda, nuova riga con backup |
 | `inference.py` | vendor, sonda, rettangolo (routing per vendor), template #13, piano L/T e su/giu dai checkpoint della pipeline attiva |
 | `stages.py` | marker di orientamento, depth e scala come sottoprocessi con `pipeline_context.json`, piu' i parser dalle righe del modulo al valore dello step |
@@ -53,6 +54,9 @@ disegnato; stato per step con invalidazione mirata; writer `.fss` con validazion
 La catena lavora in due tempi: l'import si ferma prima dei moduli avanzati; dopo aver controllato
 e, se necessario, separato L e T, il comando del singolo progetto lancia orientamento, depth e
 scala. Il server impedisce di lanciarli su una cartella biplana non classificata o ancora mista.
+Durante l'import data e ora vengono cercate automaticamente dopo la rotazione: una proposta
+affidabile entra subito nella deduplicazione, ma il riquadro rosa resta visibile e correggibile.
+La ricerca puo' essere rilanciata o disattivata esplicitamente per il singolo progetto.
 
 `#14 RECT_NAME_PROBE` resta vuoto: il resolver storico legge i `.fss` legacy indicati in
 `references/.../manifest_rect_echo.csv`, che puntano a `ESIBuilder_AI/Dataset/` — cartella oggi
