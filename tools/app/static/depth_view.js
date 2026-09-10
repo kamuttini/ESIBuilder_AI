@@ -19,6 +19,7 @@ async function createDepthViewer(projectId, sampleSize) {
   const byName = new Map(rows.map((r) => [r.name, r]));
   let names = rows.map((r) => r.name);
   let index = 0;
+  let passaggioInCorso = false;
   let filtro = '';
   /* La label stabile si puo' propagare a tutta la cartella. Sulla scala il numero cambia
      posto ad ogni immagine, ma puo' comunque essere indicato e corretto nel suo frame. */
@@ -517,7 +518,24 @@ async function createDepthViewer(projectId, sampleSize) {
     renderRiquadro();
   };
 
-  const passo = (delta) => {
+  const passo = async (delta) => {
+    if (passaggioInCorso) return;
+    // La freccia avanti e' il gesto della review: se il valore e' gia' presente e non e'
+    // stato corretto, significa «va bene cosi'». La freccia indietro resta libera, per
+    // poter confrontare due immagini senza segnare nulla per sbaglio.
+    const attuale = byName.get(names[index]) || {};
+    if (delta > 0 && attuale.depth_mm != null && !attuale.reviewed && !attuale.corrected) {
+      passaggioInCorso = true;
+      try {
+        await api(`/projects/${projectId}/depth/reviewed`, {
+          body: { name: names[index], depth_mm: attuale.depth_mm },
+        });
+        aggiornaDopoScrittura(await api(`/projects/${projectId}/depth`));
+      } catch (errore) {
+        toast(errore.message, true);
+        return;
+      } finally { passaggioInCorso = false; }
+    }
     const lista = visibili();
     if (!lista.length) return;
     const corrente = lista.indexOf(names[index]);
