@@ -647,6 +647,9 @@ async function createDepthViewer(projectId, sampleSize) {
     data.coherence = fresca.coherence;
     data.images_total = fresca.images_total;
     conteggi = { by_mode: fresca.by_mode || {}, by_status: fresca.by_status || {} };
+    // Anche i valori: sono le scorciatoie della correzione, e dopo un giro nuovo quelli di
+    // prima non ci sono piu'.
+    data.values_mm = fresca.values_mm || {};
     rifaiChips();
     renderCopertura();
     renderCoerenza();
@@ -761,49 +764,100 @@ async function createDepthViewer(projectId, sampleSize) {
     }
   };
 
-  /* La correzione qui e' un numero, non un riquadro: la depth sbagliata si riscrive. */
-  const correzione = el('div', { class: 'row' });
+  /* La correzione qui e' un numero, non un riquadro: la depth sbagliata si riscrive.
+
+     Correggerne una voleva dire: scrivi il numero, clic su «Salva», clic su «Si', applica»,
+     clic sulla freccia per la prossima. Per quaranta immagini sono centosessanta clic, e
+     dopo venti si sbaglia. Adesso il campo salva con Invio e passa da solo alla prossima, e
+     i valori gia' visti nella cartella sono bottoni: un clic e la depth e' quella.
+
+     La conferma in due tempi resta dov'e' pericolosa - tutto quello che tocca piu' di
+     un'immagine. Una correzione singola si vede subito e si disfa con un bottone. */
+  const correzione = el('div', {});
+  const salvaUna = async (valore, avanti) => {
+    if (Number.isNaN(valore)) { toast('scrivi prima la depth in millimetri', true); return; }
+    try {
+      await api(`/projects/${projectId}/depth/correct`,
+        { body: { name: names[index], depth_mm: valore } });
+      const fresca = await api(`/projects/${projectId}/depth`);
+      for (const riga of fresca.rows || []) byName.set(riga.name, riga);
+      conteggi = { by_mode: fresca.by_mode || {}, by_status: fresca.by_status || {} };
+      data.values_mm = fresca.values_mm || data.values_mm;
+      data.coherence = fresca.coherence;
+      rifaiChips();
+      renderCoerenza();
+      toast(`${valore} mm`);
+      if (avanti) passo(1); else mostra();
+    } catch (error) { toast(error.message, true); }
+  };
   const renderCorrezione = () => {
     correzione.innerHTML = '';
     const r = byName.get(names[index]);
     if (!r) return;
+    const nuova = r.depth_mm == null;
     const campo = el('input', {
-      type: 'number', step: '0.5', style: 'width:110px',
+      type: 'number', step: '0.5', style: 'width:96px',
       value: r.depth_mm != null ? String(r.depth_mm) : '',
     });
-    const nuova = r.depth_mm == null;
-    correzione.append(
+    // Invio salva e va avanti: e' il gesto di chi sta scorrendo la cartella e correggendo.
+    campo.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      salvaUna(parseFloat(campo.value), true);
+    });
+    const salva = el('button', {}, nuova ? 'Indica e vai avanti' : 'Salva e vai avanti');
+    salva.addEventListener('click', () => salvaUna(parseFloat(campo.value), true));
+    correzione.append(el('div', { class: 'row' },
       el('span', { class: 'hint' }, nuova ? 'depth di questa immagine (mm)' : 'depth corretta (mm)'),
-      campo);
+      campo, salva,
+      el('span', { class: 'hint' }, 'Invio salva e passa alla prossima')));
+
     // Le depth gia' viste nella cartella: quasi sempre quella giusta e' una di queste, e
-    // sceglierla da un elenco e' piu' svelto e piu' sicuro che riscriverla.
-    const noti = Object.keys(data.values_mm || {})
-      .map(Number).filter((v) => !Number.isNaN(v)).sort((a, b) => a - b);
-    if (nuova && noti.length) {
-      const scorciatoie = el('span', { class: 'row', style: 'gap:4px' },
+    // un bottone e' piu' svelto e piu' sicuro che riscrivere il numero. Ci sono sempre,
+    // anche quando una depth c'e' gia': e' correggendo che servono di piu'.
+    // Le piu' usate, non le piu' piccole: su Esaote i 46 mm sono duecentocinquanta
+    // immagini e i 2 mm sono un errore di un giro vecchio, e l'ordine per valore metteva
+    // l'errore per primo e i 120 fuori dall'elenco.
+    const noti = Object.entries(data.values_mm || {})
+      .map(([v, quante]) => [Number(v), quante])
+      .filter(([v]) => !Number.isNaN(v))
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .sort((a, b) => a[0] - b[0]);
+    if (noti.length) {
+      const scorciatoie = el('div', { class: 'row', style: 'gap:4px; margin-top:4px' },
         el('span', { class: 'hint' }, 'gia\' nella cartella:'));
-      for (const v of noti.slice(0, 8)) {
-        const b = el('button', { class: 'ghost sq2' }, `${v}`);
-        b.addEventListener('click', () => { campo.value = String(v); campo.dispatchEvent(new Event('input')); });
+      for (const [v, quante] of noti) {
+        const b = el('button', { class: 'ghost sq2' + (v === r.depth_mm ? ' on' : ''),
+                                 title: `${quante} immagini` }, `${v}`);
+        b.addEventListener('click', () => salvaUna(v, true));
         scorciatoie.append(b);
       }
       correzione.append(scorciatoie);
     }
-    correzione.append(confermaInDueTempi(nuova ? 'Indica questa depth' : 'Salva la depth',
-      'vale solo per questa immagine.',
-      async () => {
-        try {
-          await api(`/projects/${projectId}/depth/correct`,
-            { body: { name: names[index], depth_mm: parseFloat(campo.value) } });
-          const fresca = await api(`/projects/${projectId}/depth`);
-          for (const riga of fresca.rows || []) byName.set(riga.name, riga);
-          toast('depth corretta');
-          mostra();
-        } catch (error) { toast(error.message, true); }
-      }));
-    // In blocco sulle immagini che il modulo non ha esaminato: quando la depth e' la
-    // stessa (ed e' il caso normale di una cartella) riscriverla una per una e' solo fatica.
-    const senza = visibili().filter((n) => (byName.get(n) || {}).depth_mm == null);
+
+    if (r.corrected) {
+      correzione.append(el('div', { class: 'row', style: 'margin-top:4px' },
+        (() => {
+          const b = el('button', { class: 'ghost sq2' }, 'Torna al valore del modulo');
+          b.addEventListener('click', async () => {
+            try {
+              await api(`/projects/${projectId}/depth/correct`,
+                { body: { name: names[index], reset: true } });
+              const fresca = await api(`/projects/${projectId}/depth`);
+              for (const riga of fresca.rows || []) byName.set(riga.name, riga);
+              toast('correzione tolta');
+              mostra();
+            } catch (error) { toast(error.message, true); }
+          });
+          return b;
+        })()));
+    }
+
+    // In blocco: quando la depth e' la stessa per tutta l'acquisizione - ed e' il caso
+    // normale - riscriverla una per una e' solo fatica. Qui il doppio clic serve.
+    const elencate = visibili();
+    const senza = elencate.filter((n) => (byName.get(n) || {}).depth_mm == null);
     if (senza.length > (nuova ? 1 : 0)) {
       const altre = nuova ? senza.length - 1 : senza.length;
       correzione.append(confermaInDueTempi(
@@ -811,30 +865,45 @@ async function createDepthViewer(projectId, sampleSize) {
               : `Assegna questo valore alle ${altre} senza depth`,
         `lo stesso valore viene scritto sulle ${senza.length} immagini senza depth fra `
         + 'quelle elencate ora. Restano correzioni tue: si tolgono una per una.',
-        async () => {
-          const valore = parseFloat(campo.value);
-          if (Number.isNaN(valore)) { toast('scrivi prima la depth in millimetri', true); return; }
-          try {
-            const esito = await api(`/projects/${projectId}/depth/correct`,
-              { body: { names: senza, depth_mm: valore } });
-            toast(`${valore} mm su ${esito.applied} immagini`);
-            await rileggiTutto();
-          } catch (error) { toast(error.message, true); }
-        }));
+        () => correggiTante(parseFloat(campo.value), senza)));
     }
-    if (r.corrected) {
-      correzione.append(confermaInDueTempi('Torna al valore del modulo', 'la correzione viene tolta.',
+    // Le correzioni di un giro vecchio restano sopra le letture nuove: dopo aver rifatto la
+    // depth sono loro a far vedere ancora i numeri sbagliati, e toglierle una per una
+    // quando sono settantasei non e' un lavoro che si fa.
+    const corrette = (conteggi.by_status || {}).corrected || 0;
+    if (corrette) {
+      const quali = names.filter((n) => (byName.get(n) || {}).corrected);
+      correzione.append(confermaInDueTempi(
+        `Togli le ${quali.length} correzioni a mano`,
+        'le depth tornano a quelle lette dal modulo, su tutta la cartella. Serve dopo aver '
+        + 'rifatto la depth: le correzioni di prima coprono le letture nuove.',
         async () => {
           try {
             await api(`/projects/${projectId}/depth/correct`,
-              { body: { name: names[index], reset: true } });
-            const fresca = await api(`/projects/${projectId}/depth`);
-            for (const riga of fresca.rows || []) byName.set(riga.name, riga);
-            toast('correzione tolta');
-            mostra();
+              { body: { names: quali, reset: true } });
+            toast(`${quali.length} correzioni tolte`);
+            await rileggiTutto();
+            if (vista !== 'singola') renderRiepilogo();
           } catch (error) { toast(error.message, true); }
         }));
     }
+    if (elencate.length > 1) {
+      correzione.append(confermaInDueTempi(
+        `Assegna a tutte le ${elencate.length} elencate ora`,
+        `${elencate.length} immagini prendono questo valore, anche quelle che una depth ce `
+        + 'l\'hanno gia\'. Con un filtro o una ricerca per nome attivi, sono quelle che vedi.',
+        () => correggiTante(parseFloat(campo.value), elencate)));
+    }
+  };
+  const correggiTante = async (valore, quali) => {
+    if (Number.isNaN(valore)) { toast('scrivi prima la depth in millimetri', true); return; }
+    try {
+      const esito = await api(`/projects/${projectId}/depth/correct`,
+        { body: { names: quali, depth_mm: valore } });
+      toast(`${valore} mm su ${esito.applied} immagini`);
+      await rileggiTutto();
+      if (vista !== 'singola') renderRiepilogo();
+    } catch (error) { toast(error.message, true); }
   };
 
   // --- filtri: per metodo e per stato, con il conto
@@ -911,6 +980,17 @@ async function createDepthViewer(projectId, sampleSize) {
       const azioni = el('div', { class: 'row' },
         el('button', { class: 'ghost sq2' }, aperta ? 'nascondi le altre' : `vedi tutte (${elenco.length})`),
         el('button', { class: 'ghost sq2' }, 'apri questa immagine'));
+      /* Un valore sbagliato qui non e' sbagliato su un'immagine: lo e' su tutte quelle
+         della scheda - su Esaote duecentocinquantatre in una volta. Correggerle una per una
+         dalla vista singola era il lavoro di un pomeriggio. */
+      const campoValore = el('input', { type: 'number', step: '0.5', style: 'width:84px',
+                                        value: String(valore) });
+      const correggiGruppo = el('div', { class: 'row', style: 'margin-top:4px' },
+        el('span', { class: 'hint' }, 'valgono invece'), campoValore,
+        confermaInDueTempi(`Correggi tutte e ${elenco.length}`,
+          `le ${elenco.length} immagini che adesso dicono ${valore} mm prendono il valore `
+          + 'scritto qui. Restano correzioni tue: si tolgono una per una.',
+          () => correggiTante(parseFloat(campoValore.value), elenco.map((r) => r.name))));
       azioni.children[0].addEventListener('click', () => {
         if (aperta) espansi.delete(valore); else espansi.add(valore);
         renderRiepilogo();
@@ -920,7 +1000,7 @@ async function createDepthViewer(projectId, sampleSize) {
         vista = 'singola';
         applicaVista();
       });
-      scheda.append(azioni);
+      scheda.append(azioni, correggiGruppo);
       if (aperta) {
         const tutte = el('div', { class: 'depth-strip' });
         for (const r of elenco.slice(0, 120)) {

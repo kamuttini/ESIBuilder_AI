@@ -451,6 +451,8 @@ button.chip.on {
   border-color: var(--accent);
 }
 button.chip:disabled { opacity: 0.35; }
+/* Il valore che questa immagine ha adesso, fra le scorciatoie della correzione. */
+button.ghost.sq2.on { border-color: var(--accent); color: var(--text); }
 .ov-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
 .ov-nav button { padding: 3px 9px; font-size: 12px; }
 .ov-nav button.sq { padding: 3px 10px; font-weight: 700; }
