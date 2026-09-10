@@ -527,10 +527,15 @@ async function createDepthViewer(projectId, sampleSize) {
     if (delta > 0 && attuale.depth_mm != null && !attuale.reviewed && !attuale.corrected) {
       passaggioInCorso = true;
       try {
+        const raro = !valoriScorciatoia().some(([v]) => Math.abs(v - attuale.depth_mm) < 1e-6);
         await api(`/projects/${projectId}/depth/reviewed`, {
           body: { name: names[index], depth_mm: attuale.depth_mm },
         });
         aggiornaDopoScrittura(await api(`/projects/${projectId}/depth`));
+        // Sui valori soliti la freccia resta muta: scorrendo quaranta immagini un avviso
+        // per ognuna e' rumore. Su un valore che non era fra le scorciatoie invece si dice,
+        // perche' e' proprio quello di cui si dubita che sia stato registrato.
+        if (raro) toast(`${attuale.depth_mm} mm confermata`);
       } catch (errore) {
         toast(errore.message, true);
         return;
@@ -1015,7 +1020,10 @@ async function createDepthViewer(projectId, sampleSize) {
     for (const v of usati) insieme.set(v, insieme.get(v) || 0);
     for (const nome of names) {
       const r = byName.get(nome);
-      if (r && r.corrected && r.depth_mm != null) {
+      // Confermata vale quanto corretta: passando avanti con la freccia su una depth che
+      // il modulo aveva gia' scritto le ho messo la firma, e quel valore serve subito dopo
+      // sulle immagini accanto anche se nella cartella compare una volta sola.
+      if (r && (r.corrected || r.reviewed) && r.depth_mm != null) {
         insieme.set(r.depth_mm, insieme.get(r.depth_mm) || 0);
       }
     }
@@ -1061,7 +1069,7 @@ async function createDepthViewer(projectId, sampleSize) {
         el('span', { class: 'hint' }, 'gia\' nella cartella:'));
       for (const [v, quante] of noti) {
         const b = el('button', { class: 'ghost sq2' + (v === r.depth_mm ? ' on' : ''),
-                                 title: quante ? `${quante} immagini` : 'scritta da te' }, `${v}`);
+                                 title: quante ? `${quante} immagini` : 'valore che hai indicato tu' }, `${v}`);
         b.addEventListener('click', () => salvaUna(v, true));
         scorciatoie.append(b);
       }
