@@ -456,6 +456,9 @@ button.chip.on {
   border-color: var(--accent);
 }
 button.chip:disabled { opacity: 0.35; }
+/* Una scheda buttata via resta in pagina - serve per rimetterla - ma non deve avere lo
+   stesso peso delle altre. */
+.depth-card.spenta { opacity: 0.45; }
 /* Il riquadro mentre lo si sta tirando: tratteggiato, cosi' non si confonde con quello
    trovato dal modulo, che e' pieno. */
 .editor-box.tracciante {

@@ -2214,6 +2214,10 @@ function panelRect(panel, step) {
   const analysis = state.project.analysis || {};
   const rect = analysis.rect || {};
   const imported = (state.project.steps.import || {}).value || {};
+  const studioSegmenti = ((stored.study || {}).segments) || null;
+  const passaggiRettangolo = ((stored.chain || {}).passes) || {};
+  const studioAvanzato = Boolean(
+    studioSegmenti || ((passaggiRettangolo.specularita || {}).per_group));
   analysisRow(panel, 'la rete propone un rettangolo per tutta la cartella, tu confermi');
   panel.append(el('p', { class: 'hint' },
     'un solo rettangolo per tutta la cartella: e\' la geometria da cui dipendono ' +
@@ -2243,6 +2247,22 @@ function panelRect(panel, step) {
     colonnaDestra: null,
     inAttesa: [],
   };
+  /* Prima dell'orientamento non esistono ancora corde ne' gruppi, quindi
+     `rectStudyCard` non puo' costruire le sue due colonne. I comandi non devono restare
+     sospesi in `inAttesa`: in questa fase vivono nella scheda dell'abbozzo, insieme
+     all'immagine su cui lo si ritocca. Dopo i giri di affinamento tornano invece nella
+     colonna destra dello studio, come prima. */
+  let bozzaHost = null;
+  if (!studioAvanzato) {
+    bozzaHost = el('div', { class: 'card' },
+      el('h3', { style: 'margin-top:0' }, 'Abbozzo del rettangolo, gia\' modificabile'),
+      el('p', { class: 'hint' },
+        'Questo e\' il primo giro trovato dalla rete. Sistemalo ora se taglia il ventaglio: '
+        + 'orientamento, depth e scala useranno il rettangolo che salvi. I giri successivi '
+        + 'aggiungeranno qui le loro misure e proporranno affinamenti da confermare.'));
+    panel.append(bozzaHost);
+    ganciRect.colonnaDestra = bozzaHost;
+  }
   const aDestra = (nodo) => {
     if (ganciRect.colonnaDestra) ganciRect.colonnaDestra.append(nodo);
     else ganciRect.inAttesa.push(nodo);
@@ -2330,16 +2350,22 @@ function panelRect(panel, step) {
       projectId: state.projectId,
       imageName: value.preview_image,
       onChange: applyBoxes,
-      // Niente immagine qui: il rettangolo si trascina su quella dello studio, sopra, dove
-      // ci sono anche le corde. Restano i numeri e i margini, che un'immagine non la vogliono.
-      soloControlli: true,
+      // Finche' c'e' soltanto l'abbozzo questa e' l'unica immagine della sezione. Quando
+      // arrivano corde e orientamenti, l'immagine passa allo studio sopra e qui restano i
+      // soli controlli: mai due copie dello stesso editor nella stessa fase.
+      soloControlli: studioAvanzato,
     });
     editorRef = editor;
     aDestra(editor.root);
-    // La lente sta con l'immagine, sopra: qui non c'e' piu' un'immagine a cui riferirsi,
-    // e un secondo tasto che apre la stessa finestra su un contesto diverso confonderebbe.
-    aDestra(el('div', { class: 'row' },
-      el('button', { class: 'ghost', onclick: () => openFullscreen() }, 'Schermo intero')));
+    const strumentiImmagine = [
+      el('button', { class: 'ghost', onclick: () => openFullscreen() }, 'Schermo intero'),
+    ];
+    if (!studioAvanzato) {
+      strumentiImmagine.unshift(Lente.bottone(editor.contestoLente));
+      strumentiImmagine.push(el('span', { class: 'hint' },
+        'trascina i bordi qui; la lente segue lo stesso rettangolo'));
+    }
+    aDestra(el('div', { class: 'row' }, ...strumentiImmagine));
     aDestra(el('div', { class: 'row' },
       el('button', { onclick: saveBoxes }, 'Salva il rettangolo'),
       dirtyBadge,

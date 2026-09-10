@@ -2179,6 +2179,12 @@ def api_orientation(project_id: str):
     # girato, e dopo uno sdoppiamento elencano ancora quelle dell'altro piano.
     mie = _sue_immagini(project)
     per_image = [r for r in by_name.values() if not mie or r.get("name") in mie]
+    # Le detection rifiutate restano visibili - servono per poterle rimettere - ma marcate:
+    # non fanno envelope e non contano come marker trovato.
+    rifiutate = set(stored.get("refused") or {})
+    for row in per_image:
+        if row.get("name") in rifiutate:
+            row["refused"] = True
 
     # The runner skips these on purpose: forbidden/freeze screens carry no orientation marker.
     marker_excluded = r"Thumbs\.db|Software Release|System Info|proibite"
@@ -2193,6 +2199,7 @@ def api_orientation(project_id: str):
                 )
             ],
             "excluded_pattern": marker_excluded,
+            "refused": sorted(rifiutate),
             # Il ritaglio della cartella e' quello che finira' in DB_echo: e' il protagonista.
             "folder_template": {
                 **{k: v for k, v in folder_template.items() if k != "path"},
@@ -3024,9 +3031,22 @@ def _envelope_contributors(project: Project, value: Dict) -> Dict[str, List[Dict
             for row in _marker_rows(stage)
             if row.get("box") and str(row.get("status") or "").lower() == "ok"
         ]
+        # Le stesse detection che il modulo scarta perche' cadono fuori dal rettangolo. Il
+        # filtro sta anche qui, e non solo dentro alla run, perche' gli envelope si rifanno
+        # da questa funzione ogni volta che arriva una correzione: senza, una cartella gia'
+        # analizzata continuerebbe a portarsi dietro il rumore fino al prossimo «Rifai».
+        rettangolo = _final_rect(project)
+        if rettangolo:
+            per_nome, _fuori = _marker_nel_rettangolo(
+                {r["name"]: r for r in rows}, rettangolo)
+            rows = list(per_nome.values())
     else:
         rows = []
     per_name = {row["name"]: row for row in rows}
+    # Le detection che lei ha guardato e rifiutate: non sono il marker, e finche' restano
+    # dentro tengono aperto un envelope - a volte un gruppo intero - che non esiste.
+    for nome in (value.get("refused") or {}):
+        per_name.pop(nome, None)
     for name, fixed in (value.get("corrections") or {}).items():
         if fixed.get("box") and fixed.get("group"):
             per_name[name] = {
@@ -3451,6 +3471,56 @@ def api_orientation_reprocess(project_id: str):
     """Rielabora ora la cartella con le correzioni che ci sono, senza toccarne altre."""
     _project(project_id)
     return jsonify(_schedule_consolidation(project_id))
+
+
+@app.post("/api/projects/<project_id>/orientation/refuse")
+def api_orientation_refuse(project_id: str):
+    """«Questo non e' il marker»: la detection si butta, l'immagine resta senza.
+
+    Correggere un marker vale per una immagine. Ma un glifo sbagliato non sbaglia una volta
+    sola: su prova 5 il ritaglio si ritrovava su sette immagini nello stesso punto del
+    pannello di destra, sempre a 0.62, e quelle sette inventavano un gruppo LR che nella
+    cartella non c'e'. Correggerle una per una non le toglieva di mezzo: l'envelope e' la
+    loro unione, e finche' ci sono dentro il gruppo resta.
+
+    Qui si buttano tutte insieme. Non si cancella niente su disco: la riga del modulo resta
+    dov'e', semplicemente non fa piu' envelope.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    nomi = [str(n).strip() for n in (payload.get("names") or []) if str(n).strip()]
+    if not nomi:
+        uno = (payload.get("name") or "").strip()
+        nomi = [uno] if uno else []
+    if not nomi:
+        return jsonify({"error": "manca l'immagine"}), 400
+    annulla = bool(payload.get("reset"))
+
+    def mutate(project: Project, value: Dict) -> Dict:
+        rifiutate = dict(value.get("refused") or {})
+        adesso = datetime.now().isoformat(timespec="seconds")
+        for nome in nomi:
+            if annulla:
+                rifiutate.pop(nome, None)
+            else:
+                rifiutate[nome] = {"ts": adesso, "note": payload.get("note", "")}
+        value["refused"] = rifiutate
+        rebuilt = _rebuild_orientation(project, value)
+        value = _fill_blocks(value, rebuilt["groups"])
+        return value
+
+    value = _write_orientation(project_id, mutate)
+    return jsonify(
+        {
+            "saved": True,
+            "refused": len(value.get("refused") or {}),
+            "groups": {
+                g: {k: b.get(k) for k in ("top", "left", "bottom", "right", "markers")}
+                for g, b in (value.get("groups") or {}).items()
+            },
+            "missing_groups": value.get("missing_groups") or [],
+        }
+    )
 
 
 @app.post("/api/projects/<project_id>/orientation/correct")

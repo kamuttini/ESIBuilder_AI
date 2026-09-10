@@ -69,6 +69,9 @@ const Lente = (() => {
   /* Il riquadro su cui si sta lavorando si trascina anche da qui: e' il posto dove si vede
      davvero dove cade il bordo, quindi e' il posto dove ha senso spostarlo. */
   .riq.viva { pointer-events: auto; cursor: move; }
+  /* Quello che si sta tirando adesso: tratteggiato, per non confonderlo con i riquadri
+     che ci sono gia'. */
+  .riq.disegno { border: 2px dashed #58a6ff; background: rgba(88,166,255,.12); }
   .man { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px;
          border: 2px solid #0d1117; border-radius: 3px; background: #3fb950;
          pointer-events: auto; }
@@ -157,10 +160,66 @@ lavorando, oppure torna indietro.</div>
      guardato il sinistro bisognava passare dalla pagina: la lente era una finestra su un
      punto solo. La vista spostata a mano resta dov'e' finche' non si sceglie un altro
      bersaglio - se no tornerebbe indietro al primo ridisegno. */
+  /* Disegnare un rettangolo qui dentro. Un marker di orientamento e' quindici pixel: sulla
+     pagina principale, dove l'immagine sta in mezzo schermo, indicarlo vuol dire tirare un
+     rettangolo di sette pixel e sbagliarlo. Qui e' ingrandito dieci volte, ed e' qui che
+     va disegnato. Chi apre la lente lo abilita passando `onDraw`. */
+  const disegnaNuovo = (scena, ev) => {
+    const d = win.document;
+    const img = d.getElementById('crop');
+    const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
+    const rettangolo = img.getBoundingClientRect();
+    const nativo = (e) => ({
+      x: finestra[0] + (e.clientX - rettangolo.left) / (s || 1),
+      y: finestra[1] + (e.clientY - rettangolo.top) / (s || 1),
+    });
+    const partenza = nativo(ev);
+    let ultimo = partenza;
+    const nodo = d.createElement('div');
+    nodo.className = 'riq disegno';
+    scena.append(nodo);
+    const posa = () => {
+      const x0 = Math.min(partenza.x, ultimo.x);
+      const y0 = Math.min(partenza.y, ultimo.y);
+      nodo.style.left = `${(x0 - finestra[0]) * s}px`;
+      nodo.style.top = `${(y0 - finestra[1]) * s}px`;
+      nodo.style.width = `${Math.abs(ultimo.x - partenza.x) * s}px`;
+      nodo.style.height = `${Math.abs(ultimo.y - partenza.y) * s}px`;
+    };
+    posa();
+    // La presa del puntatore e' un di piu': se il browser la rifiuta si disegna lo stesso.
+    try { scena.setPointerCapture(ev.pointerId); } catch (_) { /* pazienza */ }
+    const muovi = (e) => { ultimo = nativo(e); posa(); };
+    const molla = () => {
+      scena.removeEventListener('pointermove', muovi);
+      scena.removeEventListener('pointerup', molla);
+      scena.removeEventListener('pointercancel', molla);
+      nodo.remove();
+      const largo = Math.abs(ultimo.x - partenza.x);
+      const alto = Math.abs(ultimo.y - partenza.y);
+      if (largo < 3 || alto < 3 || !ctx || !ctx.onDraw) return;
+      ctx.onDraw({
+        left: Math.round(Math.min(partenza.x, ultimo.x)),
+        right: Math.round(Math.max(partenza.x, ultimo.x)),
+        top: Math.round(Math.min(partenza.y, ultimo.y)),
+        bottom: Math.round(Math.max(partenza.y, ultimo.y)),
+      });
+    };
+    scena.addEventListener('pointermove', muovi);
+    scena.addEventListener('pointerup', molla);
+    scena.addEventListener('pointercancel', molla);
+  };
+
   const attaccaSpostamento = (scena) => {
     scena.addEventListener('pointerdown', (ev) => {
       if (ev.target !== scena && ev.target.id !== 'crop') return;
       ev.preventDefault();
+      // Quando c'e' qualcosa da disegnare, il trascinamento disegna; con alt premuto
+      // sposta la vista, che e' il gesto piu' raro dei due mentre si indica un marker.
+      if (ctx && ctx.onDraw && ev.button === 0 && !ev.altKey) {
+        disegnaNuovo(scena, ev);
+        return;
+      }
       const img = win.document.getElementById('crop');
       const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
       const da = { x: ev.clientX, y: ev.clientY };
@@ -595,7 +654,8 @@ lavorando, oppure torna indietro.</div>
         ? (latoScelto
           ? ` · frecce: ${NOMI_LATO[latoScelto] || latoScelto} (shift = 10 px)`
           : ' · trascina un lato per muoverlo, poi le frecce')
-        : '');
+        : '')
+      + (ctx.onDraw ? ' · tira qui dentro per disegnarlo, alt+trascina per spostare la vista' : '');
   };
 
   /* Il contesto arriva da una sezione, e ogni sezione ha il suo `source`. Cambiandolo si

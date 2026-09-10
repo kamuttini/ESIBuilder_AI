@@ -162,11 +162,32 @@ async function createOrientationViewer(projectId, sampleSize) {
     const busta = gruppo && (data.envelopes || {})[gruppo];
     if (busta) voci.push({ box: busta, color: GROUP_COLORS[gruppo] || '#8b949e',
                            label: `envelope ${gruppo}` });
+    /* Cosa inquadrare: il **marker**, sempre. Senza dirlo la lente inquadrava il primo
+       riquadro che trovava, e sulle immagini dove il marker non c'e' quello era
+       l'envelope: mezzo schermo, cioe' nessun ingrandimento proprio dove serviva di piu'.
+       Senza marker si guarda l'envelope, che e' l'unico indizio di dove cercarlo. */
+    const mira = (modificaMarker && bozzaMarker) || (row && row.box) || busta || null;
     return {
       source: 'orientamento',
       projectId, name: names[index], size: [size[0] || 0, size[1] || 0], boxes: voci,
+      focus: mira,
       caption: modificaMarker ? 'stringilo sul glifo'
-        : (row ? `score ${row.score}` : 'nessun marker'),
+        : (drawing ? 'tira il rettangolo attorno al marker vero'
+          : (row ? `score ${row.score}` : 'nessun marker')),
+      // Indicare il marker dalla lente: e' quindici pixel, e sulla pagina principale
+      // significa tirare un rettangolo di sette pixel e sbagliarlo.
+      onDraw: (modificaMarker || drawing) ? (nuovo) => {
+        const box = limitaBox(nuovo);
+        if (modificaMarker) {
+          bozzaMarker = box;
+          place(markerNode, bozzaMarker);
+          mostraManiglie();
+          renderModifica();
+        } else {
+          proponiMarkerBox(box);
+        }
+        if (Lente.viva()) Lente.aggiorna(contestoLente());
+      } : null,
       // Stringere un marker vuol dire guardarlo da vicino: e' il caso in cui la lente
       // serve di piu', quindi qui si trascina anche da li'.
       onChange: modificaMarker ? (nuovo) => {
@@ -393,6 +414,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     renderConsegnato();
     loadLimits();
     renderCorrections(fresh.corrections_detail || []);
+    renderPosizioni();
   };
 
   /* Cosa e' cambiato per QUESTA immagine: si legge subito dopo il click. */
@@ -707,7 +729,8 @@ async function createOrientationViewer(projectId, sampleSize) {
     modificaPanel.innerHTML = '';
     modificaPanel.append(el('h3', { style: 'margin-top:0' }, 'stringi il marker'));
     modificaPanel.append(el('p', { class: 'hint' },
-      'trascina le maniglie sull\'immagine o dentro la lente. Quando va bene, questo '
+      'trascina le maniglie sull\'immagine o dentro la lente, oppure ridisegnalo tirando '
+      + 'dentro la lente. Quando va bene, questo '
       + 'ritaglio diventa il marker cercato su tutte le immagini della cartella, e quello '
       + 'che finisce nei blocchi #12/#16 del file.'));
     modificaPanel.append(el('div', { class: 'kv' }, el('span', {}, 'ora'),
@@ -785,8 +808,10 @@ async function createOrientationViewer(projectId, sampleSize) {
     stage.classList.toggle('drawing', on);
     wrongButton.textContent = on ? 'Annulla (non indicare)' : 'Il marker trovato e\' sbagliato';
     wrongHint.textContent = on
-      ? '← trascina un rettangolo attorno al marker vero, stretto sul glifo'
+      ? '← trascina un rettangolo attorno al marker vero, stretto sul glifo — '
+        + 'meglio ancora dentro la lente, dove e\' ingrandito'
       : '';
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
     if (!on) {
       drawNode.style.display = 'none';
       drawStart = null;
@@ -834,15 +859,23 @@ async function createOrientationViewer(projectId, sampleSize) {
   /* Prima di rilanciare si vede cosa si sta per usare: il ritaglio ingrandito, la sua
      dimensione, e il confronto con le misure dei ritagli storici. */
   const proponiMarker = (a, b) => {
+    // Dal rettangolo tirato sullo schermo a quello dell'immagine: la stessa conversione
+    // che serve all'anteprima, cosi' il pannello e il server guardano lo stesso riquadro.
+    const scale = (size[0] || image.naturalWidth) / (image.clientWidth || 1);
+    proponiMarkerBox({
+      left: Math.round(Math.min(a.x, b.x) * scale), top: Math.round(Math.min(a.y, b.y) * scale),
+      right: Math.round(Math.max(a.x, b.x) * scale), bottom: Math.round(Math.max(a.y, b.y) * scale),
+    });
+  };
+
+  /* Il pannello di conferma, dato il rettangolo in pixel dell'immagine. Ci si arriva da due
+     strade: tirandolo sull'immagine grande, o - meglio - dentro la lente, dove un marker di
+     quindici pixel si vede per quello che e'. */
+  const proponiMarkerBox = (box) => {
     const target = names[index];
     wrongPanel.innerHTML = '';
     wrongPanel.style.display = 'block';
     wrongPanel.append(el('h3', { style: 'margin-top:0' }, 'marker indicato a mano'));
-    const scale = (size[0] || image.naturalWidth) / (image.clientWidth || 1);
-    const box = {
-      left: Math.round(Math.min(a.x, b.x) * scale), top: Math.round(Math.min(a.y, b.y) * scale),
-      right: Math.round(Math.max(a.x, b.x) * scale), bottom: Math.round(Math.max(a.y, b.y) * scale),
-    };
     const larg = box.right - box.left;
     const alt = box.bottom - box.top;
     const anteprima = el('img', {
@@ -868,8 +901,7 @@ async function createOrientationViewer(projectId, sampleSize) {
       setBusy(true, 'cerco il marker che hai indicato su tutte le immagini');
       try {
         const started = await api(`/projects/${projectId}/orientation/marker_override`, {
-          body: { name: target, x1: a.x, y1: a.y, x2: b.x, y2: b.y,
-                  display_width: a.w, display_height: a.h },
+          body: { name: target, box },
         });
         const job = await pollJob(started.job_id,
           { set textContent(value) { busyLabel.textContent = value; stato.textContent = value; } });
@@ -1546,6 +1578,96 @@ async function createOrientationViewer(projectId, sampleSize) {
      Sopra: una riga di stato e la barra dei controlli. In mezzo: l'immagine a sinistra,
      l'elenco delle confidenze a destra che scorre per conto suo, cosi' si passa da
      un'immagine all'altra senza muovere la pagina. Sotto: le analisi, richiudibili. */
+  /* Dove e' stato trovato il marker, per posizione.
+
+     Correggere un marker vale per una immagine. Ma un glifo sbagliato non sbaglia una volta
+     sola: su prova 5 il ritaglio si ritrovava su sette immagini nello stesso punto del
+     pannello di destra, sempre a 0.62, e quelle sette inventavano un gruppo LR che nella
+     cartella non c'e'. Correggerle una per una non serviva a niente - l'envelope e' la loro
+     unione, e finche' ci sono dentro il gruppo resta. Qui si vedono raggruppate per posto e
+     si buttano tutte insieme. */
+  const posizioniHost = el('div', {});
+  const posizioniTag = el('span', { class: 'ov-fold-tag' });
+  /* Il posto e' la **riga**, non il punto. Il pallino di Esaote sta al bordo dell'immagine
+     ecografica e scorre in orizzontale con la larghezza del ventaglio: raggruppando per
+     punto usciva una riga ogni quaranta pixel - diciassette per quarantasette immagini - e
+     non si capiva piu' niente. L'altezza invece e' quella che distingue il marker vero da
+     un falso aggancio: sono a righe diverse dello schermo. */
+  const chiaveDiPosto = (box) => `${Math.round((box.top + box.bottom) / 2 / 40)}`;
+  const gruppiDiPosto = () => {
+    const mappa = new Map();
+    for (const row of byName.values()) {
+      if (!row.box) continue;
+      const chiave = `${row.group || '?'}#${chiaveDiPosto(row.box)}`;
+      if (!mappa.has(chiave)) mappa.set(chiave, []);
+      mappa.get(chiave).push(row);
+    }
+    return [...mappa.values()].sort((a, b) => b.length - a.length);
+  };
+  const renderPosizioni = () => {
+    posizioniHost.innerHTML = '';
+    const gruppi = gruppiDiPosto();
+    const rifiutate = [...byName.values()].filter((r) => r.refused).length;
+    posizioniTag.textContent = `${gruppi.length} posizioni`
+      + (rifiutate ? ` · ${rifiutate} rifiutate` : '');
+    if (!gruppi.length) {
+      posizioniHost.append(el('p', { class: 'hint' }, 'nessun marker trovato.'));
+      return;
+    }
+    posizioniHost.append(el('p', { class: 'hint' },
+      'ogni riga e\' un posto dove il ritaglio si e\' ritrovato. Quelle con poche immagini e '
+      + 'punteggio basso, lontane dalle altre, di solito non sono il marker: buttarle '
+      + 'stringe l\'envelope e toglie i gruppi inventati.'));
+    const griglia = el('div', { class: 'depth-grid' });
+    for (const elenco of gruppi) {
+      const primo = elenco[0];
+      const b = primo.box;
+      const punteggi = elenco.map((r) => Number(r.score) || 0).sort((a, c) => a - c);
+      const mediana = punteggi[Math.floor(punteggi.length / 2)];
+      const tutteRifiutate = elenco.every((r) => r.refused);
+      const scheda = el('div', { class: 'depth-card' + (tutteRifiutate ? ' spenta' : '') });
+      scheda.append(
+        el('div', { class: 'depth-value' }, `${primo.group || '?'} · ${elenco.length} immagini`,
+          el('span', { class: 'hint' }, ` · mediana ${mediana ? mediana.toFixed(3) : '—'}`)),
+        el('img', {
+          class: 'depth-crop', loading: 'lazy', alt: '',
+          src: `/api/projects/${projectId}/orientation/crop`
+            + `?name=${encodeURIComponent(primo.name)}&scale=6&pad=6`
+            + `&box=${b.top}|${b.left}|${b.bottom}|${b.right}`,
+        }),
+        el('div', { class: 'hint' },
+          `riga y ${Math.min(...elenco.map((r) => r.box.top))}-`
+          + `${Math.max(...elenco.map((r) => r.box.bottom))}`
+          + ` · x da ${Math.min(...elenco.map((r) => r.box.left))} a `
+          + `${Math.max(...elenco.map((r) => r.box.left))}`
+          + ` · ${b.right - b.left}x${b.bottom - b.top} px`
+          + (tutteRifiutate ? ' · rifiutate' : '')),
+      );
+      const apri = el('button', { class: 'ghost sq2' }, 'apri la prima');
+      apri.addEventListener('click', () => {
+        const dove = names.indexOf(primo.name);
+        if (dove >= 0) { index = dove; show(); }
+      });
+      const butta = el('button', { class: 'ghost sq2' },
+        tutteRifiutate ? 'rimettile' : `non e' il marker (${elenco.length})`);
+      butta.addEventListener('click', async () => {
+        butta.disabled = true;
+        try {
+          await api(`/projects/${projectId}/orientation/refuse`, {
+            body: { names: elenco.map((r) => r.name), reset: tutteRifiutate },
+          });
+          toast(tutteRifiutate
+            ? `${elenco.length} rimesse in gioco`
+            : `${elenco.length} detection buttate`);
+          await refreshData();
+        } catch (errore) { toast(errore.message, true); butta.disabled = false; }
+      });
+      scheda.append(el('div', { class: 'row' }, apri, butta));
+      griglia.append(scheda);
+    }
+    posizioniHost.append(griglia);
+  };
+
   const fold = (titolo, tag, contenuto, aperto) => {
     const nodo = el('details', { class: 'ov-fold' });
     if (aperto) nodo.setAttribute('open', 'open');
@@ -1587,6 +1709,7 @@ async function createOrientationViewer(projectId, sampleSize) {
       limitsSide, listBox)));
 
   root.append(el('div', { class: 'ov-folds' },
+    fold('dove e\' stato trovato il marker', posizioniTag, posizioniHost),
     fold('chi fissa i bordi degli envelope', limitsTag, limitsCard),
     fold('correzioni manuali', corrTag, corrHost),
     fold('ultima rielaborazione in background', bgTag, bgReportHost),
@@ -1596,6 +1719,7 @@ async function createOrientationViewer(projectId, sampleSize) {
 
   show();
   renderList();
+  renderPosizioni();
   paintWarning();
   loadLimits();
   // se una rielaborazione era in corso da prima, la striscia la ritrova
