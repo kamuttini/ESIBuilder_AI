@@ -155,6 +155,10 @@ async function createOrientationViewer(projectId, sampleSize) {
     const voci = [];
     if (modificaMarker && bozzaMarker) {
       voci.push({ box: bozzaMarker, color: '#ff6040', label: 'marker da stringere' });
+    } else if (drawing && bozzaIndicata) {
+      // Quello che hai appena disegnato: resta la voce principale, cosi' nella lente si
+      // prende per i lati e si aggiusta al pixel prima di confermarlo.
+      voci.push({ box: bozzaIndicata, color: '#58a6ff', label: 'marker indicato' });
     } else if (row && row.box) {
       voci.push({ box: row.box, color: GROUP_COLORS[gruppo] || '#40d0ff',
                   label: `marker ${gruppo || ''}`.trim() });
@@ -166,7 +170,8 @@ async function createOrientationViewer(projectId, sampleSize) {
        riquadro che trovava, e sulle immagini dove il marker non c'e' quello era
        l'envelope: mezzo schermo, cioe' nessun ingrandimento proprio dove serviva di piu'.
        Senza marker si guarda l'envelope, che e' l'unico indizio di dove cercarlo. */
-    const mira = (modificaMarker && bozzaMarker) || (row && row.box) || busta || null;
+    const mira = (modificaMarker && bozzaMarker) || (drawing && bozzaIndicata)
+      || (row && row.box) || busta || null;
     return {
       source: 'orientamento',
       projectId, name: names[index], size: [size[0] || 0, size[1] || 0], boxes: voci,
@@ -177,14 +182,13 @@ async function createOrientationViewer(projectId, sampleSize) {
       // Indicare il marker dalla lente: e' quindici pixel, e sulla pagina principale
       // significa tirare un rettangolo di sette pixel e sbagliarlo.
       onDraw: (modificaMarker || drawing) ? (nuovo) => {
-        const box = limitaBox(nuovo);
         if (modificaMarker) {
-          bozzaMarker = box;
+          bozzaMarker = limitaBox(nuovo);
           place(markerNode, bozzaMarker);
           mostraManiglie();
           renderModifica();
         } else {
-          proponiMarkerBox(box);
+          indicaMarker(nuovo);
         }
         if (Lente.viva()) Lente.aggiorna(contestoLente());
       } : null,
@@ -194,7 +198,7 @@ async function createOrientationViewer(projectId, sampleSize) {
         bozzaMarker = limitaBox(nuovo);
         place(markerNode, bozzaMarker);
         renderModifica();
-      } : null,
+      } : (drawing && bozzaIndicata ? (nuovo) => indicaMarker(nuovo) : null),
     };
   };
 
@@ -795,6 +799,24 @@ async function createOrientationViewer(projectId, sampleSize) {
 
   let drawing = false;
   let drawStart = null;
+  /* Il rettangolo appena indicato resta una **bozza**: si aggiusta con le maniglie e con
+     le frecce - meglio dentro la lente, dove il glifo si vede - e il pannello di conferma
+     si aggiorna mentre lo muovi. Prima il disegno era un colpo solo: se veniva storto
+     bisognava ricominciare da capo. */
+  let bozzaIndicata = null;
+  let attesaPannello = null;
+  const indicaMarker = (box) => {
+    bozzaIndicata = limitaBox(box);
+    place(drawNode, bozzaIndicata);
+    drawNode.style.display = 'block';
+    // Il pannello ricarica l'anteprima del ritaglio: rifarlo a ogni pixel del
+    // trascinamento sarebbe una richiesta al server per pixel.
+    clearTimeout(attesaPannello);
+    attesaPannello = setTimeout(() => proponiMarkerBox(bozzaIndicata), 160);
+    // La lente deve vedere la misura nuova: il suo riquadro si muove da solo mentre lo
+    // trascini, ma la riga in alto - «24 x 24 px · top…» - la scrive dal contesto.
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
+  };
   const drawNode = el('div', { class: 'editor-box draw-box' });
   drawNode.style.display = 'none';
   stage.append(drawNode);
@@ -815,6 +837,8 @@ async function createOrientationViewer(projectId, sampleSize) {
     if (!on) {
       drawNode.style.display = 'none';
       drawStart = null;
+      bozzaIndicata = null;
+      clearTimeout(attesaPannello);
       wrongPanel.style.display = 'none';
     }
   };
@@ -854,6 +878,7 @@ async function createOrientationViewer(projectId, sampleSize) {
       return;
     }
     proponiMarker(a, end);
+    if (Lente.viva()) Lente.aggiorna(contestoLente());
   });
 
   /* Prima di rilanciare si vede cosa si sta per usare: il ritaglio ingrandito, la sua
@@ -862,7 +887,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     // Dal rettangolo tirato sullo schermo a quello dell'immagine: la stessa conversione
     // che serve all'anteprima, cosi' il pannello e il server guardano lo stesso riquadro.
     const scale = (size[0] || image.naturalWidth) / (image.clientWidth || 1);
-    proponiMarkerBox({
+    indicaMarker({
       left: Math.round(Math.min(a.x, b.x) * scale), top: Math.round(Math.min(a.y, b.y) * scale),
       right: Math.round(Math.max(a.x, b.x) * scale), bottom: Math.round(Math.max(a.y, b.y) * scale),
     });
@@ -888,6 +913,9 @@ async function createOrientationViewer(projectId, sampleSize) {
     wrongPanel.append(el('div', { class: 'kv' },
       el('span', {}, 'rettangolo (px immagine, stima)'),
       el('span', {}, `${box.top}|${box.left}|${box.bottom}|${box.right} — ${larg}x${alt}`)));
+    wrongPanel.append(el('p', { class: 'hint' },
+      'si aggiusta ancora: maniglie e frecce, o un altro trascinamento - anche dentro la '
+      + 'lente, dove il glifo si vede ingrandito. Qui sotto vedi il ritaglio come sara\'.'));
     if (larg > 45 || alt > 45) {
       wrongPanel.append(el('p', { class: 'hint', style: 'color:var(--warn)' },
         `i ritagli orientation_*.png delle configurazioni storiche vanno da 16x18 a 30x31: ` +
@@ -1608,8 +1636,10 @@ async function createOrientationViewer(projectId, sampleSize) {
     posizioniHost.innerHTML = '';
     const gruppi = gruppiDiPosto();
     const rifiutate = [...byName.values()].filter((r) => r.refused).length;
+    const scontente = [...byName.values()].filter((r) => r.disagrees).length;
     posizioniTag.textContent = `${gruppi.length} posizioni`
-      + (rifiutate ? ` · ${rifiutate} rifiutate` : '');
+      + (rifiutate ? ` · ${rifiutate} rifiutate` : '')
+      + (scontente ? ` · ${scontente} in disaccordo` : '');
     if (!gruppi.length) {
       posizioniHost.append(el('p', { class: 'hint' }, 'nessun marker trovato.'));
       return;
@@ -1625,7 +1655,12 @@ async function createOrientationViewer(projectId, sampleSize) {
       const punteggi = elenco.map((r) => Number(r.score) || 0).sort((a, c) => a - c);
       const mediana = punteggi[Math.floor(punteggi.length / 2)];
       const tutteRifiutate = elenco.every((r) => r.refused);
-      const scheda = el('div', { class: 'depth-card' + (tutteRifiutate ? ' spenta' : '') });
+      // Fuori dagli envelope perche' danno torto a una correzione: e' un rifiuto che hai
+      // dato tu senza dirlo, e va detto.
+      const tutteScontente = !tutteRifiutate && elenco.every((r) => r.disagrees);
+      const scheda = el('div', {
+        class: 'depth-card' + (tutteRifiutate || tutteScontente ? ' spenta' : ''),
+      });
       scheda.append(
         el('div', { class: 'depth-value' }, `${primo.group || '?'} · ${elenco.length} immagini`,
           el('span', { class: 'hint' }, ` · mediana ${mediana ? mediana.toFixed(3) : '—'}`)),
@@ -1641,7 +1676,8 @@ async function createOrientationViewer(projectId, sampleSize) {
           + ` · x da ${Math.min(...elenco.map((r) => r.box.left))} a `
           + `${Math.max(...elenco.map((r) => r.box.left))}`
           + ` · ${b.right - b.left}x${b.bottom - b.top} px`
-          + (tutteRifiutate ? ' · rifiutate' : '')),
+          + (tutteRifiutate ? ' · rifiutate' : '')
+          + (tutteScontente ? ' · fuori: un\'altra riga rispetto alla tua correzione' : '')),
       );
       const apri = el('button', { class: 'ghost sq2' }, 'apri la prima');
       apri.addEventListener('click', () => {

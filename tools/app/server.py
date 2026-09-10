@@ -910,6 +910,10 @@ def _run_advanced_stages(
                 # suggerimenti sopravvivono al rifacimento dello stadio.
                 orientation_value: Dict = {
                     "corrections": corrections_before,
+                    # Anche le detection che hai gia' guardato e buttato: sono lavoro tuo
+                    # come le correzioni, e un «Rifai l'orientamento» le rimetteva tutte in
+                    # gioco - a ricominciare daccapo dallo stesso rumore.
+                    "refused": dict(previous.get("refused") or {}),
                     "marker_override": override,
                     "marker_rows_override": override_rows,
                     # Dove si ritrova il ritaglio consegnato: sono queste le posizioni da cui
@@ -2141,6 +2145,23 @@ def api_orientation(project_id: str):
     # le run, quindi conta anche i marker di run vecchie e non conosce le correzioni.
     stored = project.step_value("orientation")
     corrections = dict(stored.get("corrections") or {})
+    # Gli envelope si rifanno da cio' che c'e' adesso - detection del ritaglio consegnato,
+    # correzioni, rifiuti - e se sono cambiati si riscrivono. Mostrarne di diversi da quelli
+    # salvati vorrebbe dire far vedere una cosa e scriverne un'altra in #16: gli envelope
+    # dello step sono quelli che finiscono nel file.
+    rifatti = _rebuild_orientation(project, stored)["groups"]
+    if rifatti and rifatti != (stored.get("groups") or {}):
+        def allinea(_p: Project, value: Dict) -> Dict:
+            return _fill_blocks(dict(value), rifatti)
+
+        # Riallineare non e' un gesto dell'utente: lo stato dello step resta quello che era,
+        # se no aprire la sezione lo marcherebbe come corretto a mano.
+        stato_ora = project.steps.get("orientation") or {}
+        stored = _write_orientation(
+            project_id, allinea,
+            status=str(stato_ora.get("status") or "proposed"),
+            source=str(stato_ora.get("source") or "model"),
+        )
     if stored.get("groups"):
         envelopes = {
             group: {**data, "markers": data.get("markers", 0)}
@@ -2209,6 +2230,19 @@ def api_orientation(project_id: str):
     for row in per_image:
         if row.get("name") in rifiutate:
             row["refused"] = True
+    # Chi non entra negli envelope perche' da' torto a una correzione: si vede, e si puo'
+    # sempre correggere anche quella immagine. Tacerlo vorrebbe dire far sparire venti
+    # detection senza dire perche'.
+    contributori = {
+        riga["name"]
+        for elenco in _envelope_contributors(project, stored).values() for riga in elenco
+    }
+    scontente = 0
+    for row in per_image:
+        if (row.get("box") and not row.get("refused") and not row.get("corrected")
+                and row.get("name") not in contributori):
+            row["disagrees"] = True
+            scontente += 1
 
     # The runner skips these on purpose: forbidden/freeze screens carry no orientation marker.
     marker_excluded = r"Thumbs\.db|Software Release|System Info|proibite"
@@ -2224,6 +2258,7 @@ def api_orientation(project_id: str):
             ],
             "excluded_pattern": marker_excluded,
             "refused": sorted(rifiutate),
+            "disagreeing": scontente,
             # Il ritaglio della cartella e' quello che finira' in DB_echo: e' il protagonista.
             "folder_template": {
                 **{k: v for k, v in folder_template.items() if k != "path"},
@@ -2641,6 +2676,29 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
         for row in (validation.get("rows") or [])
     }
 
+    # --- UN MARKER SOLO PER TUTTE LE IMMAGINI ---------------------------------
+    # Alla gara dei ritagli partecipano il consegnato e quelli nati dalle correzioni: serve
+    # a scoprire se uno di loro aggancia meglio, e a promuoverlo. Ma da li' in poi il match
+    # deve tornare a essere uno: quello promosso, cercato su tutte le immagini. Se gli
+    # envelope li facessero i ritagli mescolati, descriverebbero dove stanno glifi diversi -
+    # e ESI di ritagli ne usa uno.
+    consegnate: Dict[str, Dict] = {}
+    if template_info.get("path") and Path(template_info["path"]).is_file():
+        progress("ricerco il ritaglio consegnato su tutte le immagini", 0, len(useful))
+        finale = om.match_all(
+            images=useful, folder=probe_folder,
+            template_path=Path(template_info["path"]), rect=ctx["rect"],
+            bundle_dir=ctx["bundle"], min_score=min_score, search_margin=60,
+            exclusion_rect=ctx["exclusion"],
+            progress=lambda fatte, quante: progress(
+                "ricerco il ritaglio consegnato su tutte le immagini", fatte, quante),
+        )
+        consegnate = {
+            row["name"]: {"score": row["score"], "group": row["group"], "box": row["box"]}
+            for row in (finale.get("rows") or [])
+            if row.get("box") and (row.get("score") or 0) >= min_score
+        }
+
     def mutate(project: Project, value: Dict) -> Dict:
         # Una correzione arrivata mentre giravamo non era in gara: il suo punteggio resta
         # quello del click, altrimenti la riga sembrerebbe peggiorata fino al giro dopo.
@@ -2651,7 +2709,14 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
                     "score": fixed.get("score"), "group": fixed.get("group"),
                     "box": fixed.get("box"), "template": "correzione",
                 }
-        merged = _fill_blocks(dict(value), groups)
+        if consegnate:
+            value = dict(value)
+            value["marker_rows_delivered"] = consegnate
+        # Gli envelope si rifanno con le posizioni nuove del ritaglio consegnato, non con
+        # quelle del giro precedente.
+        groups_finali = (_rebuild_orientation(project, value)["groups"] if consegnate
+                         else groups)
+        merged = _fill_blocks(dict(value), groups_finali)
         merged.update(
             {
                 "folder_template": template_info,
@@ -2962,6 +3027,10 @@ def _run_marker_override(
             merged.update(
                 {
                     "corrections": tenute,
+                    # Stessa regola delle correzioni: stringere non cambia il glifo, quindi
+                    # cio' che avevi buttato resta buttato; cambiarlo si', e allora quelle
+                    # detection erano di un altro glifo e non vogliono dire piu' niente.
+                    "refused": dict(value.get("refused") or {}) if stretta else {},
                     "hint_paths": {} if not stretta else (value.get("hint_paths") or {}),
                     "hint_templates": [] if not stretta else (value.get("hint_templates") or []),
                     "marker_override": {
@@ -3038,6 +3107,51 @@ _ENVELOPE_SIDES = (
 )
 
 
+def _detection_in_disaccordo(righe: Dict[str, Dict],
+                             correzioni: Dict[str, Dict]) -> Dict[str, Dict]:
+    """Via le detection che danno torto a una correzione, nel suo stesso gruppo.
+
+    Correggere un marker diceva una cosa sola: «in *questa* immagine sta qui». L'envelope
+    pero' e' l'unione di tutte le detection del gruppo, quindi bastava che le altre venti
+    fossero sul posto sbagliato perche' la correzione non cambiasse niente - ed e' la cosa
+    che si sente di piu': indichi il marker giusto e non succede niente.
+
+    Qui una correzione vale per il suo gruppo: le detection che stanno su un'**altra riga
+    dello schermo** vengono messe da parte. La riga, non il punto: il marker scorre in
+    orizzontale col bordo dell'immagine ecografica (su prova 6 di trecento pixel), mentre
+    l'altezza e' quella che distingue il marker vero da un falso aggancio - su prova 6 il
+    ritaglio «E9» contro la riga di «LOGIQ», sedici pixel piu' su.
+
+    Restano sempre le correzioni: sono loro il metro.
+    """
+    if not correzioni:
+        return righe
+    per_gruppo: Dict[str, List[Dict]] = {}
+    for fix in correzioni.values():
+        per_gruppo.setdefault(str(fix["group"]), []).append(fix["box"])
+    fuori: Dict[str, Dict] = {}
+    for nome, riga in righe.items():
+        if riga.get("corrected"):
+            fuori[nome] = riga
+            continue
+        modelli = per_gruppo.get(str(riga.get("group") or ""))
+        box = riga.get("box")
+        if not modelli or not box:
+            fuori[nome] = riga
+            continue
+        centro = (int(box["top"]) + int(box["bottom"])) / 2.0
+        vicino = False
+        for atteso in modelli:
+            altezza = max(6.0, float(int(atteso["bottom"]) - int(atteso["top"])))
+            suo = (int(atteso["top"]) + int(atteso["bottom"])) / 2.0
+            if abs(centro - suo) <= max(10.0, 1.2 * altezza):
+                vicino = True
+                break
+        if vicino:
+            fuori[nome] = riga
+    return fuori
+
+
 def _envelope_contributors(project: Project, value: Dict) -> Dict[str, List[Dict]]:
     """Le detection che hanno formato ogni envelope, per gruppo, col nome dell'immagine."""
     stage = _marker_stage_dir(project)
@@ -3080,12 +3194,16 @@ def _envelope_contributors(project: Project, value: Dict) -> Dict[str, List[Dict
     # dentro tengono aperto un envelope - a volte un gruppo intero - che non esiste.
     for nome in (value.get("refused") or {}):
         per_name.pop(nome, None)
-    for name, fixed in (value.get("corrections") or {}).items():
-        if fixed.get("box") and fixed.get("group"):
-            per_name[name] = {
-                "name": name, "group": fixed["group"], "box": fixed["box"],
-                "score": fixed.get("score"), "source": "correzione", "corrected": True,
-            }
+    correzioni = {
+        nome: fix for nome, fix in (value.get("corrections") or {}).items()
+        if fix.get("box") and fix.get("group")
+    }
+    for name, fixed in correzioni.items():
+        per_name[name] = {
+            "name": name, "group": fixed["group"], "box": fixed["box"],
+            "score": fixed.get("score"), "source": "correzione", "corrected": True,
+        }
+    per_name = _detection_in_disaccordo(per_name, correzioni)
     # Solo le immagini che questo progetto ha: gli artefatti del marker sono di quando e'
     # girato, e dopo uno sdoppiamento contengono ancora quelle dell'altro piano.
     mie = _sue_immagini(project)

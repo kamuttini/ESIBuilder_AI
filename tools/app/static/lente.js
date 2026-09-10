@@ -384,7 +384,9 @@ lavorando, oppure torna indietro.</div>
       const [w, h] = ctx.size || [0, 0];
       trascinando = true;
       latoScelto = lato;      // da qui in poi le frecce muovono questo
-      nodo.setPointerCapture(ev.pointerId);
+      // La presa del puntatore e' un di piu': se il browser la rifiuta si trascina lo
+      // stesso, invece di lasciare il riquadro fermo senza dire niente.
+      try { nodo.setPointerCapture(ev.pointerId); } catch (_) { /* pazienza */ }
       const muovi = (e) => {
         const dx = Math.round((e.clientX - partenza.x) / (s || 1));
         const dy = Math.round((e.clientY - partenza.y) / (s || 1));
