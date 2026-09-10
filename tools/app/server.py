@@ -46,6 +46,7 @@ from importer import (  # noqa: E402
 )
 from inference import Engine, ModelPaths, sample_paths  # noqa: E402
 from rotation import estimate_rotation  # noqa: E402
+from timestamp_detection import detect_timestamp_box  # noqa: E402
 import marker_refine  # noqa: E402
 import orientation_marker as om  # noqa: E402
 import stages as stages_mod  # noqa: E402
@@ -165,7 +166,8 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         # a mettere tutte le immagini nel progetto della L.
         prima = project.step_value("import") or {}
         da_tenere = {k: prima[k] for k in
-                     ("timestamp_box", "planes", "plane_corrections", "plane_counts")
+                     ("timestamp_box", "timestamp_detection", "timestamp_disabled",
+                      "planes", "plane_corrections", "plane_counts")
                      if prima.get(k) is not None}
         # La dedup a meno dell'orologio si fa **dopo** la rotazione, piu' sotto: l'area la
         # si indica su un'anteprima gia' dritta, e confrontarla su immagini storte
@@ -227,6 +229,14 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         # qui e non prima perche' l'area la si indica su un'anteprima raddrizzata: su
         # immagini storte quel rettangolo cadrebbe su un altro pezzo di schermo.
         area_orologio = imported.get("timestamp_box")
+        if not area_orologio and not imported.get("timestamp_disabled"):
+            _job_update(job_id, stage="riconoscimento automatico di data e ora")
+            rilevamento = _timestamp_preview(project, detect_timestamp_box(images))
+            imported["timestamp_detection"] = rilevamento
+            if rilevamento.get("reliable") and rilevamento.get("box"):
+                area_orologio = dict(rilevamento["box"])
+                imported["timestamp_box"] = area_orologio
+                imported["timestamp_disabled"] = False
         if area_orologio:
             base_lavoro = project.working_dir() or Path(folder)
             nomi = project.dedup_names()
@@ -1769,29 +1779,138 @@ def api_import_timestamp(project_id: str):
             return jsonify({"error": "serve un riquadro completo (top/left/bottom/right)"}), 400
         if box["right"] - box["left"] < 4 or box["bottom"] - box["top"] < 4:
             return jsonify({"error": "l'area dell'orologio e' troppo piccola"}), 400
-    return jsonify({"job_id": _start_job(_run_dedup, project_id, folder, box)})
+    rilevamento = {
+        "box": dict(box) if box else None,
+        "confidence": 1.0,
+        "reliable": bool(box),
+        "source": "user" if box else "user_disabled",
+        "support": None,
+        "samples": None,
+        "texts": [],
+        "reason": ("area corretta dall'utente" if box
+                   else "riconoscimento automatico disattivato dall'utente"),
+    }
+    return jsonify({
+        "job_id": _start_job(
+            _run_dedup, project_id, folder, box, rilevamento, box is None
+        )
+    })
 
 
-def _run_dedup(job_id: str, project_id: str, folder: str, box: Optional[Dict]) -> None:
+@app.post("/api/projects/<project_id>/import/timestamp/detect")
+def api_import_timestamp_detect(project_id: str):
+    """Rilegge data/ora e, quando la proposta e' affidabile, rifà la dedup."""
+    project = _project(project_id)
+    folder = (project.source.get("folder") or "").strip()
+    if not folder or not Path(folder).is_dir():
+        return jsonify({"error": "cartella non raggiungibile"}), 400
+    return jsonify({"job_id": _start_job(_run_timestamp_detection, project_id, folder)})
+
+
+def _timestamp_preview(project: Project, detection: Dict) -> Dict:
+    """Converte il percorso OCR assoluto nel nome relativo accettato dall'API immagini."""
+    result = dict(detection)
+    path = result.pop("preview_path", None)
+    if not path:
+        return result
+    base = project.working_dir()
+    try:
+        result["preview_image"] = str(Path(path).relative_to(base))
+    except (TypeError, ValueError):
+        result["preview_image"] = Path(path).name
+    return result
+
+
+def _run_timestamp_detection(job_id: str, project_id: str, folder: str) -> None:
+    """Trova l'orologio sullo specchio raddrizzato; applica solo proposte affidabili."""
+    try:
+        project = _project(project_id)
+        images = project.dedup_images()
+        if not images:
+            raise FileNotFoundError("nessuna immagine da leggere: rifai prima l'import")
+        _job_update(job_id, stage="riconoscimento automatico di data e ora")
+        detection = _timestamp_preview(project, detect_timestamp_box(images))
+        box = detection.get("box") if detection.get("reliable") else None
+        if box:
+            _run_dedup(job_id, project_id, folder, box, detection, False)
+            return
+
+        def mutate(_project_value: Project, value: Dict) -> Dict:
+            value["timestamp_detection"] = detection
+            value["timestamp_disabled"] = False
+            return value
+
+        _write_step(project_id, "import", mutate, status="proposed", source="model")
+        _job_update(job_id, status="done", stage="proposta da controllare", result={
+            "applied": False,
+            "detection": detection,
+            "kept": len(project.dedup_names()),
+        })
+    except Exception as error:  # noqa: BLE001
+        _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
+def _run_dedup(job_id: str, project_id: str, folder: str, box: Optional[Dict],
+               detection: Optional[Dict] = None, disabled: bool = False) -> None:
     """Rifa' solo la deduplicazione, senza toccare il resto dell'analisi."""
     try:
-        _job_update(job_id, stage="rileggo le immagini senza l'area dell'orologio")
-        esito = import_folder(
-            Path(folder), timestamp_box=box,
-            progress=lambda fatte, quante: _job_update(
-                job_id, stage="confronto le immagini", done=fatte, total=quante),
-        )
+        # Prima si ricostruisce l'insieme degli esatti dalla sorgente, poi si applica il box
+        # allo specchio raddrizzato. Il box e' disegnato sull'immagine dritta: usarlo sui file
+        # originali era sbagliato per ogni cartella con rotazione diversa da zero.
+        _job_update(job_id, stage="rileggo le immagini e tolgo le copie identiche")
+        esito = import_folder(Path(folder))
         project = _project(project_id)
-        project.save_dedup_images(esito.get("kept_names") or [])
+        names = list(esito.pop("kept_names", []) or [])
+        plane = str(project.source.get("plane") or "")
+        if plane in ("L", "T"):
+            labels = _piani_salvati(project)
+            own = [name for name in names if (labels.get(name) or {}).get("plane") == plane]
+            if own:
+                names = own
+        project.save_dedup_images(names)
         # Lo specchio di lavoro va rifatto: contiene una copia (o un link) per immagine
         # tenuta, e adesso ne sono di meno.
         specchio = project.root / project.DEDUP_LINKS
         if specchio.exists():
             shutil.rmtree(specchio, ignore_errors=True)
+        project.dedup_link_dir(
+            progress=lambda fatte, quante: _job_update(
+                job_id, stage="raddrizzo le immagini da confrontare", done=fatte, total=quante)
+        )
+
+        timestamp_removed: List[Dict] = []
+        if box:
+            project = _project(project_id)
+            base = project.working_dir()
+            names = project.dedup_names()
+            _job_update(job_id, stage="confronto le immagini senza data e ora",
+                        done=0, total=len(names))
+            kept, removed = deduplicate(
+                [base / name for name in names], box,
+                progress=lambda fatte, quante: _job_update(
+                    job_id, stage="confronto le immagini senza data e ora",
+                    done=fatte, total=quante),
+            )
+            final_names = sorted(str(Path(path).relative_to(base)) for path in kept)
+            timestamp_removed = [row for row in removed if row["kind"] == "solo_timestamp"]
+            project.save_dedup_images(final_names)
+            names = final_names
+            if specchio.exists():
+                shutil.rmtree(specchio, ignore_errors=True)
+
+        duplicates = dict(esito.get("duplicates") or {})
+        duplicates["timestamp"] = timestamp_removed
+        esito["duplicates"] = duplicates
+        esito["images_total"] = len(names)
+        esito["duplicates_removed"] = (
+            len(duplicates.get("identical") or []) + len(timestamp_removed)
+        )
 
         def mutate(_p: Project, value: Dict) -> Dict:
             value.update({
                 "timestamp_box": dict(box) if box else None,
+                "timestamp_detection": detection or value.get("timestamp_detection") or {},
+                "timestamp_disabled": bool(disabled),
                 "duplicates": esito.get("duplicates") or {},
                 "duplicates_removed": esito.get("duplicates_removed", 0),
                 "images_total": esito.get("images_total", 0),
@@ -1799,7 +1918,8 @@ def _run_dedup(job_id: str, project_id: str, folder: str, box: Optional[Dict]) -
             })
             return value
 
-        _write_step(project_id, "import", mutate, status="proposed", source="user")
+        source = "model" if (detection or {}).get("source") == "ocr" else "user"
+        _write_step(project_id, "import", mutate, status="proposed", source=source)
         progetto = _project(project_id)
         progetto.source.update({
             "images_total": esito.get("images_total", 0),
@@ -1809,6 +1929,8 @@ def _run_dedup(job_id: str, project_id: str, folder: str, box: Optional[Dict]) -
         progetto.dedup_link_dir()      # ricostruisce lo specchio, ruotato se serve
         doppie = esito.get("duplicates") or {}
         _job_update(job_id, status="done", stage="fatto", result={
+            "applied": bool(box),
+            "detection": detection or {},
             "kept": esito.get("images_total", 0),
             "identical": len(doppie.get("identical") or []),
             "timestamp": len(doppie.get("timestamp") or []),

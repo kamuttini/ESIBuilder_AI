@@ -363,12 +363,17 @@ function panelImport(panel) {
   const doppie = value.duplicates || {};
   const uguali = (doppie.identical || []).length;
   const orologio = (doppie.timestamp || []).length;
+  const rilevamentoOra = value.timestamp_detection || {};
+  const statoAreaOra = value.timestamp_box
+    ? (rilevamentoOra.source === 'ocr' ? 'riconosciuta automaticamente' : 'corretta dall\'utente')
+    : (value.timestamp_disabled ? 'disattivata dall\'utente'
+      : rilevamentoOra.box ? 'proposta da controllare' : 'non riconosciuta');
   for (const [key, val] of [
     ['immagini trovate', value.images_total_raw],
     ['immagini tenute', value.images_total],
     ['scartate perche\' identiche', uguali],
     ['scartate perche\' cambia solo l\'ora',
-      value.timestamp_box ? orologio : 'area dell\'ora non indicata'],
+      value.timestamp_box ? orologio : statoAreaOra],
     ['input video (#06)', state.meta.video_inputs[value.video_input] || value.video_input],
     ['video input (#07/#08)', (value.video_input_size || []).join(' x ')],
     ['immagine campione (#09/#10)', (value.image_sample_size || []).join(' x ')],
@@ -383,22 +388,43 @@ function panelImport(panel) {
 
      Due fotogrammi della stessa scena presi a un secondo di distanza differiscono in ogni
      byte del file e in nessun pixel tranne l'ora: nessuna misura li trova uguali, e restano
-     tutti e due a pesare due volte in ogni mediana dei moduli. Indicare dove sta l'ora e'
-     l'unico modo di dirlo al programma - e non e' indovinabile, perche' ogni macchina la
-     scrive in un posto suo. */
-  const anteprima = ((state.project.steps.vendor || {}).value || {}).preview_image
+     tutti e due a pesare due volte in ogni mediana dei moduli. Il programma propone l'area
+     leggendo data e ora su piu' immagini; l'utente vede il risultato e puo' correggerlo. */
+  const anteprima = rilevamentoOra.preview_image
+    || ((state.project.steps.vendor || {}).value || {}).preview_image
     || (value.images || [])[0]?.name;
   if (anteprima) {
-    panel.append(el('h3', {}, 'Area dell\'ora, da non guardare quando si confrontano le immagini'));
-    panel.append(el('p', { class: 'hint' },
-      'trascina un rettangolo attorno all\'orologio a schermo. Le immagini che differiscono '
-      + 'solo li\' dentro vengono scartate come le identiche: ai moduli serve un fotogramma '
-      + 'per contenuto, non due copie della stessa scena.'));
-    // Senza un riquadro da cui partire non c'e' niente da trascinare: se ne mette uno
-    // piccolo in alto a sinistra, che e' dove l'ora sta piu' spesso, e lo si porta dov'e'.
+    panel.append(el('h3', {}, 'Data e ora escluse dal confronto'));
+    const descrizioneOra = el('p', { class: 'hint' });
+    if (value.timestamp_box && rilevamentoOra.source === 'ocr') {
+      descrizioneOra.textContent = 'area riconosciuta automaticamente e gia\' usata nella '
+        + 'deduplicazione. Controlla il riquadro rosa: se comprende testo sbagliato, '
+        + 'trascinalo attorno alla sola data/ora e applica la correzione.';
+    } else if (rilevamentoOra.box && !value.timestamp_box) {
+      descrizioneOra.textContent = 'il sistema ha trovato una possibile data/ora ma non ha '
+        + 'abbastanza conferme per usarla da solo. Controlla il riquadro rosa, correggilo se '
+        + 'serve e confermalo.';
+    } else if (value.timestamp_disabled) {
+      descrizioneOra.textContent = 'il riconoscimento automatico e\' disattivato per questo '
+        + 'progetto. Puoi riattivarlo con «Riconosci di nuovo».';
+    } else {
+      descrizioneOra.textContent = 'il sistema non ha letto una data o un\'ora con sufficiente '
+        + 'sicurezza. Puoi disegnare il riquadro a mano oppure riprovare il riconoscimento.';
+    }
+    panel.append(descrizioneOra);
+    if (rilevamentoOra.reason) {
+      const percentuale = Number.isFinite(Number(rilevamentoOra.confidence))
+        ? ` · confidenza ${Math.round(Number(rilevamentoOra.confidence) * 100)}%` : '';
+      const letture = (rilevamentoOra.texts || []).slice(0, 3).join(' · ');
+      panel.append(el('p', { class: 'hint timestamp-detection' },
+        `${rilevamentoOra.reason}${percentuale}${letture ? ` · letto: ${letture}` : ''}`));
+    }
+    // Se l'OCR non trova niente resta un piccolo box iniziale: l'utente non deve costruire
+    // quattro lati da zero, ma soltanto portarlo e stringerlo sulla scritta corretta.
     const misura = value.image_sample_size || [1920, 1080];
     const boxOra = {
-      timestamp: value.timestamp_box ? { ...value.timestamp_box } : {
+      timestamp: value.timestamp_box ? { ...value.timestamp_box }
+        : rilevamentoOra.box ? { ...rilevamentoOra.box } : {
         left: Math.round(misura[0] * 0.02), top: Math.round(misura[1] * 0.02),
         right: Math.round(misura[0] * 0.16), bottom: Math.round(misura[1] * 0.06),
       },
@@ -414,7 +440,9 @@ function panelImport(panel) {
     });
     panel.append(editor.root);
     const statoOra = el('span', { class: 'hint' });
-    const applica = el('button', {}, 'Usa quest\'area e rifai la deduplicazione');
+    const applica = el('button', {}, value.timestamp_box
+      ? 'Applica la correzione e rifai la deduplicazione'
+      : 'Conferma quest\'area e rifai la deduplicazione');
     applica.addEventListener('click', async () => {
       const box = editor.boxes.timestamp;
       if (!box) { toast('disegna prima il rettangolo attorno all\'ora', true); return; }
@@ -429,7 +457,24 @@ function panelImport(panel) {
       } catch (errore) { toast(errore.message, true); statoOra.textContent = errore.message; }
       finally { applica.disabled = false; }
     });
-    const riga = el('div', { class: 'row' }, applica, Lente.bottone(editor.contestoLente), statoOra);
+    const riconosci = el('button', { class: 'ghost' }, rilevamentoOra.box
+      ? 'Riconosci di nuovo' : 'Riconosci automaticamente');
+    riconosci.addEventListener('click', async () => {
+      riconosci.disabled = true;
+      try {
+        const avvio = await api(`/projects/${state.projectId}/import/timestamp/detect`, { body: {} });
+        const job = await pollJob(avvio.job_id, statoOra);
+        if ((job.result || {}).applied) {
+          toast('data e ora riconosciute automaticamente · deduplicazione rifatta');
+        } else {
+          toast('trovata una proposta da controllare', true);
+        }
+        await reload();
+      } catch (errore) { toast(errore.message, true); statoOra.textContent = errore.message; }
+      finally { riconosci.disabled = false; }
+    });
+    const riga = el('div', { class: 'row' }, applica, riconosci,
+      Lente.bottone(editor.contestoLente), statoOra);
     if (value.timestamp_box) {
       riga.append(confermaInDueTempi('Togli l\'area', 'si torna a confrontare tutta l\'immagine.',
         async () => {

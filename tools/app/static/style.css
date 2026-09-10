@@ -117,6 +117,11 @@ p.avviso { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--warn);
            background: rgba(210, 153, 34, 0.10); color: var(--warn); max-width: 900px; }
 ul.problems li { color: var(--warn); }
 .ok-badge { color: var(--ok); }
+.timestamp-detection {
+  padding: 6px 8px;
+  border-left: 3px solid #ff4fd8;
+  background: rgba(255, 79, 216, 0.06);
+}
 .err-badge { color: var(--err); }
 
 .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 10px; }
@@ -451,6 +456,13 @@ button.chip.on {
   border-color: var(--accent);
 }
 button.chip:disabled { opacity: 0.35; }
+/* Il riquadro mentre lo si sta tirando: tratteggiato, cosi' non si confonde con quello
+   trovato dal modulo, che e' pieno. */
+.editor-box.tracciante {
+  border: 1px dashed var(--accent);
+  background: rgba(88, 166, 255, 0.12);
+  pointer-events: none;
+}
 /* Il valore che questa immagine ha adesso, fra le scorciatoie della correzione. */
 button.ghost.sq2.on { border-color: var(--accent); color: var(--text); }
 .ov-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }

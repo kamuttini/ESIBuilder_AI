@@ -240,6 +240,81 @@ async function createDepthViewer(projectId, sampleSize) {
     window.addEventListener('pointerup', molla);
   }
 
+  /* Disegnare il riquadro invece di trascinarlo fin qui.
+
+     Quando il modulo lo mette dall'altra parte dello schermo - e capita: un bottone
+     dell'interfaccia scambiato per l'etichetta - portarlo a mano sul numero voleva dire
+     trascinarlo per mille pixel a piccoli strappi, guardando una striscia ingrandita che
+     inquadra il posto sbagliato. Qui si disegna dove serve: si tira col mouse sull'immagine
+     (o sulla striscia ingrandita) e quello e' il riquadro nuovo. Un clic secco, senza
+     trascinare, ci porta invece il riquadro di adesso senza cambiargli misura: e' il gesto
+     giusto quando la misura era buona e il posto no. */
+  const tracciante = el('div', { class: 'editor-box tracciante' });
+  tracciante.style.display = 'none';
+  stage.append(tracciante);
+  const traccianteZoom = el('div', { class: 'editor-box tracciante' });
+  traccianteZoom.style.display = 'none';
+  zoomStage.append(traccianteZoom);
+
+  function disegnaRiquadro(event, dove) {
+    if (!modificabile()) return;
+    const inZoom = dove === 'zoom';
+    if (inZoom && !finestra) return;
+    event.preventDefault();
+    const nodo = inZoom ? traccianteZoom : tracciante;
+    const tela = inZoom ? zoomImg : image;
+    const s = inZoom ? scalaZoom() : scala();
+    const rettangolo = tela.getBoundingClientRect();
+    const nativoDa = (cx, cy) => ({
+      x: (inZoom ? finestra[0] : 0) + (cx - rettangolo.left) / (s.x || 1),
+      y: (inZoom ? finestra[1] : 0) + (cy - rettangolo.top) / (s.y || 1),
+    });
+    const partenza = nativoDa(event.clientX, event.clientY);
+    let ultimo = partenza;
+    const disegnaTraccia = () => {
+      const x0 = Math.min(partenza.x, ultimo.x);
+      const x1 = Math.max(partenza.x, ultimo.x);
+      const y0 = Math.min(partenza.y, ultimo.y);
+      const y1 = Math.max(partenza.y, ultimo.y);
+      nodo.style.display = 'block';
+      nodo.style.left = `${(x0 - (inZoom ? finestra[0] : 0)) * s.x}px`;
+      nodo.style.top = `${(y0 - (inZoom ? finestra[1] : 0)) * s.y}px`;
+      nodo.style.width = `${(x1 - x0) * s.x}px`;
+      nodo.style.height = `${(y1 - y0) * s.y}px`;
+    };
+    const muovi = (e) => { ultimo = nativoDa(e.clientX, e.clientY); disegnaTraccia(); };
+    const molla = () => {
+      window.removeEventListener('pointermove', muovi);
+      window.removeEventListener('pointerup', molla);
+      nodo.style.display = 'none';
+      trascinando = false;
+      const largo = Math.abs(ultimo.x - partenza.x);
+      const alto = Math.abs(ultimo.y - partenza.y);
+      if (largo >= 4 && alto >= 3) {
+        bozza = normalizza({
+          left: Math.min(partenza.x, ultimo.x), right: Math.max(partenza.x, ultimo.x),
+          top: Math.min(partenza.y, ultimo.y), bottom: Math.max(partenza.y, ultimo.y),
+        });
+      } else if (bozza) {
+        // Clic secco: il riquadro di adesso, centrato qui. La misura non si tocca.
+        const meta_x = (bozza.right - bozza.left) / 2;
+        const meta_y = (bozza.bottom - bozza.top) / 2;
+        bozza = sposta(bozza, partenza.x - meta_x - bozza.left, partenza.y - meta_y - bozza.top);
+      } else {
+        return;
+      }
+      caricaZoom(names[index], bozza);
+      disegna();
+      disegnaZoom();
+      renderRiquadro();
+    };
+    trascinando = true;
+    window.addEventListener('pointermove', muovi);
+    window.addEventListener('pointerup', molla);
+  }
+  image.addEventListener('pointerdown', (e) => disegnaRiquadro(e, 'grande'));
+  zoomImg.addEventListener('pointerdown', (e) => disegnaRiquadro(e, 'zoom'));
+
   /* Cosa vede la lente: il riquadro di questa immagine, col valore letto. */
   const contestoLente = () => {
     const r = byName.get(names[index]) || {};
@@ -273,13 +348,15 @@ async function createDepthViewer(projectId, sampleSize) {
     const s = scala();
     const colore = (modes[r.mode] || {}).color || '#ffffff';
     boxNode.style.display = 'block';
-    boxNode.className = 'editor-box readonly';
+    // Anche sull'immagine grande si prende e si tira: era guardabile e basta, e chi voleva
+    // spostarlo doveva farlo dalla striscia ingrandita, che pero' inquadra il posto vecchio.
+    boxNode.className = 'editor-box' + (modificabile() ? '' : ' readonly');
     boxNode.style.setProperty('--box-color', colore);
     boxNode.style.left = `${box.left * s.x}px`;
     boxNode.style.top = `${box.top * s.y}px`;
     boxNode.style.width = `${(box.right - box.left) * s.x}px`;
     boxNode.style.height = `${(box.bottom - box.top) * s.y}px`;
-    for (const h of maniglie) h.style.display = 'none';
+    for (const h of maniglie) h.style.display = modificabile() ? 'block' : 'none';
     if (Lente.viva()) Lente.aggiorna(contestoLente());
   };
 
@@ -317,8 +394,8 @@ async function createDepthViewer(projectId, sampleSize) {
       `${lista.indexOf(names[index]) + 1} di ${lista.length} · `,
       el('strong', { style: `color:${r.depth_mm == null ? 'var(--muted)' : m.color || 'var(--text)'}` },
         r.depth_mm == null ? 'nessuna depth' : `${r.depth_mm} mm`),
-      el('span', {}, ` · trascina il riquadro o le maniglie · ← → cambia immagine, `
-        + 'shift+frecce sposta di un pixel, shift+alt+← → il lato destro'),
+      el('span', {}, ' · tira col mouse per disegnarlo dove serve, un clic ce lo porta · '
+        + '← → cambia immagine, shift+frecce sposta di un pixel, shift+alt+← → il lato destro'),
     );
     dettaglio.innerHTML = '';
     dettaglio.append(el('div', {},
@@ -716,7 +793,9 @@ async function createDepthViewer(projectId, sampleSize) {
     }
     riquadro.append(
       el('div', { class: 'hint' },
-        'trascina il riquadro o le maniglie per stringerlo sul solo numero: piu\' e\' stretto, '
+        'il riquadro si disegna: tira col mouse sull\'immagine o sulla striscia ingrandita, '
+        + 'e quello e\' il riquadro nuovo. Un clic secco ci porta quello di adesso senza '
+        + 'cambiargli misura; le maniglie lo stringono sul solo numero, e piu\' e\' stretto '
         + 'piu\' il match tiene su tutte le immagini.'),
       el('div', { class: 'row' }, misura),
       el('div', { class: 'row' }, stringi, esitoStretto),
