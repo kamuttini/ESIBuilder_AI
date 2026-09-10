@@ -4375,9 +4375,22 @@ def _costruzione_sugli_assi(misure: Dict[str, Dict], width: int, height: int) ->
         asse_y = (y_alta + y_bassa) / 2.0
         mezza_y = abs(y_bassa - y_alta) / 2.0
 
+    # Il centro di ciascun gruppo: e' la corda rappresentativa, una per orientamento. Se i
+    # quattro non cadono sullo stesso punto, il ventaglio non e' dove lo crediamo - o una
+    # corda e' misurata male.
+    centri_gruppo = {
+        group: round((float(m["segment"]["x1"]) + float(m["segment"]["x2"])) / 2.0 * width, 1)
+        for group, m in misure.items() if m.get("segment")
+    }
+    media_gruppi = (round(sum(centri_gruppo.values()) / len(centri_gruppo), 1)
+                    if centri_gruppo else None)
     return {
         "axis_x": round(asse_x, 1),
         "half_x": round(mezza_x, 1),
+        "centres_by_group": centri_gruppo,
+        "centre_mean": media_gruppi,
+        "group_spread_px": (round(max(centri_gruppo.values()) - min(centri_gruppo.values()), 1)
+                            if len(centri_gruppo) > 1 else 0.0),
         # quanto ballano i centri delle corde: se e' molto, l'asse e' incerto e la
         # simmetria costa slack da una parte
         "centre_spread_px": round(max(centri) - min(centri), 1),
@@ -4392,6 +4405,45 @@ def _costruzione_sugli_assi(misure: Dict[str, Dict], width: int, height: int) ->
         "lowest": ({"image": bassa.get("image"), "group": bassa.get("group"),
                     "y": round(float(bassa["y"]) * height, 1)} if bassa else None),
         "image_size": [width, height],
+    }
+
+
+def _centratura_sulle_corde(misure: Dict, corrente: Dict, width: int) -> Dict:
+    """Quanto il rettangolo di adesso e' scentrato rispetto al centro delle corde.
+
+    Il rettangolo ha un asse di simmetria, ed e' attorno a quello che il contenuto si
+    ribalta: se non cade sul centro del ventaglio, ribaltando l'immagine il ventaglio si
+    sposta - ed e' l'errore che si porta dietro tutto il resto. I quattro centri delle corde
+    dicono dov'e' davvero; la loro media e' la stima migliore che abbiamo, e lo scarto fra i
+    quattro dice quanto fidarsi.
+    """
+    # I centri si rifanno dalle corde, non dalla costruzione: cosi' vale anche per uno studio
+    # salvato prima che questo conto esistesse, e resta una cosa sola da tenere aggiornata.
+    centri = {
+        gruppo: round((float(m["segment"]["x1"]) + float(m["segment"]["x2"])) / 2.0 * width, 1)
+        for gruppo, m in (misure or {}).items()
+        if isinstance(m, dict) and m.get("segment")
+    }
+    if not centri or not corrente or not width:
+        return {}
+    media = round(sum(centri.values()) / len(centri), 1)
+    centro_rect = (int(corrente["left"]) + int(corrente["right"])) / 2.0
+    scarto = round(centro_rect - float(media), 1)
+    largo = int(corrente["right"]) - int(corrente["left"])
+    # Il rettangolo traslato sul centro delle corde: stessa larghezza, stessa altezza, solo
+    # spostato. Contro un bordo si ferma, e allora il centro non ci arriva: si dice.
+    sinistra = int(round(float(media) - largo / 2.0))
+    sinistra = max(0, min(sinistra, max(0, width - 1 - largo)))
+    centrato = {**corrente, "left": sinistra, "right": sinistra + largo}
+    return {
+        "centres_by_group": centri,
+        "mean": media,
+        "spread_px": round(max(centri.values()) - min(centri.values()), 1),
+        "deltas_by_group": {g: round(c - float(media), 1) for g, c in centri.items()},
+        "rect_centre": round(centro_rect, 1),
+        "off_px": scarto,
+        "rect": centrato,
+        "clamped": abs((sinistra + largo / 2.0) - float(media)) > 0.6,
     }
 
 
@@ -4469,9 +4521,11 @@ def _segments_analysis(
     piani_distinti = {p for p in piani_per_gruppo.values() if p}
     conflitto = len(piani_distinti) > 1
 
+    costruzione = _costruzione_sugli_assi(misure, width, height)
     return {
         "per_group": misure,
-        "construction": _costruzione_sugli_assi(misure, width, height),
+        "construction": costruzione,
+        "centering": _centratura_sulle_corde(misure, corrente, width),
         "planes_by_group": piani_per_gruppo,
         "plane_conflict": conflitto,
         "plane_note": (
@@ -4704,6 +4758,13 @@ def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
         risultato = _segments_analysis(misure, width, height, corrente, rect_norm)
         risultato["chosen_by"] = "depth"
         risultato["depth_by_group"] = {g: m["depth_mm"] for g, m in misure.items()}
+        # I gruppi rimasti fuori: o non hanno un'immagine con la depth confermata, o su
+        # quelle che hanno la corda non si e' trovata. Tacerlo farebbe sembrare che la
+        # cartella abbia due orientamenti invece di quattro.
+        risultato["groups_skipped"] = sorted(
+            g for g in set(gruppi.values())
+            if g in marker_refine.GROUP_ORDER and g not in misure
+        )
         _job_update(job_id, status="done", stage="fatto", result=risultato)
 
         def mutate(project: Project, value: Dict) -> Dict:
@@ -4715,6 +4776,7 @@ def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
                 "pairs": {k: v["max_px"] for k, v in risultato["pairs"].items()},
                 "per_group": {g: m["segment"]["length_px"] for g, m in misure.items()},
                 "depth_by_group": risultato["depth_by_group"],
+                "groups_skipped": risultato["groups_skipped"],
                 "ts": datetime.now().isoformat(timespec="seconds"),
             }
             catena["passes"] = passi
@@ -4770,11 +4832,20 @@ def api_rect_chain(project_id: str):
             "state": stato,
             "saved": salvato,
         })
+    # La centratura si rifa' **adesso**: confronta i centri delle corde con il rettangolo di
+    # questo momento, e il rettangolo cambia (lo applichi tu) senza che le corde si rimisurino.
+    studio = dict(rect_value.get("study") or {})
+    segmenti = dict(studio.get("segments") or {})
+    if segmenti.get("per_group") and rect_value.get("rect_echo"):
+        larghezza = (project.step_value("import").get("image_sample_size") or [0, 0])[0]
+        segmenti["centering"] = _centratura_sulle_corde(
+            segmenti["per_group"], rect_value["rect_echo"], int(larghezza or 0))
+        studio["segments"] = segmenti
     return jsonify(
         {
             "rect": rect_value.get("rect_echo"),
             "margin_percent": rect_value.get("margin_percent"),
-            "study": rect_value.get("study") or {},
+            "study": studio,
             "preview_image": rect_value.get("preview_image"),
             # tutte le immagini, divise per orientamento: lo studio si guarda su una sola,
             # ma va controllato su tutte

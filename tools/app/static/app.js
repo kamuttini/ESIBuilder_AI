@@ -1373,6 +1373,13 @@ function rectChainCard(panel, ganciRect) {
           ? el('div', { class: 'hint' }, 'misurate a '
               + Object.entries(pass.saved.depth_by_group)
                 .map(([g, mm]) => `${g} ${mm} mm`).join(' · '))
+          : null,
+        // I gruppi senza depth confermata restano fuori: dirlo evita di credere che la
+        // cartella abbia due orientamenti invece di quattro.
+        (pass.saved && (pass.saved.groups_skipped || []).length)
+          ? el('div', { class: 'hint', style: 'color:var(--warn)' },
+              `fuori ${pass.saved.groups_skipped.join(', ')}: nessuna immagine con la depth `
+              + 'confermata, o corda non trovata')
           : null));
       if (!pass.missing.length && pass.id !== 'rete') {
         const run = el('button', { class: 'ghost' },
@@ -1568,7 +1575,9 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     }
     const anteprima = attivi.candidato === '__costruito'
       ? rettCostruito()
-      : (attivi.candidato === 'ampiezza' ? rettAllaCordaPiuLarga() : null);
+      : (attivi.candidato === '__centrato'
+        ? ((study && study.centering) ? study.centering.rect : null)
+        : (attivi.candidato === 'ampiezza' ? rettAllaCordaPiuLarga() : null));
     if (anteprima) {
       boxes.push({ box: anteprima, color: '#d29922', label: 'rettangolo proposto' });
     }
@@ -1853,6 +1862,9 @@ function rectStudyCard(panel, chainIniziale, ganci) {
       if (attivi.candidato === '__costruito') {
         const r = rettCostruito();
         if (r) stage.append(boxNode(r, '#d29922', true, 'costruito sugli assi'));
+      } else if (attivi.candidato === '__centrato') {
+        const r = (study && study.centering) ? study.centering.rect : null;
+        if (r) stage.append(boxNode(r, '#d29922', true, 'centrato sulle corde'));
       } else if (attivi.candidato === 'ampiezza') {
         const r = rettAllaCordaPiuLarga();
         if (r) stage.append(boxNode(r, '#d29922', true,
@@ -2196,6 +2208,74 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     dentro.append(el('p', { class: 'hint' },
       'l\'asse si misura da due cose indipendenti: il ventaglio e i marker. Se concordano ' +
       '(sotto i 15 px) ribaltare attorno a quell\'asse e\' verificato; se no, no.'));
+    /* Il centro delle corde contro il centro del rettangolo.
+
+       Il rettangolo ha un asse di simmetria, ed e' attorno a quello che il contenuto si
+       ribalta: se non cade sul centro del ventaglio, ribaltando l'immagine il ventaglio si
+       sposta - ed e' l'errore che si porta dietro tutto il resto. I quattro centri delle
+       corde dicono dov'e' davvero; la loro media e' la stima migliore, e quanto ballano fra
+       loro dice se fidarsi. */
+    const cen = study && study.centering;
+    if (cen && cen.mean != null) {
+      const scelto = attivi.candidato === '__centrato';
+      const blocco = el('div', { class: 'proposta' + (scelto ? ' scelta' : '') });
+      const vedi = el('button', { class: 'chip' + (scelto ? ' on' : '') },
+        scelto ? 'nascondi' : 'vedi');
+      vedi.addEventListener('click', () => {
+        attivi.candidato = scelto ? '' : '__centrato';
+        renderCandidati();
+        draw();
+      });
+      const fuori = Math.abs(cen.off_px);
+      blocco.append(el('div', { class: 'proposta-testa' },
+        el('span', { style: 'font-weight:600' }, 'Centrato sul centro delle corde'),
+        el('span', { class: 'hint' },
+          fuori <= 2 ? 'gia\' centrato' : `fuori di ${fuori} px`),
+        vedi));
+      blocco.append(el('div', { class: 'hint' },
+        `centro delle corde ${cen.mean} · centro del rettangolo ${cen.rect_centre} · `
+        + (fuori <= 2
+          ? 'coincidono: l\'asse di simmetria e\' gia\' sul ventaglio.'
+          : `il rettangolo pende di ${fuori} px verso `
+            + `${cen.off_px > 0 ? 'destra' : 'sinistra'}.`)));
+      const righe = Object.entries(cen.centres_by_group || {}).sort();
+      blocco.append(el('div', { class: 'hint' },
+        'i quattro centri: '
+        + righe.map(([g, c]) => {
+          const d = (cen.deltas_by_group || {})[g];
+          return `${g} ${c}${d ? ` (${d > 0 ? '+' : ''}${d})` : ''}`;
+        }).join(' · ')
+        + (cen.spread_px ? ` — ballano di ${cen.spread_px} px` : ' — coincidono')));
+      if (cen.spread_px > 12) {
+        blocco.append(el('p', { class: 'hint', style: 'color:var(--warn)' },
+          `${cen.spread_px} px fra il centro piu' a sinistra e quello piu' a destra: `
+          + 'per un ventaglio simmetrico e\' tanto. Guarda le corde una per una prima di '
+          + 'centrare su una media che nasce da una misura sbagliata.'));
+      }
+      if (cen.clamped) {
+        blocco.append(el('p', { class: 'hint', style: 'color:var(--warn)' },
+          'contro il bordo dell\'immagine: il rettangolo si ferma prima, e il centro non '
+          + 'arriva del tutto sulle corde.'));
+      }
+      blocco.append(el('div', { class: 'hint' },
+        `${cen.rect.top}|${cen.rect.left}|${cen.rect.bottom}|${cen.rect.right} · `
+        + `${cen.rect.right - cen.rect.left}x${cen.rect.bottom - cen.rect.top} px — `
+        + 'stessa misura, solo spostato.'));
+      if (fuori > 2) {
+        blocco.append(confermaInDueTempi('centra il rettangolo',
+          `si sposta di ${fuori} px: la misura non cambia, cambia dove sta.`,
+          async () => {
+            try {
+              await api(`/projects/${state.projectId}/rect/apply`,
+                { body: { pass: 'centrato', rect: cen.rect } });
+              toast(`rettangolo centrato sulle corde (${cen.mean})`);
+              await reload();
+            } catch (error) { toast(error.message, true); }
+          }));
+      }
+      candidati.append(blocco);
+    }
+
     const costr = study && study.construction;
     if (costr && costr.axis_x != null) {
       const blocco = el('div', { class: 'proposta' + (attivi.candidato === '__costruito' ? ' scelta' : '') });
