@@ -168,6 +168,9 @@ def default_source() -> Dict:
         "duplicates_removed": 0,
         "rotation_applied": 0,
         "rotation_source": "not_run",
+        # Eccezioni manuali: una cartella puo' avere pochi frame arrivati gia' ruotati.
+        # La chiave e' il nome relativo del frame, il valore l'angolo orario da applicare.
+        "rotation_overrides": {},
         "resize_factor": 1.0,
         "native_size": [0, 0],
     }
@@ -508,9 +511,18 @@ class Project:
         if not names or not folder.is_dir():
             return None
         angolo = self.rotation()
+        override_grezzo = self.source.get("rotation_overrides") or {}
+        overrides = {}
+        for nome, valore in override_grezzo.items():
+            try:
+                gradi = int(valore) % 360
+            except (TypeError, ValueError):
+                continue
+            if gradi in (0, 90, 180, 270):
+                overrides[str(nome)] = gradi
         target = self.root / self.DEDUP_LINKS
         marker = target / ".built_from"
-        stamp = f"{folder}\n{len(names)}\nrot={angolo}"
+        stamp = f"{folder}\n{len(names)}\nrot={angolo}\noverrides={json.dumps(overrides, sort_keys=True)}"
         if marker.is_file() and marker.read_text(encoding="utf-8") == stamp:
             return target
 
@@ -521,12 +533,13 @@ class Project:
             destinazione.parent.mkdir(parents=True, exist_ok=True)
             source = folder / name
             try:
-                if angolo:
+                rotazione = overrides.get(name, angolo)
+                if rotazione:
                     from PIL import Image  # noqa: PLC0415
 
                     with Image.open(source) as immagine:
                         # `angle` e' la rotazione oraria che raddrizza: PIL ruota antiorario.
-                        immagine.rotate(-angolo, expand=True).save(destinazione)
+                        immagine.rotate(-rotazione, expand=True).save(destinazione)
                 else:
                     destinazione.symlink_to(source)
             except OSError:

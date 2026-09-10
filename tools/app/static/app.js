@@ -92,7 +92,23 @@ async function createProject() {
     const { project_id } = await api('/projects', { body: { name } });
     $('#new-project-name').value = '';
     await refreshProjects();
+    state.step = 'import';
     await openProject(project_id);
+    // Creare il contenitore e' solo il primo gesto: la domanda successiva e' sempre
+    // «dove sono le acquisizioni?». Apro subito il selettore vero del server, invece di
+    // lasciare una pagina import vuota che costringe a premere di nuovo «Sfoglia».
+    apriSelettoreCartella({
+      start: '',
+      onPick: async (folder) => {
+        const input = $('#panel input[placeholder*="cartella/acquisizioni"]');
+        if (input) input.value = folder;
+        // La pipeline iniziale parte da sola: il pulsante resta disponibile anche dopo,
+        // per chi vuole cambiare cartella o rifare l'analisi.
+        const importButton = [...$('#panel').querySelectorAll('button')]
+          .find((button) => /Importa e analizza/.test(button.textContent));
+        if (importButton) importButton.click();
+      },
+    });
   } catch (error) { toast(error.message, true); }
 }
 
@@ -104,6 +120,7 @@ async function openProject(projectId) {
   state.status = data.status;
   state.advancedStages = data.advanced_stages || { ready: true, blocked_reason: '' };
   state.splitPending = data.split_pending || null;
+  state.rotationImages = data.rotation_images || [];
   state.fssPath = data.fss_path;
   $('#project-select').value = projectId;
   render();
@@ -322,9 +339,9 @@ function panelImport(panel) {
   const analysis = state.project.analysis || {};
 
   panel.append(el('p', { class: 'hint' },
-    'primo tempo: dedup, rotazione, ecografo, sonda e abbozzo del rettangolo. Poi controlla '
-    + 'il piano di ogni immagine e, se la cartella contiene sia L sia T, dividila in due '
-    + 'progetti. Orientamento, depth e scala si calcolano solo dopo, su un piano per volta.'));
+    'dedup, rotazione, ecografo, sonda, rettangolo e piano L/T partono da soli. Se il '
+    + 'piano contiene sia L sia T, l\'app ti chiede solo di dividerli: poi orientamento, '
+    + 'depth e scala continuano automaticamente un piano per volta.'));
 
   const input = el('input', {
     type: 'text', value: value.folder || state.project.source.folder || '',
@@ -386,6 +403,73 @@ function panelImport(panel) {
     panel.append(el('ul', { class: 'problems' }, el('li', {}, warning)));
   }
 
+  // L'OSD e' una proposta, non una sentenza: sulle schermate con poco testo puo' sbagliare.
+  // La correzione puo' valere per tutto il set oppure per una o piu' eccezioni, senza mai
+  // ruotare il file originale sul disco.
+  const avviaRotazione = async (angle, names, status) => {
+    try {
+      const avvio = await api(`/projects/${state.projectId}/import/rotation`, {
+        body: { angle, names },
+      });
+      await pollJob(avvio.job_id, status);
+      toast(names.length ? `rotazione corretta su ${names.length} immagini` : 'rotazione corretta per tutta la cartella');
+      await reload();
+    } catch (errore) { toast(errore.message, true); if (status) status.textContent = errore.message; }
+  };
+  const rotazione = el('details', { class: 'ov-fold' }, el('summary', {}, 'Correggi la rotazione'));
+  rotazione.append(el('p', { class: 'hint' },
+    'Se l\'anteprima non e\' dritta, scegli l\'angolo da applicare. I file originali non vengono mai modificati; '
+    + 'si ricostruisce solo la copia di lavoro e si ricalcolano le proposte non confermate.'));
+  const angoli = [['0', '0° — gia\' dritta'], ['90', '90° in senso orario'],
+    ['180', '180°'], ['270', '270° in senso orario']];
+  const selectRotazione = el('select', {});
+  for (const [valueAngle, label] of angoli) selectRotazione.append(el('option', { value: valueAngle }, label));
+  selectRotazione.value = String(value.rotation_applied ?? 0);
+  const statoRotazione = el('span', { class: 'hint' });
+  const tuttaCartella = el('button', {}, 'Applica a tutta la cartella');
+  tuttaCartella.addEventListener('click', async () => {
+    tuttaCartella.disabled = true;
+    await avviaRotazione(Number(selectRotazione.value), [], statoRotazione);
+    tuttaCartella.disabled = false;
+  });
+  rotazione.append(el('div', { class: 'row' }, selectRotazione, tuttaCartella, statoRotazione));
+
+  const nomiRotazione = state.rotationImages || [];
+  if (nomiRotazione.length) {
+    const selezionate = state.__rotazioneScelte || (state.__rotazioneScelte = new Set());
+    for (const nome of [...selezionate]) if (!nomiRotazione.includes(nome)) selezionate.delete(nome);
+    const specifiche = el('details', { class: 'ov-fold' },
+      el('summary', {}, `Solo immagini selezionate (${selezionate.size})`));
+    specifiche.append(el('p', { class: 'hint' },
+      `mostro le prime ${nomiRotazione.length} immagini del progetto: spunta una o piu' eccezioni.`));
+    const lista = el('div', { class: 'depth-rimaste' });
+    const refreshSummary = () => {
+      specifiche.querySelector('summary').textContent = `Solo immagini selezionate (${selezionate.size})`;
+    };
+    for (const nome of nomiRotazione) {
+      const check = el('input', { type: 'checkbox', checked: selezionate.has(nome) });
+      check.addEventListener('change', () => {
+        if (check.checked) selezionate.add(nome); else selezionate.delete(nome);
+        refreshSummary();
+      });
+      lista.append(el('label', { class: 'row', style: 'margin:2px 0' }, check,
+        el('img', { loading: 'lazy', alt: '', style: 'width:80px;max-height:52px;object-fit:contain',
+          src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=120` }),
+        el('span', {}, nome.split('/').pop())));
+    }
+    const applicaScelte = el('button', {}, 'Applica alle selezionate');
+    applicaScelte.addEventListener('click', async () => {
+      const names = [...selezionate];
+      if (!names.length) { toast('seleziona almeno un\'immagine', true); return; }
+      applicaScelte.disabled = true;
+      await avviaRotazione(Number(selectRotazione.value), names, statoRotazione);
+      applicaScelte.disabled = false;
+    });
+    specifiche.append(lista, applicaScelte);
+    rotazione.append(specifiche);
+  }
+  panel.append(rotazione);
+
   /* L'area dell'orologio.
 
      Due fotogrammi della stessa scena presi a un secondo di distanza differiscono in ogni
@@ -435,6 +519,40 @@ function panelImport(panel) {
         right: Math.round(misura[0] * 0.16), bottom: Math.round(misura[1] * 0.06),
       },
     };
+    let timerDedup = null;
+    let dedupInCorso = false;
+    let richiestaDedup = false;
+    let ultimoBox = '';
+    const statoOra = el('span', { class: 'hint' });
+    const boxKey = (box) => ['top', 'left', 'bottom', 'right'].map((side) => box?.[side]).join('|');
+    const rifaiDedup = async (automatico = false) => {
+      const box = editor.boxes.timestamp;
+      if (!box || boxKey(box) === ultimoBox || dedupInCorso) {
+        richiestaDedup = richiestaDedup || (!!box && boxKey(box) !== ultimoBox);
+        return;
+      }
+      dedupInCorso = true;
+      ultimoBox = boxKey(box);
+      statoOra.textContent = automatico ? 'aggiorno la deduplicazione…' : '';
+      try {
+        const avvio = await api(`/projects/${state.projectId}/import/timestamp`, { body: { box } });
+        const job = await pollJob(avvio.job_id, statoOra);
+        const r = job.result || {};
+        if (!automatico) toast(`${r.kept} immagini tenute · ${r.identical} identiche e ${r.timestamp} `
+          + 'uguali a meno dell\'ora, scartate');
+        await reload();
+      } catch (errore) {
+        ultimoBox = '';
+        toast(errore.message, true);
+        statoOra.textContent = errore.message;
+      } finally {
+        dedupInCorso = false;
+        if (richiestaDedup) {
+          richiestaDedup = false;
+          setTimeout(() => rifaiDedup(true), 80);
+        }
+      }
+    };
     const editor = createBoxEditor({
       imageSrc: `/api/projects/${state.projectId}/image`
         + `?name=${encodeURIComponent(anteprima)}&w=980`,
@@ -442,10 +560,13 @@ function panelImport(panel) {
       sampleSize: value.image_sample_size,
       projectId: state.projectId,
       imageName: anteprima,
-      onChange: () => { statoOra.textContent = ''; },
+      onChange: () => {
+        statoOra.textContent = 'modifica rilevata: ricalcolo automatico tra un attimo…';
+        if (timerDedup) clearTimeout(timerDedup);
+        timerDedup = setTimeout(() => rifaiDedup(true), 650);
+      },
     });
     panel.append(editor.root);
-    const statoOra = el('span', { class: 'hint' });
     const applica = el('button', {}, value.timestamp_box
       ? 'Applica la correzione e rifai la deduplicazione'
       : 'Conferma quest\'area e rifai la deduplicazione');
@@ -454,12 +575,9 @@ function panelImport(panel) {
       if (!box) { toast('disegna prima il rettangolo attorno all\'ora', true); return; }
       applica.disabled = true;
       try {
-        const avvio = await api(`/projects/${state.projectId}/import/timestamp`, { body: { box } });
-        const job = await pollJob(avvio.job_id, statoOra);
-        const r = job.result || {};
-        toast(`${r.kept} immagini tenute · ${r.identical} identiche e ${r.timestamp} `
-          + 'uguali a meno dell\'ora, scartate');
-        await reload();
+        if (timerDedup) { clearTimeout(timerDedup); timerDedup = null; }
+        ultimoBox = '';
+        await rifaiDedup(false);
       } catch (errore) { toast(errore.message, true); statoOra.textContent = errore.message; }
       finally { applica.disabled = false; }
     });

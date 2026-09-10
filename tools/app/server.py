@@ -158,6 +158,17 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
     """Step 0: dedup, rotation, vendor, probe, rect and L/T, before the user sees anything."""
     try:
         project = _project(project_id)
+        sorgente_prima = dict(project.source)
+        # Una scelta manuale e' piu' forte dell'OSD e deve sopravvivere a «rianalizza».
+        # Vale soltanto per la stessa cartella: importare un'altra acquisizione ricomincia
+        # correttamente dal riconoscimento automatico.
+        rotazione_manual = (
+            int(sorgente_prima.get("rotation_applied") or 0) % 360
+            if sorgente_prima.get("rotation_source") == "user"
+            and str(sorgente_prima.get("folder") or "") == str(folder) else None
+        )
+        override_rotazione = dict(sorgente_prima.get("rotation_overrides") or {}) \
+            if str(sorgente_prima.get("folder") or "") == str(folder) else {}
 
         _job_update(job_id, stage="scansione e dedup bit a bit")
         # Quello che appartiene al progetto e non alla cartella sopravvive al rilancio:
@@ -194,7 +205,10 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
             raise FileNotFoundError("nessuna immagine da analizzare")
 
         _job_update(job_id, stage="rotazione (OSD)", total=len(picked))
-        rotation = estimate_rotation(picked)
+        rotation = ( {
+            "angle": rotazione_manual, "source": "user", "reliable": True,
+            "reason": "rotazione scelta manualmente", "votes": {},
+        } if rotazione_manual is not None else estimate_rotation(picked) )
         angolo = int(rotation["angle"] or 0) % 360
         imported["rotation_applied"] = angolo
         imported["rotation_source"] = rotation["source"]
@@ -204,6 +218,7 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         # raddrizzate, e tutto - reti comprese - legge da li'.
         project.source["rotation_applied"] = angolo
         project.source["rotation_source"] = rotation["source"]
+        project.source["rotation_overrides"] = override_rotazione
         project.save()
         if angolo:
             _job_update(job_id, stage=f"raddrizzo le immagini di {angolo} gradi", done=0,
@@ -345,6 +360,7 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         project.steps["import"]["value"] = imported
         project.source["rotation_applied"] = angolo
         project.source["rotation_source"] = rotation["source"]
+        project.source["rotation_overrides"] = override_rotazione
         project.save()
 
         # Il nome e' relativo allo specchio di lavoro, non alla cartella originale: da quando
@@ -420,15 +436,19 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         project.steps["import"]["status"] = "confirmed"
         project.save()
 
-        # Qui finisce apposta il primo tempo. Orientamento, depth e scala non devono vedere
-        # una cartella che contiene ancora insieme L e T: prima si controlla il piano di
-        # ogni immagine e, quando sono presenti entrambi, si sdoppia il progetto. I moduli
-        # partiranno poi dal loro comando, separatamente in ciascun progetto.
+        # Il seguito non richiede un secondo clic: parte in un job proprio, cosi' questa
+        # risposta puo' mostrare subito il piano L/T. Se la cartella contiene entrambi i
+        # piani, il job si ferma ordinatamente alla divisione; dopo lo split riparte su
+        # ciascuna meta'. I risultati confermati/corretti dall'utente non vengono scelti
+        # dal pianificatore automatico.
+        automatic_job = _schedule_auto_pipeline(project_id)
         esito = {
             "import": imported,
             "analysis": analysis,
             "codes_filled": filled,
-            "next": "controlla il piano L/T, poi calcola orientamento, depth e scala",
+            "advanced_job_id": automatic_job,
+            "next": ("riconoscimento piano L/T e moduli avviati automaticamente"
+                     if automatic_job else "moduli gia' confermati: nessun ricalcolo automatico"),
         }
         _job_update(job_id, status="done", stage="fatto", result=esito)
     except Exception as error:  # noqa: BLE001 - surfaced to the user as job error
@@ -1362,6 +1382,10 @@ def api_project(project_id: str):
                 "blocked_reason": stages_blocked_reason,
             },
             "split_pending": _divisione_da_riapplicare(project),
+            # La selezione della rotazione mostra solo un lotto: non si trasferiscono migliaia
+            # di nomi nel JSON di ogni refresh, ma si puo' comunque correggere una o piu'
+            # immagini alla volta (le altre si raggiungono dalla cartella).
+            "rotation_images": project.dedup_names()[:240],
             "fss_path": str(project.fss_path()),
         }
     )
@@ -1506,6 +1530,45 @@ def api_project_import(project_id: str):
     return jsonify({"job_id": _start_job(_run_import_analysis, project_id, folder, sample)})
 
 
+@app.post("/api/projects/<project_id>/import/rotation")
+def api_import_rotation(project_id: str):
+    """Correggi la rotazione dell'intera cartella o di frame selezionati.
+
+    La riscrittura riguarda soltanto lo specchio di lavoro del progetto; i file originali
+    restano sempre intatti. Poi si rilancia la pipeline, che aggiorna solo le proposte non
+    confermate e conserva le eccezioni per immagine.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    try:
+        angle = int(payload.get("angle")) % 360
+    except (TypeError, ValueError):
+        return jsonify({"error": "scegli 0°, 90°, 180° o 270°"}), 400
+    if angle not in (0, 90, 180, 270):
+        return jsonify({"error": "scegli 0°, 90°, 180° o 270°"}), 400
+    names = [str(n) for n in (payload.get("names") or []) if str(n)]
+    disponibili = set(project.dedup_names())
+    sconosciuti = [name for name in names if name not in disponibili]
+    if sconosciuti:
+        return jsonify({"error": "una delle immagini selezionate non appartiene al progetto"}), 400
+    if names:
+        overrides = dict(project.source.get("rotation_overrides") or {})
+        for name in names:
+            overrides[name] = angle
+        project.source["rotation_overrides"] = overrides
+    else:
+        # Senza selezione e' una scelta per tutta la cartella; 0 e' un'opzione esplicita,
+        # non un fallimento del riconoscimento.
+        project.source["rotation_applied"] = angle
+        project.source["rotation_source"] = "user"
+        project.source["rotation_overrides"] = {}
+    project.save()
+    folder = str(project.source.get("folder") or "")
+    if not Path(folder).is_dir():
+        return jsonify({"error": "cartella non raggiungibile"}), 400
+    return jsonify({"job_id": _start_job(_run_import_analysis, project_id, folder, 24)})
+
+
 @app.post("/api/projects/<project_id>/steps/<step_id>")
 def api_project_step(project_id: str, step_id: str):
     project = _project(project_id)
@@ -1609,43 +1672,112 @@ def api_planes(project_id: str):
     return jsonify({"job_id": _start_job(_run_planes, project_id)})
 
 
+def _predict_planes(job_id: str, project_id: str) -> Dict[str, int]:
+    """Classifica ogni frame L/T e restituisce i conteggi, senza chiudere il job chiamante."""
+    project = _project(project_id)
+    rect = project.step_value("rect").get("rect_echo")
+    if not rect:
+        raise ValueError("serve prima il rettangolo ecografico: la rete L/T guarda li' dentro")
+    base = project.working_dir()
+    immagini = project.dedup_images()
+    if not immagini:
+        raise ValueError("nessuna immagine da classificare")
+    _job_update(job_id, stage=f"piano L/T su {len(immagini)} immagini", total=len(immagini))
+    righe = _inference_engine().predict_lt_each(
+        immagini, rect,
+        progress=lambda fatte, quante: _job_update(job_id, done=fatte, total=quante),
+    )
+    piani: Dict[str, Dict] = {}
+    for riga in righe:
+        percorso = Path(riga["path"])
+        try:
+            nome = str(percorso.relative_to(base))
+        except ValueError:
+            nome = percorso.name
+        piani[nome] = {"plane": riga.get("plane"), "confidence": riga.get("confidence")}
+    conteggi: Dict[str, int] = {}
+    for voce in piani.values():
+        chiave = voce.get("plane") or "?"
+        conteggi[chiave] = conteggi.get(chiave, 0) + 1
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        # Una correzione fatta fra un riconoscimento e l'altro resta la voce piu' forte.
+        value["planes"] = piani
+        value["plane_counts"] = conteggi
+        return value
+
+    _write_step(project_id, "import", mutate, status="proposed", source="model")
+    return conteggi
+
+
 def _run_planes(job_id: str, project_id: str) -> None:
     try:
-        project = _project(project_id)
-        rect = project.step_value("rect").get("rect_echo")
-        if not rect:
-            raise ValueError("serve prima il rettangolo ecografico: la rete L/T guarda li' dentro")
-        base = project.working_dir()
-        immagini = project.dedup_images()
-        if not immagini:
-            raise ValueError("nessuna immagine da classificare")
-        _job_update(job_id, stage=f"piano L/T su {len(immagini)} immagini", total=len(immagini))
-        righe = _inference_engine().predict_lt_each(
-            immagini, rect,
-            progress=lambda fatte, quante: _job_update(job_id, done=fatte, total=quante),
-        )
-        piani: Dict[str, Dict] = {}
-        for riga in righe:
-            percorso = Path(riga["path"])
-            try:
-                nome = str(percorso.relative_to(base))
-            except ValueError:
-                nome = percorso.name
-            piani[nome] = {"plane": riga.get("plane"), "confidence": riga.get("confidence")}
-        conteggi: Dict[str, int] = {}
-        for voce in piani.values():
-            chiave = voce.get("plane") or "?"
-            conteggi[chiave] = conteggi.get(chiave, 0) + 1
-
-        def mutate(_p: Project, value: Dict) -> Dict:
-            value["planes"] = piani
-            value["plane_counts"] = conteggi
-            return value
-
-        _write_step(project_id, "import", mutate, status="proposed", source="model")
+        conteggi = _predict_planes(job_id, project_id)
         _job_update(job_id, status="done", stage="fatto", result={"counts": conteggi})
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
+def _automatic_stages(project: Project) -> List[str]:
+    """Gli stadi che possono essere aggiornati senza sostituire lavoro gia' confermato.
+
+    `user_edited` sopravvive allo stato `stale`: e' importante, perche' una conferma
+    diventa stale quando cambia il rettangolo ma non autorizza il programma a cancellarla.
+    """
+    if _advanced_stages_block_reason(project):
+        return []
+    orientamento = project.steps.get("orientation") or {}
+    depth = project.steps.get("depth_scale") or {}
+    auto_orientation = not bool(orientamento.get("user_edited"))
+    auto_depth = not bool(depth.get("user_edited"))
+    stages: List[str] = []
+    if auto_orientation:
+        stages.append("orientamento")
+    if auto_depth:
+        stages.extend(("depth", "scala"))
+    return stages
+
+
+_automatic_pipeline_lock = threading.Lock()
+_automatic_pipeline_active: set[str] = set()
+
+
+def _run_auto_pipeline(job_id: str, project_id: str) -> None:
+    """Piano L/T, poi i moduli non confermati; tutto senza dover premere altri pulsanti."""
+    with _automatic_pipeline_lock:
+        if project_id in _automatic_pipeline_active:
+            _job_update(job_id, status="done", stage="gia' in esecuzione", result={"skipped": True})
+            return
+        _automatic_pipeline_active.add(project_id)
+    try:
+        project = _project(project_id)
+        # Il riconoscimento L/T e' utile anche sulle sonde singole come controllo visivo;
+        # solo una sonda biplana con entrambi i piani blocca i moduli in attesa dello split.
+        _predict_planes(job_id, project_id)
+        project = _project(project_id)
+        reason = _advanced_stages_block_reason(project)
+        if reason:
+            _job_update(job_id, status="done", stage="attendo divisione L/T", result={"blocked": reason})
+            return
+        stages = _automatic_stages(project)
+        if not stages:
+            _job_update(job_id, status="done", stage="moduli gia' confermati", result={"skipped": True})
+            return
+        _run_advanced_stages(job_id, project_id, 12, 0.55, {"automatic": True}, stages)
+    except Exception as error:  # noqa: BLE001
+        _job_update(job_id, status="error", stage="errore", error=str(error))
+    finally:
+        with _automatic_pipeline_lock:
+            _automatic_pipeline_active.discard(project_id)
+
+
+def _schedule_auto_pipeline(project_id: str) -> Optional[str]:
+    """Accoda la continuazione automatica; il worker coalesce le richieste concorrenti."""
+    try:
+        _project(project_id)
+    except FileNotFoundError:
+        return None
+    return _start_job(_run_auto_pipeline, project_id)
 
 
 @app.post("/api/projects/<project_id>/planes/correct")
@@ -1829,10 +1961,15 @@ def api_split_planes(project_id: str):
         shutil.rmtree(specchio, ignore_errors=True)
     project.dedup_link_dir()
 
+    automatic_jobs = {
+        "L": _schedule_auto_pipeline(project_id),
+        "T": _schedule_auto_pipeline(nuovo.root.name),
+    }
     return jsonify({"created": nuovo.root.name, "updated": aggiornato,
                     "L": len(nomi["L"]), "T": len(nomi["T"]),
                     "without_plane": len(senza),
-                    "inherited": list(STEP_EREDITATI) + (["scala"] if ereditata else [])})
+                    "inherited": list(STEP_EREDITATI) + (["scala"] if ereditata else []),
+                    "advanced_jobs": automatic_jobs})
 
 
 @app.post("/api/projects/<project_id>/import/timestamp")
@@ -2015,12 +2152,17 @@ def _run_dedup(job_id: str, project_id: str, folder: str, box: Optional[Dict],
         progetto.save()
         progetto.dedup_link_dir()      # ricostruisce lo specchio, ruotato se serve
         doppie = esito.get("duplicates") or {}
+        # L'insieme dei frame e' cambiato: tutte le proposte a valle che non sono state
+        # confermate vanno aggiornate sul nuovo insieme. Il job separato evita di tenere la
+        # UI bloccata mentre l'utente guarda il nuovo conteggio della dedup.
+        automatic_job = _schedule_auto_pipeline(project_id)
         _job_update(job_id, status="done", stage="fatto", result={
             "applied": bool(box),
             "detection": detection or {},
             "kept": esito.get("images_total", 0),
             "identical": len(doppie.get("identical") or []),
             "timestamp": len(doppie.get("timestamp") or []),
+            "advanced_job_id": automatic_job,
         })
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
@@ -2800,7 +2942,10 @@ def _consolidation_worker(project_id: str) -> None:
                               "stage": "riparto con le correzioni nuove"})
                 continue
             state.update({"state": "idle", "stage": "", "done": 0, "total": 0, "queued": 0})
-            return
+        # Gli envelope sono stati aggiornati: ora le proposte a valle possono leggere la
+        # correzione. Il planner lascia intatti gli step confermati dall'utente.
+        _schedule_auto_pipeline(project_id)
+        return
 
 
 def _schedule_consolidation(project_id: str) -> Dict:
@@ -4978,7 +5123,11 @@ def api_rect_apply(project_id: str):
         value = _write_step(project_id, "rect", mutate, status="corrected", source="user")
     except ValueError as error:
         return jsonify({"error": str(error)}), 400
-    return jsonify({"rect": value.get("rect_echo"), "history": (value.get("chain") or {}).get("history")})
+    return jsonify({
+        "rect": value.get("rect_echo"),
+        "history": (value.get("chain") or {}).get("history"),
+        "advanced_job_id": _schedule_auto_pipeline(project_id),
+    })
 
 
 # I due modi in cui la depth si legge, e come si vedono sull'immagine.
