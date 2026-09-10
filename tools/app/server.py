@@ -6175,6 +6175,18 @@ def _un_fotogramma_per_depth(project: Project) -> List[str]:
     per_valore: Dict[float, Dict[str, List[str]]] = {}
     for nome, valore in _depth_di_ogni_immagine(project).items():
         per_valore.setdefault(float(valore), {}).setdefault(gruppi.get(nome) or "", []).append(nome)
+
+    # Fra piu' immagini della stessa depth e dello stesso orientamento si sceglie per
+    # evidenza, non per nome: prima quella la cui depth e' confermata da lei, poi quella che
+    # il modulo ha letto meglio. Il nome resta solo come ultimo spareggio, per avere una
+    # scelta ripetibile - le cartelle vere non hanno nomi che vogliano dire qualcosa.
+    confermate = _depth_confermate(project)
+    punteggi = {r["name"]: (r.get("score") or 0.0)
+                for r in _depth_module_rows(project)[0] if r.get("name")}
+
+    def quanto_vale(nome: str):
+        return (0 if nome in confermate else 1, -float(punteggi.get(nome) or 0.0), nome)
+
     scelti: List[str] = []
     for valore in sorted(per_valore):
         per_gruppo = per_valore[valore]
@@ -6182,7 +6194,7 @@ def _un_fotogramma_per_depth(project: Project) -> List[str]:
         candidati = (per_gruppo[preferito] if preferito
                      else [n for nomi in per_gruppo.values() for n in nomi])
         if candidati:
-            scelti.append(sorted(candidati)[0])
+            scelti.append(min(candidati, key=quanto_vale))
     return scelti
 
 
