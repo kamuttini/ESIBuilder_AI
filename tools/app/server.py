@@ -783,6 +783,7 @@ def _run_advanced_stages(
                 template_info: Dict = {}
                 override = previous.get("marker_override") or {}
                 override_rows: Dict[str, Dict] = {}
+                consegnate: Dict[str, Dict] = {}
                 if override.get("path") and Path(override["path"]).is_file():
                     # L'utente ha indicato il marker a mano: il ricalcolo non torna alla banca,
                     # che su questa cartella aveva scelto il glifo sbagliato. Le posizioni, i
@@ -834,22 +835,41 @@ def _run_advanced_stages(
                             final.parent.mkdir(parents=True, exist_ok=True)
                             final.write_bytes(source.read_bytes())
                             template_info = {**chosen["chosen"], "path": str(final)}
-                            # le detection del ritaglio allargano l'envelope dove la banca non arriva
+                            # --- GLI ENVELOPE SONO DI CHI VERRA' CONSEGNATO ------------
+                            # ESI cerchera' *questo* ritaglio, lo stesso in tutti e quattro i
+                            # gruppi (nelle dieci configurazioni storiche i quattro
+                            # `orientation_N.png` sono byte per byte identici). Se l'envelope
+                            # lo costruisce la banca, che usa i suoi template, descrive dove
+                            # sta un altro glifo: su prova 6 (GE Logiq E9) il ritaglio scelto
+                            # e' «E9» ma l'envelope NF cadeva sulla riga di sopra, quella di
+                            # «LOGIQ», e la validazione dava copertura 0.0 su ventiquattro
+                            # immagini. Un envelope dove il marker non c'e' e' peggio di
+                            # nessun envelope: ESI ci cerchera' dentro e non trovera' mai.
+                            _job_update(job_id, stage="orientamento: dove si ritrova il ritaglio consegnato")
                             own = om.match_all(
                                 images=useful, folder=scan_folder_for_modules,
                                 template_path=final, rect=final_rect,
                                 bundle_dir=artifacts / "41_orientation_marker_detector_bundle",
-                                min_score=0.85, search_margin=40,
+                                min_score=float(marker_min_score), search_margin=60,
                                 exclusion_rect=marker_exclusion,
                             )
-                            for row in own["rows"]:
-                                if row.get("box") and row["score"] >= 0.85:
-                                    # riempie i buchi: dove la banca non e' arrivata ci mette la
-                                    # sua detection, dove c'e' gia' non aggiunge un secondo box
-                                    # per la stessa immagine
-                                    rows_by_name.setdefault(
-                                        row["name"], {"group": row["group"], "box": row["box"]}
-                                    )
+                            consegnate = {
+                                row["name"]: {"score": row["score"], "group": row["group"],
+                                              "box": row["box"]}
+                                for row in own["rows"]
+                                if row.get("box") and (row.get("score") or 0) >= float(marker_min_score)
+                            }
+                            if consegnate:
+                                rows_by_name = {
+                                    nome: {"group": r["group"], "box": r["box"]}
+                                    for nome, r in consegnate.items()
+                                }
+                                results["marker"]["envelope_source"] = "ritaglio consegnato"
+                                results["marker"]["delivered_hits"] = len(consegnate)
+                            else:
+                                # Non si ritrova da nessuna parte: meglio gli envelope della
+                                # banca che nessun envelope, ma va detto.
+                                results["marker"]["envelope_source"] = "banca (il ritaglio non si ritrova)"
                     except (FileNotFoundError, ImportError) as error:
                         template_info = {"error": str(error)}
 
@@ -892,6 +912,10 @@ def _run_advanced_stages(
                     "corrections": corrections_before,
                     "marker_override": override,
                     "marker_rows_override": override_rows,
+                    # Dove si ritrova il ritaglio consegnato: sono queste le posizioni da cui
+                    # rifare gli envelope quando arriva una correzione, se no il primo
+                    # ritocco li riporterebbe a quelli della banca.
+                    "marker_rows_delivered": consegnate,
                     # La diagnosi "questo marker non si muove" e' l'unico modo automatico di
                     # accorgersi che la banca ha scelto un elemento fisso dell'interfaccia.
                     "marker_warning": _marker_warning(
@@ -3018,11 +3042,20 @@ def _envelope_contributors(project: Project, value: Dict) -> Dict[str, List[Dict
     """Le detection che hanno formato ogni envelope, per gruppo, col nome dell'immagine."""
     stage = _marker_stage_dir(project)
     override = value.get("marker_rows_override") or {}
+    consegnate = value.get("marker_rows_delivered") or {}
     if override:
         rows = [
             {"name": name, "group": row.get("group"), "box": row.get("box"),
              "score": row.get("score"), "source": "marker indicato a mano"}
             for name, row in override.items() if row.get("box") and row.get("group")
+        ]
+    elif consegnate:
+        # Le posizioni del ritaglio che va in DB_echo: e' quello che ESI cerchera', quindi
+        # e' quello che deve disegnare gli envelope - anche dopo una correzione.
+        rows = [
+            {"name": name, "group": row.get("group"), "box": row.get("box"),
+             "score": row.get("score"), "source": "ritaglio consegnato"}
+            for name, row in consegnate.items() if row.get("box") and row.get("group")
         ]
     elif stage is not None:
         rows = [

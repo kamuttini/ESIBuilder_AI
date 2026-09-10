@@ -2539,6 +2539,11 @@ function panelModuleStage(panel, step) {
       // La banca cerca sul frame intero: cio' che trova lontano dall'immagine ecografica
       // gonfia l'envelope, ed e' dentro l'envelope che ESI cerchera' il marker.
       ['scartate fuori dal rettangolo', m.outside_rect || 0],
+      // Da cosa sono disegnati gli envelope: ESI cerchera' il ritaglio consegnato, quindi
+      // e' quello che deve averli disegnati.
+      ['envelope disegnati da', m.envelope_source
+        ? `${m.envelope_source}${m.delivered_hits ? ` · ${m.delivered_hits} immagini` : ''}`
+        : '—'],
       ['#16 completata copiando', (m.filled_groups || []).length
         ? `${m.filled_groups.join(' · ')} da ${m.filled_from}`
         : 'nessuna copia: tutti e quattro trovati'],
