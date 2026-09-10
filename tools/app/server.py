@@ -4295,18 +4295,18 @@ def _run_rect_specularity(job_id: str, project_id: str, per_group: int) -> None:
             value["chain"] = catena
             return value
 
-        _write_step(project_id, "rect", mutate)
+        _scrivi_catena_rect(project_id, mutate)
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
 
 def _write_step(project_id: str, step_id: str, mutate, status: str = "proposed",
-                source: str = "model") -> Dict:
+                source: str = "model", invalidate: bool = True) -> Dict:
     """Read-modify-write serializzato per uno step qualunque."""
     with _step_write_lock:
         project = _project(project_id)
         value = mutate(project, dict(project.step_value(step_id)))
-        project.set_step(step_id, value, status=status, source=source)
+        project.set_step(step_id, value, status=status, source=source, invalidate=invalidate)
         return value
 
 
@@ -4336,6 +4336,37 @@ def _mirror_segment(seg: Dict, axis: str) -> Dict:
 
 
 
+def _scrivi_catena_rect(project_id: str, mutate):  # noqa: ANN001
+    """Scrive lo studio e i giri **senza toccare lo stato del rettangolo**.
+
+    Un giro misura, non cambia il rettangolo: scriverlo come «proposto» lo retrocedeva da
+    confermato, e retrocedere il rettangolo rende stale tutto quello che ci sta sotto -
+    orientamento, depth, scala. Su prova 7 e' bastato far girare il giro sulla depth perche'
+    la depth confermata smettesse di contare come confermata, e il giro dopo trovasse solo
+    due gruppi su quattro invece di quattro.
+    """
+    progetto = _project(project_id)
+    stato = progetto.steps.get("rect") or {}
+    prima = dict(progetto.step_value("rect") or {}).get("rect_echo")
+
+    def solo_studio(p: Project, value: Dict) -> Dict:
+        nuovo = mutate(p, value)
+        # Un giro misura e basta. Se toccasse il rettangolo, gli step a valle andrebbero
+        # invalidati - e questa scrittura non lo fa: meglio accorgersene qui.
+        if nuovo.get("rect_echo") != prima:
+            raise ValueError("un giro di studio non puo' cambiare il rettangolo")
+        return nuovo
+
+    return _write_step(
+        project_id, "rect", solo_studio,
+        status=str(stato.get("status") or "proposed"),
+        source=str(stato.get("source") or "model"),
+        # Il rettangolo non l'ha toccato nessuno: dichiararlo cambiato renderebbe stale
+        # orientamento, depth e scala per una misura che non li riguarda.
+        invalidate=False,
+    )
+
+
 def _costruzione_sugli_assi(misure: Dict[str, Dict], width: int, height: int) -> Dict:
     """Il rettangolo costruito **sugli assi**, contenendo tutte le corde.
 
@@ -4354,6 +4385,14 @@ def _costruzione_sugli_assi(misure: Dict[str, Dict], width: int, height: int) ->
     for group, m in misure.items():
         for seg in (m.get("all") or ([m["segment"]] if m.get("segment") else [])):
             corde.append({**seg, "group": group})
+        # La corda estrema del gruppo, quando il giro l'ha scelta: e' quella che deve
+        # toccare il bordo, e va nel conto anche se il resto delle corde fosse stato
+        # sfoltito.
+        estrema = m.get("extreme")
+        if estrema and not any(
+            s.get("image") == estrema.get("image") and s["group"] == group for s in corde
+        ):
+            corde.append({**estrema, "group": group})
     if not corde:
         return {}
 
@@ -4650,7 +4689,7 @@ def _run_rect_segments(job_id: str, project_id: str, per_group: int) -> None:
             value["study"] = {"segments": risultato}
             return value
 
-        _write_step(project_id, "rect", mutate)
+        _scrivi_catena_rect(project_id, mutate)
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
@@ -4710,8 +4749,20 @@ def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
         misure: Dict[str, Dict] = {}
         for indice, (gruppo, per_valore) in enumerate(sorted(scelte.items())):
             minima = min(per_valore)
-            nomi = sorted(per_valore[minima])[:max(1, per_group)]
-            _job_update(job_id, stage=f"corde nel gruppo {gruppo} a {minima:g} mm",
+            # Le depth **minori**, in ordine: alla piu' bassa spesso corrisponde una sola
+            # immagine, e da una corda sola non si sceglie ne' la piu' lunga ne' l'estrema.
+            # Si sale finche' bastano, ma non oltre il doppio della minima: piu' su
+            # l'immagine e' rimpicciolita e la corda non arriva piu' al bordo.
+            nomi: List[str] = []
+            for valore in sorted(per_valore):
+                if valore > 2.0 * minima and nomi:
+                    break
+                nomi.extend(sorted(per_valore[valore]))
+                if len(nomi) >= max(1, per_group):
+                    break
+            nomi = nomi[:max(1, per_group)]
+            profondita = {n: v for v, elenco in per_valore.items() for n in elenco}
+            _job_update(job_id, stage=f"corde nel gruppo {gruppo} da {minima:g} mm",
                         done=indice, total=len(scelte))
             etichetta = "su" if gruppo in ("NF", "LR") else "giu"
             trovati = []
@@ -4729,7 +4780,7 @@ def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
                     "x1": float(seg["x1"]), "x2": float(seg["x2"]), "y": float(seg["y"]),
                     "length_norm": float(seg["length_norm"]),
                     "length_px": round(float(seg["length_norm"]) * width, 1),
-                    "depth_mm": minima,
+                    "depth_mm": profondita.get(nome, minima),
                 })
             if not trovati:
                 continue
@@ -4739,11 +4790,18 @@ def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
                     piani[s["plane"]] = piani.get(s["plane"], 0) + 1
             dominante = max(piani, key=piani.get) if piani else None
             nel_piano = [s for s in trovati if not dominante or s["plane"] == dominante]
+            # Due scelte, non una: la corda piu' **lunga** fissa l'ampiezza, quella piu'
+            # **estrema** fissa il bordo - la piu' in alto per NF/LR, la piu' in basso per
+            # UD/LRUD. Spesso sono la stessa, ma quando non lo sono servono tutte e due.
+            estrema = (min(nel_piano, key=lambda s: s["y"]) if etichetta == "su"
+                       else max(nel_piano, key=lambda s: s["y"]))
             misure[gruppo] = {
                 "segment": max(nel_piano, key=lambda s: s["length_norm"]),
+                "extreme": estrema,
                 "plane": dominante,
                 "planes": piani,
                 "depth_mm": minima,
+                "depths_used": sorted({s["depth_mm"] for s in trovati}),
                 "depths_available": sorted(per_valore),
                 "tried": len(nomi),
                 "found": len(trovati),
@@ -4777,6 +4835,10 @@ def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
                 "per_group": {g: m["segment"]["length_px"] for g, m in misure.items()},
                 "depth_by_group": risultato["depth_by_group"],
                 "groups_skipped": risultato["groups_skipped"],
+                # Le due corde che fissano i bordi in verticale: la piu' alta fra NF/LR e la
+                # piu' bassa fra UD/LRUD. Sono il motivo per cui il rettangolo sta li'.
+                "highest": (risultato.get("construction") or {}).get("highest"),
+                "lowest": (risultato.get("construction") or {}).get("lowest"),
                 "ts": datetime.now().isoformat(timespec="seconds"),
             }
             catena["passes"] = passi
@@ -4786,7 +4848,7 @@ def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
             value["study"] = {"segments": risultato}
             return value
 
-        _write_step(project_id, "rect", mutate)
+        _scrivi_catena_rect(project_id, mutate)
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
@@ -4966,7 +5028,7 @@ def api_rect_segment(project_id: str):
         value["study"] = {**(value.get("study") or {}), "segments": risultato}
         return value
 
-    _write_step(project_id, "rect", mutate)
+    _scrivi_catena_rect(project_id, mutate)
     return jsonify(
         {
             "saved": True,

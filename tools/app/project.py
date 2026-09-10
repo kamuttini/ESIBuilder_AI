@@ -310,8 +310,16 @@ class Project:
         status: str = CONFIRMED,
         source: str = "user",
         confidence: Optional[float] = None,
+        invalidate: bool = True,
     ) -> List[str]:
-        """Store a step value and mark its dependents stale. Returns the stale step ids."""
+        """Store a step value and mark its dependents stale. Returns the stale step ids.
+
+        `invalidate=False` per chi scrive dentro allo step qualcosa che **non** e' il dato da
+        cui gli altri dipendono - i giri di studio del rettangolo, per esempio, che misurano
+        le corde e le lasciano scritte li' senza toccare il rettangolo. Invalidare anche
+        allora voleva dire che misurare rendeva stale la depth, e la depth confermata
+        smetteva di contare come confermata: il giro dopo trovava due gruppi su quattro.
+        """
         if step_id not in STEPS_BY_ID:
             raise KeyError(step_id)
         entry = self.steps[step_id]
@@ -325,7 +333,7 @@ class Project:
                 "ts": _now(),
             }
         )
-        stale = self._mark_stale(self.dependents_of(step_id))
+        stale = self._mark_stale(self.dependents_of(step_id)) if invalidate else []
         self.save()
         return stale
 

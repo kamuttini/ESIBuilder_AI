@@ -1376,6 +1376,14 @@ function rectChainCard(panel, ganciRect) {
           : null,
         // I gruppi senza depth confermata restano fuori: dirlo evita di credere che la
         // cartella abbia due orientamenti invece di quattro.
+        // Le due corde che fissano i bordi: la piu' alta di NF/LR e la piu' bassa di
+        // UD/LRUD. Senza dirlo, il rettangolo proposto e' un numero senza perche'.
+        (pass.saved && pass.saved.highest && pass.saved.lowest)
+          ? el('div', { class: 'hint' },
+              `bordi dalle corde estreme: la piu' alta ${pass.saved.highest.group} `
+              + `y ${pass.saved.highest.y}, la piu' bassa ${pass.saved.lowest.group} `
+              + `y ${pass.saved.lowest.y}`)
+          : null,
         (pass.saved && (pass.saved.groups_skipped || []).length)
           ? el('div', { class: 'hint', style: 'color:var(--warn)' },
               `fuori ${pass.saved.groups_skipped.join(', ')}: nessuna immagine con la depth `
