@@ -927,6 +927,14 @@ img.depth-crop {
   background: rgba(0, 0, 0, .55); padding: 0 4px; border-radius: 3px; white-space: nowrap;
 }
 .scala-numero.modificabile { cursor: text; outline: 1px solid #d29922; }
+/* Calcolato dal passo, non letto dall'immagine: si vede che e' una conseguenza e non una
+   misura, cosi' non lo si scambia per una lettura riuscita. */
+.scala-numero.calcolato { opacity: .55; border-style: dashed; cursor: pointer; }
+.scala-numero.calcolato:hover { opacity: 1; }
+/* Letto dall'OCR ma non su una tacca: e' il disaccordo, e va visto. */
+.scala-numero.fuori { border-color: var(--warn); color: var(--warn); cursor: pointer; }
+/* Una verifica che viene da fuori (depth confermata, corde del rettangolo) e non torna. */
+.scala-fuori { color: var(--warn); margin-top: 3px; }
 .scala-estremo {
   position: absolute; left: 0; right: 0; height: 0; border-top: 2px solid;
   cursor: ns-resize; transform: translateY(-1px);

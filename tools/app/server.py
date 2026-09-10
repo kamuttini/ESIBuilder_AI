@@ -5742,8 +5742,15 @@ def _dati_studio(project: Project) -> Optional[Dict]:
     return dati
 
 
-def _righello_effettivo(frame: Dict, correzione: Optional[Dict]) -> Dict:
-    """Il righello com'e' adesso: quello che ha trovato il modulo, con sopra le correzioni."""
+def _righello_effettivo(frame: Dict, correzione: Optional[Dict],
+                       verso_atteso: Optional[str] = None) -> Dict:
+    """Il righello com'e' adesso: quello che ha trovato il modulo, con sopra le correzioni.
+
+    `verso_atteso` e' da che parte sta lo zero secondo l'orientamento - in alto per NF e LR,
+    in basso per UD e LRUD. Non e' un'ipotesi da mettere ai voti col rilevatore: e' una
+    conseguenza dell'orientamento, che a questo punto e' gia' stato confermato. Vince su
+    quello che il modulo ha creduto di vedere, e perde solo contro una correzione a mano.
+    """
     c = correzione or {}
     def numero(chiave: str, dal_frame: str) -> Optional[float]:
         if c.get(chiave) not in (None, ""):
@@ -5760,19 +5767,36 @@ def _righello_effettivo(frame: Dict, correzione: Optional[Dict]) -> Dict:
     if len(tacche) > 1:
         salti = sorted(tacche[k + 1] - tacche[k] for k in range(len(tacche) - 1))
         passo = salti[len(salti) // 2]
+    passo_px = passo if passo else (float(frame["pitch"]) if frame.get("pitch") else None)
+    # La scala del rilevatore vale per **la sua** scala di tacche. Se quella e' stata
+    # sostituita, quel numero non descrive piu' niente: si torna a misurare la barra
+    # contro la depth, che e' l'altra strada e resta valida.
+    mm_per_px = (None if c.get("ticks")
+                 else (float(frame["mm_per_px"]) if frame.get("mm_per_px") else None))
+    passo_mm = float(frame["D_step_mm"]) if frame.get("D_step_mm") else None
+    # Un numero scritto da lei su una tacca **e'** la calibrazione: dice quanti millimetri
+    # ci sono fra li' e lo zero, che e' esattamente cio' che l'OCR prova a leggere e spesso
+    # sbaglia. Si prende il piu' lontano dallo zero, che in proporzione sbaglia di meno.
+    zero = numero("y_zero", "y_zero")
+    numeri = [(float(y), float(mm)) for y, mm in (c.get("nums") or [])]
+    if numeri and zero is not None:
+        y_num, mm_num = max(numeri, key=lambda n: abs(n[0] - zero))
+        distanza = abs(y_num - zero)
+        if distanza > 1.0 and mm_num > 0:
+            mm_per_px = mm_num / distanza
+            if passo_px:
+                passo_mm = passo_px * mm_per_px
     return {
         "x": numero("x", "x"),
-        "y_zero": numero("y_zero", "y_zero"),
+        "y_zero": zero,
         "y_far": numero("y_far", "y_far"),
-        "zero_end": str(c.get("zero_end") or frame.get("B_zero_end") or "bottom"),
+        "zero_end": str(c.get("zero_end") or verso_atteso
+                        or frame.get("B_zero_end") or "bottom"),
         "ticks": tacche,
-        "pitch": passo if passo else (float(frame["pitch"]) if frame.get("pitch") else None),
-        # La scala del rilevatore vale per **la sua** scala di tacche. Se quella e' stata
-        # sostituita, quel numero non descrive piu' niente: si torna a misurare la barra
-        # contro la depth, che e' l'altra strada e resta valida.
-        "mm_per_px": (None if c.get("ticks")
-                      else (float(frame["mm_per_px"]) if frame.get("mm_per_px") else None)),
-        "step_mm": float(frame["D_step_mm"]) if frame.get("D_step_mm") else None,
+        "pitch": passo_px,
+        "mm_per_px": mm_per_px,
+        "step_mm": passo_mm,
+        "nums": numeri,
         "max_label_mm": ((frame.get("DE_check") or {}).get("max_label_mm")),
     }
 
@@ -5831,7 +5855,9 @@ def api_scale_study_ticks(project_id: str):
         return jsonify({"error": f"fotogramma non nello studio: {nome or '(vuoto)'}"}), 400
 
     correzioni = project.step_value("scale_study").get("corrections") or {}
-    righello = _righello_effettivo(frame, correzioni.get(nome))
+    scelta = _gruppo_del_righello(project)
+    atteso = _zero_atteso(project, scelta.get("group") or "") if scelta else None
+    righello = _righello_effettivo(frame, correzioni.get(nome), (atteso or {}).get("end"))
     for chiave in ("x", "y_zero", "y_far", "zero_end"):
         if payload.get(chiave) not in (None, ""):
             righello[chiave] = (str(payload[chiave]) if chiave == "zero_end"
@@ -5916,6 +5942,63 @@ def api_scale_study_ticks(project_id: str):
     return jsonify({"name": nome, "ticks": tacche, "pitch": round(passo, 2),
                     "y_far": righello["y_far"], "from": da_dove,
                     "check": dopo, "check_before": controllo, "saved": True})
+
+
+@app.post("/api/projects/<project_id>/scale/study/zero")
+def api_scale_study_zero(project_id: str):
+    """Lo zero di cartella messo sui fotogrammi che ne sono fuori.
+
+    La barra della scala sta sempre alla stessa altezza: a cambiare con la depth e' la
+    scala dentro, non dove comincia. Quindi correggere lo zero fotogramma per fotogramma
+    era rifare quattordici volte la stessa misura - e sui fotogrammi dove il rilevatore
+    aveva preso per zero una tacca di mezzo, rifarla a mano guardando due pixel.
+
+    Di default tocca solo quelli fuori tolleranza. Con `all` li allinea tutti.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    dati = _dati_studio(project)
+    if dati is None:
+        return jsonify({"error": "lo studio della scala non e' ancora stato fatto"}), 404
+    correzioni = project.step_value("scale_study").get("corrections") or {}
+    scelta = _gruppo_del_righello(project)
+    atteso = _zero_atteso(project, scelta.get("group") or "") if scelta else None
+    righelli = {f["name"]: _righello_effettivo(f, correzioni.get(f["name"]),
+                                               (atteso or {}).get("end"))
+                for f in (dati.get("frames") or []) if f.get("name")}
+    consenso = _zero_di_cartella(righelli, atteso)
+    if payload.get("y") not in (None, ""):
+        y = float(payload["y"])
+        da_dove = "il valore che hai indicato"
+    elif consenso:
+        y = float(consenso["y"])
+        da_dove = consenso["from"]
+    else:
+        return jsonify({"error": "i fotogrammi non concordano su uno zero: correggine "
+                                 "almeno tre e riprova"}), 400
+
+    tutti = bool(payload.get("all"))
+    nomi = [n for n in righelli
+            if tutti or abs(float(righelli[n].get("y_zero") or 0.0) - y) > ZERO_TOLLERANZA_PX]
+    if not nomi:
+        return jsonify({"changed": [], "y": y, "from": da_dove,
+                        "note": "erano gia' tutti allineati"})
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        tutte = dict(value.get("corrections") or {})
+        for nome in nomi:
+            voce = dict(tutte.get(nome) or {})
+            voce["y_zero"] = y
+            if atteso:
+                voce["zero_end"] = atteso["end"]
+            voce["ts"] = datetime.now().isoformat(timespec="seconds")
+            tutte[nome] = voce
+        value["corrections"] = tutte
+        return value
+
+    _write_step(project_id, "scale_study", mutate, status="corrected", source="user")
+    _write_scale_corrections(_project(project_id))
+    return jsonify({"changed": sorted(nomi), "y": y, "from": da_dove})
 
 
 @app.post("/api/projects/<project_id>/scale/study/approve")
@@ -6165,37 +6248,14 @@ ORIENTAMENTO_PER_RIGHELLO = ("NF", "LR", "UD", "LRUD")
 
 
 def _un_fotogramma_per_depth(project: Project) -> List[str]:
-    """Un'immagine per ogni depth, dello stesso orientamento finche' si puo'.
+    """Un'immagine per ogni depth, tutte dello stesso orientamento.
 
     Il righello e' uno per depth, non uno per immagine: la macchina disegna la stessa scala
     nei quattro orientamenti, ribaltata. Studiarli tutti e quattro vuol dire quadruplicare
     il lavoro - del modulo e di chi rivede - per rivedere quattro volte la stessa cosa.
     """
-    gruppi = _groups_of_images(project)
-    per_valore: Dict[float, Dict[str, List[str]]] = {}
-    for nome, valore in _depth_di_ogni_immagine(project).items():
-        per_valore.setdefault(float(valore), {}).setdefault(gruppi.get(nome) or "", []).append(nome)
-
-    # Fra piu' immagini della stessa depth e dello stesso orientamento si sceglie per
-    # evidenza, non per nome: prima quella la cui depth e' confermata da lei, poi quella che
-    # il modulo ha letto meglio. Il nome resta solo come ultimo spareggio, per avere una
-    # scelta ripetibile - le cartelle vere non hanno nomi che vogliano dire qualcosa.
-    confermate = _depth_confermate(project)
-    punteggi = {r["name"]: (r.get("score") or 0.0)
-                for r in _depth_module_rows(project)[0] if r.get("name")}
-
-    def quanto_vale(nome: str):
-        return (0 if nome in confermate else 1, -float(punteggi.get(nome) or 0.0), nome)
-
-    scelti: List[str] = []
-    for valore in sorted(per_valore):
-        per_gruppo = per_valore[valore]
-        preferito = next((g for g in ORIENTAMENTO_PER_RIGHELLO if per_gruppo.get(g)), None)
-        candidati = (per_gruppo[preferito] if preferito
-                     else [n for nomi in per_gruppo.values() for n in nomi])
-        if candidati:
-            scelti.append(min(candidati, key=quanto_vale))
-    return scelti
+    scelta = _gruppo_del_righello(project)
+    return list((scelta.get("frames") or {}).values())
 
 
 @app.post("/api/projects/<project_id>/scale/study/run")
@@ -6350,6 +6410,153 @@ def _depth_di_ogni_immagine(project: Project) -> Dict[str, float]:
     return {n: v for n, v in fuori.items() if not mie or n in mie}
 
 
+# Da che parte sta lo zero, detto dall'orientamento e non cercato nei pixel. NF e LR sono
+# immagini non ribaltate in verticale: la scala parte in alto. UD e LRUD sono ribaltate, e
+# la scala parte in basso. E' la stessa regola che il vecchio ESIBuilder applicava a mano
+# col suo interruttore «UP» (`wdgpagedepthvalue.cpp`).
+ZERO_IN_ALTO = ("NF", "LR")
+
+
+def _gruppo_del_righello(project: Project) -> Dict:
+    """L'orientamento su cui misurare i righelli: **uno solo**, e che abbia tutte le depth.
+
+    Il righello e' uno per depth e gli altri orientamenti si ottengono ribaltandolo, quindi
+    quello che serve e' un orientamento completo: se ne manca una, quella depth resterebbe
+    senza righello e non ci sarebbe niente da ribaltare.
+    """
+    gruppi = _groups_of_images(project)
+    depth = _depth_di_ogni_immagine(project)
+    tutte = sorted({float(v) for n, v in depth.items() if gruppi.get(n)})
+    per_gruppo: Dict[str, Dict[float, List[str]]] = {}
+    for nome, valore in depth.items():
+        gruppo = gruppi.get(nome)
+        if gruppo:
+            per_gruppo.setdefault(gruppo, {}).setdefault(float(valore), []).append(nome)
+    if not per_gruppo or not tutte:
+        return {}
+
+    confermate = _depth_confermate(project)
+    punteggi = {r["name"]: (r.get("score") or 0.0)
+                for r in _depth_module_rows(project)[0] if r.get("name")}
+
+    def quanto_vale(nome: str):
+        return (0 if nome in confermate else 1, -float(punteggi.get(nome) or 0.0), nome)
+
+    candidati = []
+    for gruppo in ORIENTAMENTO_PER_RIGHELLO:
+        sue = per_gruppo.get(gruppo)
+        if not sue:
+            continue
+        candidati.append({"group": gruppo,
+                          "missing_depths": [v for v in tutte if v not in sue],
+                          "depths": sorted(sue)})
+    if not candidati:
+        return {}
+    # Fra i completi vince l'ordine di preferenza (NF per primo: e' l'immagine non
+    # ribaltata, quella in cui lo zero si legge senza conversioni). Se nessuno e' completo
+    # si prende quello che ne ha di piu', e si dice quali mancano.
+    completi = [c for c in candidati if not c["missing_depths"]]
+    scelto = completi[0] if completi else min(candidati, key=lambda c: len(c["missing_depths"]))
+    gruppo = scelto["group"]
+    fotogrammi = {valore: min(nomi, key=quanto_vale)
+                  for valore, nomi in per_gruppo[gruppo].items()}
+    return {
+        "group": gruppo,
+        "zero_end": "top" if gruppo in ZERO_IN_ALTO else "bottom",
+        "depths": scelto["depths"],
+        "missing_depths": scelto["missing_depths"],
+        "frames": {str(v): n for v, n in sorted(fotogrammi.items())},
+        "complete": not scelto["missing_depths"],
+        "candidates": candidati,
+    }
+
+
+def _zero_atteso(project: Project, gruppo: str) -> Optional[Dict]:
+    """Dove deve cadere lo zero: al bordo del ventaglio, dalla parte che dice l'orientamento.
+
+    Lo zero della scala e' la superficie della sonda, e li' comincia anche l'immagine: sopra
+    la corda piu' alta non c'e' ecografia, quindi non ci puo' essere lo zero. E' la verifica
+    che il rilevatore da solo non ha - lui guarda solo la colonna delle tacche - e che qui
+    invece si ha gratis, perche' le corde sono gia' state misurate e confermate.
+    """
+    if not gruppo:
+        return None
+    segmenti = ((project.step_value("rect").get("study") or {}).get("segments") or {})
+    altezza = (project.step_value("import").get("image_sample_size") or [0, 0])[1]
+    if not altezza:
+        return None
+    in_alto = gruppo in ZERO_IN_ALTO
+    # Fuori dalla f-string: una barra rovesciata dentro alle graffe non e' legale in tutte
+    # le versioni di Python, e questo file gira anche sui Windows dei colleghi.
+    quale = "piu' alta" if in_alto else "piu' bassa"
+    suo = (segmenti.get("per_group") or {}).get(gruppo) or {}
+    estrema = suo.get("extreme") or suo.get("segment") or {}
+    if estrema.get("y") is not None:
+        return {"y": round(float(estrema["y"]) * altezza, 1),
+                "end": "top" if in_alto else "bottom",
+                "from": f"corda {quale} di {gruppo}"
+                        + (f" ({estrema['image'].split('/')[-1]})" if estrema.get("image") else "")}
+    rif = (segmenti.get("construction") or {}).get("highest" if in_alto else "lowest") or {}
+    if rif.get("y") is not None:
+        return {"y": round(float(rif["y"]), 1), "end": "top" if in_alto else "bottom",
+                "from": f"corda {quale} della cartella"
+                        + (f" ({rif.get('group')})" if rif.get("group") else "")}
+    return None
+
+
+# Quanto puo' distare lo zero dal bordo del ventaglio senza che sia un errore. Sui frame
+# buoni di prova 7 la differenza sta sotto i quindici pixel; i righelli sbagliati stanno a
+# centinaia, perche' il rilevatore ha preso per zero una tacca di mezzo.
+ZERO_TOLLERANZA_PX = 25.0
+
+
+def _contro_verifiche(frame: Dict, righello: Dict, depth_mm: Optional[float],
+                      atteso: Optional[Dict]) -> Dict:
+    """Le verifiche che vengono da fuori: la depth confermata e le corde del rettangolo."""
+    esito: Dict = {}
+    # Un righello non porta mai un numero piu' grande della depth: puo' fermarsi prima, mai
+    # oltre. Quindi un numero oltre la depth non e' un righello lungo, e' una lettura
+    # sbagliata - e va tolta di mezzo prima che diventi la scala del fotogramma.
+    if depth_mm:
+        oltre = [{"y": round(float(y), 1), "mm": round(float(cm) * 10.0, 1)}
+                 for y, cm in (frame.get("labels") or [])
+                 if float(cm) * 10.0 > float(depth_mm) * 1.05]
+        if oltre:
+            esito["labels_over_depth"] = oltre
+            esito["why_labels"] = (
+                f"{len(oltre)} numer{'o' if len(oltre) == 1 else 'i'} oltre la depth "
+                f"confermata ({depth_mm:g} mm): letti male")
+    # E nemmeno la barra va oltre: puo' fermarsi prima della depth - spesso lo fa - ma
+    # arrivare piu' in la' vorrebbe dire misurare fuori dall'immagine.
+    scala_mm_px = righello.get("mm_per_px")
+    if depth_mm and scala_mm_px and righello.get("y_far") is not None \
+            and righello.get("y_zero") is not None:
+        arriva = abs(float(righello["y_far"]) - float(righello["y_zero"])) * float(scala_mm_px)
+        esito["bar_mm"] = round(arriva, 1)
+        if arriva > float(depth_mm) * 1.05:
+            esito["why_bar"] = (
+                f"la barra arriva a {arriva:.0f} mm, oltre la depth confermata "
+                f"({depth_mm:g} mm): o e' tirata troppo lunga, o la scala e' sbagliata")
+    if atteso:
+        esito["zero_expected"] = atteso
+        if righello.get("y_zero") is not None:
+            scarto = float(righello["y_zero"]) - float(atteso["y"])
+            esito["zero_off_px"] = round(scarto, 1)
+            if abs(scarto) > ZERO_TOLLERANZA_PX:
+                dove = "sopra" if scarto < 0 else "sotto"
+                esito["why_zero"] = (
+                    f"lo zero sta {abs(scarto):.0f} px {dove} il bordo del ventaglio "
+                    f"({atteso['from']}): li' l'immagine ecografica non c'e' ancora"
+                    if scarto < 0 else
+                    f"lo zero sta {abs(scarto):.0f} px {dove} il bordo del ventaglio "
+                    f"({atteso['from']}): sopra ci sono ancora corde")
+        if righello.get("zero_end") and righello["zero_end"] != atteso["end"]:
+            esito["why_end"] = (
+                f"lo zero e' segnato in {'alto' if righello['zero_end'] == 'top' else 'basso'} "
+                f"ma l'orientamento dice {'in alto' if atteso['end'] == 'top' else 'in basso'}")
+    return esito
+
+
 @app.get("/api/projects/<project_id>/scale/coverage")
 def api_scale_coverage(project_id: str):
     """Ogni depth, in tutti gli orientamenti: quello che c'e' e quello che manca.
@@ -6449,7 +6656,15 @@ def api_scale_study(project_id: str):
     confermate = _depth_confermate(project)
     approvati = set(valore.get("approved") or [])
     dati["approved"] = sorted(approvati)
+    # Cosa sa gia' la cartella prima che il righello venga guardato: su quale orientamento
+    # si misura, da che parte sta lo zero, e dove cade il bordo del ventaglio. Sono le tre
+    # cose che il rilevatore da solo non ha, e che qui invece sono gia' state confermate.
+    scelta = _gruppo_del_righello(project)
+    atteso = _zero_atteso(project, scelta.get("group") or "") if scelta else None
+    dati["ruler_group"] = scelta
+    dati["zero_expected"] = atteso
     per_nome = {}
+    righelli: Dict[str, Dict] = {}
     for frame in dati.get("frames") or []:
         # Lo stato del modulo resta visibile in `detector_status`: serve a vedere se la
         # detection da sola migliora, che e' l'altra domanda.
@@ -6459,18 +6674,56 @@ def api_scale_study(project_id: str):
                                            frame["approved"])
         # Il confronto con la depth confermata, fotogramma per fotogramma: e' il dato
         # esterno che dice se il righello e' al posto giusto, e va visto accanto a lui.
-        righello = _righello_effettivo(frame, correzioni.get(frame["name"]))
+        righello = _righello_effettivo(frame, correzioni.get(frame["name"]),
+                                       (atteso or {}).get("end"))
         controllo = _controlla_righello(frame, righello, confermate.get(frame["name"]))
         controllo["labels_on_ticks"] = _etichette_sulle_tacche(frame, righello["ticks"])
         frame["depth_check"] = controllo
+        frame["checks"] = _contro_verifiche(frame, righello, confermate.get(frame["name"]),
+                                            atteso)
         frame["ruler"] = righello
+        righelli[frame["name"]] = righello
         per_nome[frame["name"]] = frame
+    # Lo zero e' uno per la cartella: la macchina disegna la barra sempre alla stessa altezza,
+    # e' la scala dentro che cambia con la depth. Quindi i fotogrammi che concordano fra loro
+    # e col bordo del ventaglio *sono* la misura, e quelli che se ne discostano sono errori
+    # del rilevatore, non depth strane.
+    dati["zero_folder"] = _zero_di_cartella(righelli, atteso)
     for cambio in ultima.get("improved") or []:
         frame = per_nome.get(cambio["name"])
         if frame is not None:
             frame["improved_from"] = cambio["from"]
     dati["stage"] = stadi.get("scale") or {}
     return jsonify(dati)
+
+
+def _zero_di_cartella(righelli: Dict[str, Dict], atteso: Optional[Dict]) -> Optional[Dict]:
+    """Lo zero su cui i fotogrammi buoni vanno d'accordo, e quali ne restano fuori."""
+    if not righelli:
+        return None
+    zeri = {n: float(r["y_zero"]) for n, r in righelli.items() if r.get("y_zero") is not None}
+    if not zeri:
+        return None
+    if atteso:
+        dentro = {n: y for n, y in zeri.items()
+                  if abs(y - float(atteso["y"])) <= ZERO_TOLLERANZA_PX}
+    else:
+        # Senza il ventaglio ci si accorda sulla mediana, che regge lo stesso a qualche
+        # fotogramma sbagliato.
+        mediana = statistics.median(zeri.values())
+        dentro = {n: y for n, y in zeri.items() if abs(y - mediana) <= ZERO_TOLLERANZA_PX}
+    if len(dentro) < 3:
+        return None
+    consenso = round(statistics.median(dentro.values()), 1)
+    return {
+        "y": consenso,
+        "agree": sorted(dentro),
+        "off": sorted(n for n in zeri if n not in dentro),
+        "spread_px": round(max(dentro.values()) - min(dentro.values()), 1),
+        "from": (f"{len(dentro)} fotogrammi su {len(zeri)} lo mettono qui"
+                 + (f", a {abs(consenso - float(atteso['y'])):.0f} px dal bordo del ventaglio"
+                    if atteso else "")),
+    }
 
 
 @app.get("/api/projects/<project_id>/depth")

@@ -26,7 +26,7 @@ function legenda() {
     ['alt + trascina', 'la tacca da sola · dalla colonna, tutto il righello'],
     ['doppio clic', 'aggiunge una tacca'],
     ['× sulla tacca', 'la toglie'],
-    ['doppio clic sul numero', 'lo riscrive'],
+    ['clic sul numero', 'lo scrivi tu: da li\' esce la scala'],
     ['shift+↑↓ · alt+↑↓', 'zero · fondo, un pixel per volta'],
     ['← →', 'cambia fotogramma'],
     ['cmd+Z', 'annulla'],
@@ -127,12 +127,51 @@ async function createScaleViewer(projectId) {
       });
       strati.append(tacca);
     }
+    /* I numeri: quelli letti dall'OCR e quelli che mancano.
+
+       Il riconoscimento dei numeri sbaglia spesso — sono due cifre alte otto pixel su uno
+       sfondo che cambia — e finora si poteva solo correggere quello che l'OCR *aveva*
+       letto: dove non aveva letto niente non c'era niente su cui fare doppio clic, e quello
+       e' proprio il caso in cui serve. Adesso ogni tacca porta il suo numero, letto o
+       calcolato dal passo, e si scrive su tutte allo stesso modo.
+
+       Scriverne uno non e' correggere un'etichetta: e' calibrare. Da quel numero e dalla
+       distanza dallo zero escono i millimetri per pixel, e tutti gli altri numeri seguono. */
+    const lette = new Map((f.labels || []).map(([y, v]) => [Math.round(y), v]));
+    const passoMm = (f.ruler || {}).step_mm || f.D_step_mm || null;
+    const usate = new Set();
+    for (const t of f.ticks || []) {
+      const vicina = [...lette.keys()].find((y) => Math.abs(y - t) <= 6);
+      const cm = vicina !== undefined ? lette.get(vicina) : null;
+      if (vicina !== undefined) usate.add(vicina);
+      const passi = passoMm && f.y_zero != null && (f.ruler || {}).pitch
+        ? Math.round(Math.abs(t - f.y_zero) / f.ruler.pitch) : null;
+      const calcolato = (cm == null && passoMm != null && passi != null)
+        ? (passi * passoMm) / 10 : null;
+      const mostrato = cm != null ? cm : calcolato;
+      if (mostrato == null) continue;
+      const numero = el('div', {
+        class: 'scala-numero' + (cm == null ? ' calcolato' : ''),
+        title: cm == null
+          ? 'calcolato dal passo: clic per scriverlo tu'
+          : 'letto dall\'immagine: clic per correggerlo',
+      }, `${Number(mostrato.toFixed(2))} cm`);
+      numero.style.top = `${t * s}px`;
+      numero.style.left = `${((f.x ?? 0) + 34) * s}px`;
+      const apri = (e) => { e.stopPropagation(); cambiaNumero(numero, t, mostrato); };
+      numero.addEventListener('click', apri);
+      numero.addEventListener('dblclick', apri);
+      strati.append(numero);
+    }
+    // Un numero letto lontano da ogni tacca resta dov'e': e' un disaccordo fra OCR e tacche,
+    // e nasconderlo vorrebbe dire nascondere proprio la cosa da guardare.
     for (const [y, valore] of f.labels || []) {
-      const numero = el('div', { class: 'scala-numero', title: 'doppio clic: correggi' },
-        `${valore} cm`);
+      if (usate.has(Math.round(y))) continue;
+      const numero = el('div', { class: 'scala-numero fuori',
+        title: 'letto qui, ma non su una tacca: clic per correggerlo' }, `${valore} cm`);
       numero.style.top = `${y * s}px`;
       numero.style.left = `${((f.x ?? 0) + 34) * s}px`;
-      numero.addEventListener('dblclick', (e) => { e.stopPropagation(); cambiaNumero(numero, y, valore); });
+      numero.addEventListener('click', (e) => { e.stopPropagation(); cambiaNumero(numero, y, valore); });
       strati.append(numero);
     }
     for (const [chiave, classe, testo] of [['y_zero', 'zero', '0'], ['y_far', 'fondo', 'fondo']]) {
@@ -501,8 +540,12 @@ async function createScaleViewer(projectId) {
       if (salvare && isFinite(cm)) {
         const f = corrente();
         ricorda();
-        f.labels = (f.labels || []).map(([yy, vv]) =>
-          (Math.round(yy) === Math.round(y) ? [yy, cm] : [yy, vv]));
+        // Se li' non c'era nessun numero letto, il suo si aggiunge: e' il caso che prima
+        // non si poteva fare, ed e' quello che capita quando l'OCR non ha visto niente.
+        const c_era = (f.labels || []).some(([yy]) => Math.round(yy) === Math.round(y));
+        f.labels = c_era
+          ? (f.labels || []).map(([yy, vv]) => (Math.round(yy) === Math.round(y) ? [yy, cm] : [yy, vv]))
+          : [...(f.labels || []), [y, cm]].sort((a, b) => a[0] - b[0]);
         salva({ nums: [...(correzione().nums || []).filter(([yy]) => Math.round(yy) !== Math.round(y)),
                        [Math.round(y), cm * 10]] });
       }
@@ -686,6 +729,17 @@ async function createScaleViewer(projectId) {
       datiBox.append(el('div', { class: 'scala-migliorati' },
         `nell'ultimo giro e' passato da ${f.improved_from} a ${f.status}`));
     }
+    // Le verifiche che vengono da fuori: la depth confermata e le corde del rettangolo.
+    // Non sono opinioni del rilevatore, sono cose gia' decise - percio' stanno qui in
+    // chiaro e non fra i dettagli.
+    const ck = f.checks || {};
+    if (ck.why_labels) {
+      datiBox.append(el('div', { class: 'scala-fuori' }, ck.why_labels
+        + ': ' + (ck.labels_over_depth || []).map((n) => `${n.mm} mm a y=${n.y}`).join(', ')));
+    }
+    if (ck.why_bar) datiBox.append(el('div', { class: 'scala-fuori' }, ck.why_bar));
+    if (ck.why_zero) datiBox.append(el('div', { class: 'scala-fuori' }, ck.why_zero));
+    if (ck.why_end) datiBox.append(el('div', { class: 'scala-fuori' }, ck.why_end));
   };
 
   /* Il passo, la verifica con la depth confermata, e la propagazione.
@@ -1061,10 +1115,58 @@ async function createScaleViewer(projectId) {
       didascalia, statoBox),
     Lente.bottone(contestoLente));
 
-  root.append(
-    el('p', { class: 'hint' },
+  /* Quello che la cartella sa gia' prima che il righello venga guardato.
+
+     Lo studio della scala viene dopo l'orientamento e dopo la depth, e da quei due si sanno
+     tre cose che il rilevatore da solo non ha: su quale orientamento si misura (uno, quello
+     che ha tutte le depth), da che parte sta lo zero (in alto per NF e LR, in basso per UD
+     e LRUD) e dove comincia l'immagine ecografica — sopra la corda piu' alta lo zero non ci
+     puo' stare, perche' li' ecografia non ce n'e'. */
+  const testaCartella = el('div', { class: 'scala-testa' });
+  const renderTesta = () => {
+    testaCartella.innerHTML = '';
+    const rg = dati.ruler_group || {};
+    const zf = dati.zero_folder;
+    const za = dati.zero_expected;
+    testaCartella.append(el('p', { class: 'hint' },
       `il righello di questa cartella: colonna a x=${Math.round((dati.zone || {}).x || 0)}, `
-      + `trovata su ${(dati.zone || {}).found || 0} fotogrammi su ${(dati.zone || {}).total || 0}.`),
+      + `trovata su ${(dati.zone || {}).found || 0} fotogrammi su ${(dati.zone || {}).total || 0}.`
+      + (rg.group ? ` Misurato su ${rg.group}, zero ${rg.zero_end === 'top' ? 'in alto' : 'in basso'}`
+        + ` — gli altri orientamenti si ottengono ribaltandolo.` : '')));
+    if (rg.group && !rg.complete) {
+      testaCartella.append(el('p', { class: 'avviso' },
+        `${rg.group} non ha tutte le depth: manca ${(rg.missing_depths || []).join(', ')} mm. `
+        + 'Quelle depth resterebbero senza righello da ribaltare.'));
+    }
+    if (za) {
+      const riga = el('div', { class: 'row' },
+        el('span', { class: 'hint' },
+          `il ventaglio comincia a y=${za.y} (${za.from})`
+          + (zf ? ` · i righelli si accordano su y=${zf.y}: ${zf.from}` : '')));
+      if (zf && (zf.off || []).length) {
+        const b = el('button', { class: 'ghost' },
+          `Metti lo zero a ${zf.y} sui ${zf.off.length} fuori posto`);
+        b.title = zf.off.map((n) => n.split('/').pop()).join(', ');
+        b.addEventListener('click', async () => {
+          b.disabled = true;
+          try {
+            const esito = await api(`/projects/${projectId}/scale/study/zero`, { body: {} });
+            toast(`zero messo su ${esito.changed.length} fotogrammi`);
+            dati = await api(`/projects/${projectId}/scale/study`);
+            frames = dati.frames || [];
+            renderTesta(); mostra(); rifaiChips();
+          } catch (errore) { toast(errore.message, true); }
+          finally { b.disabled = false; }
+        });
+        riga.append(b);
+      }
+      testaCartella.append(riga);
+    }
+  };
+  renderTesta();
+
+  root.append(
+    testaCartella,
     legenda(),
     chips, notiBox, giroBox,
     // Immagine a sinistra, strumenti a destra: la stessa forma di tutte le sezioni.
