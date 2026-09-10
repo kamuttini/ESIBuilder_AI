@@ -1374,6 +1374,15 @@ function rectChainCard(panel, ganciRect) {
               + Object.entries(pass.saved.depth_by_group)
                 .map(([g, mm]) => `${g} ${mm} mm`).join(' · '))
           : null,
+        // Su quali immagini: sono le stesse che nella sezione depth portano quel valore, e
+        // vederle scritte e' l'unico modo di controllare che siano proprio quelle.
+        (pass.saved && pass.saved.images_by_group)
+          ? el('div', { class: 'hint' }, 'su '
+              + Object.entries(pass.saved.images_by_group)
+                .map(([g, nomi]) => `${g}: ${(nomi || [])
+                  .map((n) => n.split('/').pop()).join(', ') || '—'}`)
+                .join(' · '))
+          : null,
         // I gruppi senza depth confermata restano fuori: dirlo evita di credere che la
         // cartella abbia due orientamenti invece di quattro.
         // Le due corde che fissano i bordi: la piu' alta di NF/LR e la piu' bassa di

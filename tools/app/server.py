@@ -4748,40 +4748,38 @@ def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
 
         misure: Dict[str, Dict] = {}
         for indice, (gruppo, per_valore) in enumerate(sorted(scelte.items())):
-            minima = min(per_valore)
-            # Le depth **minori**, in ordine: alla piu' bassa spesso corrisponde una sola
-            # immagine, e da una corda sola non si sceglie ne' la piu' lunga ne' l'estrema.
-            # Si sale finche' bastano, ma non oltre il doppio della minima: piu' su
-            # l'immagine e' rimpicciolita e la corda non arriva piu' al bordo.
-            nomi: List[str] = []
-            for valore in sorted(per_valore):
-                if valore > 2.0 * minima and nomi:
-                    break
-                nomi.extend(sorted(per_valore[valore]))
-                if len(nomi) >= max(1, per_group):
-                    break
-            nomi = nomi[:max(1, per_group)]
-            profondita = {n: v for v, elenco in per_valore.items() for n in elenco}
-            _job_update(job_id, stage=f"corde nel gruppo {gruppo} da {minima:g} mm",
-                        done=indice, total=len(scelte))
+            profondita = sorted(per_valore)
+            minima = profondita[0]
             etichetta = "su" if gruppo in ("NF", "LR") else "giu"
-            trovati = []
-            for nome in nomi:
-                percorso = base / nome
-                if not percorso.exists():
-                    continue
-                seg = stimatore(image_path=percorso, rect_norm=rect_norm,
-                                orientation_label=etichetta)
-                if not seg:
-                    continue
-                trovati.append({
-                    "image": nome,
-                    "plane": engine.predict_lt([percorso], corrente).get("plane"),
-                    "x1": float(seg["x1"]), "x2": float(seg["x2"]), "y": float(seg["y"]),
-                    "length_norm": float(seg["length_norm"]),
-                    "length_px": round(float(seg["length_norm"]) * width, 1),
-                    "depth_mm": profondita.get(nome, minima),
-                })
+            # Si misura alla depth **piu' bassa**, e li' soltanto: e' dove la macchina
+            # ingrandisce di piu' e il ventaglio riempie il riquadro, quindi quella corda e'
+            # insieme la piu' lunga e quella che tocca il bordo. Mescolarci le depth
+            # successive - come faceva prima, per averne tre - voleva dire far vincere come
+            # «piu' estrema» la corda di un'immagine piu' rimpicciolita, cioe' un bordo che
+            # non e' quello. Alle depth dopo si sale solo se qui non si misura niente.
+            trovati: List[Dict] = []
+            for valore in profondita:
+                if trovati or (valore != minima and valore > 2.0 * minima):
+                    break
+                nomi = sorted(per_valore[valore])[:max(1, per_group)]
+                _job_update(job_id, stage=f"corde nel gruppo {gruppo} a {valore:g} mm",
+                            done=indice, total=len(scelte))
+                for nome in nomi:
+                    percorso = base / nome
+                    if not percorso.exists():
+                        continue
+                    seg = stimatore(image_path=percorso, rect_norm=rect_norm,
+                                    orientation_label=etichetta)
+                    if not seg:
+                        continue
+                    trovati.append({
+                        "image": nome,
+                        "plane": engine.predict_lt([percorso], corrente).get("plane"),
+                        "x1": float(seg["x1"]), "x2": float(seg["x2"]), "y": float(seg["y"]),
+                        "length_norm": float(seg["length_norm"]),
+                        "length_px": round(float(seg["length_norm"]) * width, 1),
+                        "depth_mm": valore,
+                    })
             if not trovati:
                 continue
             piani: Dict[str, int] = {}
@@ -4800,9 +4798,10 @@ def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
                 "extreme": estrema,
                 "plane": dominante,
                 "planes": piani,
-                "depth_mm": minima,
+                "depth_mm": trovati[0]["depth_mm"],
                 "depths_used": sorted({s["depth_mm"] for s in trovati}),
-                "depths_available": sorted(per_valore),
+                "images_used": [s["image"] for s in trovati],
+                "depths_available": profondita,
                 "tried": len(nomi),
                 "found": len(trovati),
                 "median_length_px": round(
@@ -4834,6 +4833,7 @@ def _run_rect_depth(job_id: str, project_id: str, per_group: int) -> None:
                 "pairs": {k: v["max_px"] for k, v in risultato["pairs"].items()},
                 "per_group": {g: m["segment"]["length_px"] for g, m in misure.items()},
                 "depth_by_group": risultato["depth_by_group"],
+                "images_by_group": {g: m.get("images_used") or [] for g, m in misure.items()},
                 "groups_skipped": risultato["groups_skipped"],
                 # Le due corde che fissano i bordi in verticale: la piu' alta fra NF/LR e la
                 # piu' bassa fra UD/LRUD. Sono il motivo per cui il rettangolo sta li'.
