@@ -3982,12 +3982,21 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
                 "max_diff": round(max((c["diff"] for c in dentro), default=0.0), 4),
             })
         elenco.sort(key=lambda g: g["max_diff"])
+        # I gruppi su cui hai gia' detto «le tengo tutte» non tornano a chiedere: una
+        # decisione presa e' presa, anche se la ricerca si rifa'.
+        gia_tenuti = {tuple(sorted(v.get("names") or []))
+                      for v in ((project.step_value("import").get("similar") or {})
+                                .get("kept") or [])}
+        if gia_tenuti:
+            elenco = [g for g in elenco if tuple(sorted(g["names"])) not in gia_tenuti]
 
         def mutate(_p: Project, value: Dict) -> Dict:
             value["similar"] = {
                 "threshold": soglia, "groups": elenco,
                 "pairs": coppie[:200],
                 "images": len(firme),
+                # Le decisioni prese restano: rifare la ricerca non e' disfarle.
+                "kept": (value.get("similar") or {}).get("kept") or [],
                 "at": datetime.now().isoformat(timespec="seconds"),
             }
             return value
@@ -4053,6 +4062,38 @@ def api_duplicates_drop(project_id: str):
     valore = _write_step(project_id, "import", mutate, invalidate=False)
     return jsonify({"dropped": tolte, "left": len(restano),
                     "groups": len((valore.get("similar") or {}).get("groups") or [])})
+
+
+@app.post("/api/projects/<project_id>/duplicates/keep")
+def api_duplicates_keep(project_id: str):
+    """«Queste le tengo tutte»: il gruppo si chiude e non torna piu' a chiedere.
+
+    Senza, scorrere i gruppi non finirebbe mai: quelli su cui si decide di non buttare
+    niente ricomparirebbero identici alla ricerca dopo, e la revisione non avanzerebbe.
+    """
+    project = _project(project_id)
+    nomi = set(str(n).strip() for n in (_payload().get("names") or []) if str(n).strip())
+    if not nomi:
+        return jsonify({"error": "nessuna immagine indicata"}), 400
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        simile = dict(value.get("similar") or {})
+        gruppi = []
+        for g in simile.get("groups") or []:
+            if set(g.get("names") or []) == nomi:
+                continue
+            gruppi.append(g)
+        simile["groups"] = gruppi
+        tenuti = list(simile.get("kept") or [])
+        tenuti.append({"names": sorted(nomi),
+                       "at": datetime.now().isoformat(timespec="seconds")})
+        simile["kept"] = tenuti
+        value["similar"] = simile
+        return value
+
+    valore = _write_step(project_id, "import", mutate, invalidate=False)
+    simile = valore.get("similar") or {}
+    return jsonify({"kept": sorted(nomi), "groups": len(simile.get("groups") or [])})
 
 
 @app.get("/api/projects/<project_id>/orientation/candidates")

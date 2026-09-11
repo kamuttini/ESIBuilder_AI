@@ -2795,43 +2795,45 @@ async function cardCoperturaScala(host, projectId) {
 }
 
 
-/* Il visore a tutto schermo per decidere se due fotogrammi sono la stessa cosa.
+/* La revisione a tutto schermo dei fotogrammi quasi identici.
 
    Una differenza di qualche centesimo non si giudica su due miniature: si giudica
-   **alternandole**. E' il vecchio trucco del comparatore a lampeggio degli astronomi —
-   due lastre della stessa porzione di cielo, si passa dall'una all'altra e cio' che si e'
-   mosso salta all'occhio, mentre affiancate non lo vedresti mai. Qui le due immagini sono
-   sovrapposte e si passa dall'una all'altra con le frecce o con la barra spaziatrice: se
-   qualcosa cambia, si vede.
+   **alternandole**. E' il comparatore a lampeggio degli astronomi — due lastre della
+   stessa porzione di cielo, si passa dall'una all'altra e cio' che si e' mosso salta
+   all'occhio, mentre affiancate non lo vedresti mai.
 
-   E per non doversi fidare dell'occhio c'e' la maschera: le differenze dipinte in rosso,
-   calcolate qui nel browser confrontando i pixel delle due. */
-function visoreSimili(gruppo, progetto, onScarta) {
-  let indice = 0;
+   E la decisione deve costare un tasto, non un giro di pagina: si guarda, si dice quale
+   tenere (o che si tengono tutte), e si e' gia' sulla coppia dopo. Quindici gruppi sono
+   quindici tasti, non quindici ritorni all'elenco.
+
+   Un gruppo puo' avere piu' di due fotogrammi: se A somiglia a B e B a C, sono tre scatti
+   della stessa cosa e si guardano insieme. Le frecce li scorrono tutti. */
+function visoreSimili(gruppi, partenza, progetto, azioni) {
+  let quale = partenza;          // il gruppo in revisione
+  let indice = 0;                // il fotogramma mostrato dentro al gruppo
   let differenze = false;
-  const nomi = gruppo.names;
+  let occupato = false;
   const overlay = el('div', { class: 'visore' });
   const scena = el('div', { class: 'visore-scena' });
   const img = el('img', { alt: '' });
   const tela = el('canvas', { class: 'visore-diff' });
   scena.append(img, tela);
   const titolo = el('div', { class: 'visore-titolo' });
-  const aiuto = el('div', { class: 'hint' },
-    'frecce o barra: passa da una all\'altra (e' + ' quello che le confronta) · '
-    + 'D: dipinge le differenze · Esc: chiudi');
+  const avanzamento = el('div', { class: 'visore-avanzamento' });
+  const gruppo = () => gruppi[quale];
 
   const disegnaDiff = async () => {
-    if (!differenze || nomi.length < 2) { tela.style.display = 'none'; return; }
-    const altra = nomi[(indice + 1) % nomi.length];
+    const g = gruppo();
+    if (!differenze || !g || g.names.length < 2) { tela.style.display = 'none'; return; }
+    const altra = g.names[(indice + 1) % g.names.length];
     const carica = (nome) => new Promise((ok, ko) => {
       const i = new Image();
-      i.crossOrigin = 'anonymous';
       i.onload = () => ok(i);
       i.onerror = ko;
       i.src = `/api/projects/${progetto}/image?name=${encodeURIComponent(nome)}&w=1920`;
     });
     try {
-      const [x, y] = await Promise.all([carica(nomi[indice]), carica(altra)]);
+      const [x, y] = await Promise.all([carica(g.names[indice]), carica(altra)]);
       const w = Math.min(x.naturalWidth, y.naturalWidth);
       const h = Math.min(x.naturalHeight, y.naturalHeight);
       const cx = document.createElement('canvas'); cx.width = w; cx.height = h;
@@ -2855,37 +2857,86 @@ function visoreSimili(gruppo, progetto, onScarta) {
       }
       tela.getContext('2d').putImageData(fuori, 0, 0);
       tela.style.display = 'block';
-      titolo.querySelector('.visore-diff-nota').textContent =
-        ` · ${quanti.toLocaleString('it')} pixel diversi da ${altra.split('/').pop()}`;
+      const nota = titolo.querySelector('.visore-diff-nota');
+      if (nota) nota.textContent = ` · ${quanti.toLocaleString('it')} px diversi da ${altra.split('/').pop()}`;
     } catch (errore) {
       tela.style.display = 'none';
-      toast('non riesco a calcolare le differenze qui nel browser', true);
       differenze = false;
+      toast('non riesco a calcolare le differenze qui nel browser', true);
     }
   };
 
   const mostra = () => {
-    const nome = nomi[indice];
+    const g = gruppo();
+    if (!g) { chiudi(); return; }
+    if (indice >= g.names.length) indice = 0;
+    const nome = g.names[indice];
     img.src = `/api/projects/${progetto}/image?name=${encodeURIComponent(nome)}&w=1920`;
     titolo.innerHTML = '';
     titolo.append(
-      el('strong', {}, `${indice + 1} di ${nomi.length}`),
-      el('span', {}, ` · ${nome.split('/').pop()}`),
-      el('span', {}, nome === gruppo.keep ? ' · questa resta' : ' · proposta da scartare'),
+      el('strong', {}, `${indice + 1} di ${g.names.length}`),
+      el('span', {}, ` · ${nome.split('/').pop()} · differenza ${g.max_diff}`),
       el('span', { class: 'hint visore-diff-nota' }, ''));
+    avanzamento.textContent = `gruppo ${quale + 1} di ${gruppi.length}`;
     disegnaDiff();
   };
-  const passo = (d) => { indice = (indice + d + nomi.length) % nomi.length; mostra(); };
+  const passo = (d) => {
+    const g = gruppo();
+    if (!g) return;
+    indice = (indice + d + g.names.length) % g.names.length;
+    mostra();
+  };
+  const prossimo = () => {
+    quale += 1;
+    indice = 0;
+    if (quale >= gruppi.length) {
+      toast('finito: non restano gruppi da guardare');
+      chiudi();
+      return;
+    }
+    mostra();
+  };
+  /* Decidere e passare oltre: e' un gesto solo, e finche' non e' finito i tasti non
+     rispondono - se no due pressioni veloci deciderebbero due volte sullo stesso gruppo. */
+  const decidi = async (fai) => {
+    if (occupato) return;
+    const g = gruppo();
+    if (!g) return;
+    occupato = true;
+    overlay.classList.add('occupato');
+    try {
+      await fai(g);
+      prossimo();
+    } catch (errore) {
+      toast(errore.message, true);
+    } finally {
+      occupato = false;
+      overlay.classList.remove('occupato');
+    }
+  };
+  const tieniQuesta = () => decidi(async (g) => {
+    const via = g.names.filter((n) => n !== g.names[indice]);
+    if (via.length) await azioni.scarta(via);
+  });
+  const tieniTutte = () => decidi(async (g) => { await azioni.tieni(g.names); });
+  const scartaQuesta = () => decidi(async (g) => {
+    if (g.names.length < 2) throw new Error('e\' rimasta sola: non si scarta');
+    await azioni.scarta([g.names[indice]]);
+  });
 
   const chiudi = () => {
     window.removeEventListener('keydown', tasti);
     overlay.remove();
+    if (azioni.finito) azioni.finito();
   };
   const tasti = (e) => {
-    if (e.key === 'Escape') { e.preventDefault(); chiudi(); }
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); passo(1); }
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); passo(-1); }
-    if (e.key === 'd' || e.key === 'D') { e.preventDefault(); differenze = !differenze; disegnaDiff(); }
+    if (e.key === 'Escape') { e.preventDefault(); chiudi(); return; }
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); passo(1); return; }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); passo(-1); return; }
+    if (e.key === 'd' || e.key === 'D') { e.preventDefault(); differenze = !differenze; disegnaDiff(); return; }
+    if (e.key === '1') { e.preventDefault(); tieniQuesta(); return; }
+    if (e.key === '2' || e.key === 't' || e.key === 'T') { e.preventDefault(); tieniTutte(); return; }
+    if (e.key === 'x' || e.key === 'X') { e.preventDefault(); scartaQuesta(); }
   };
   window.addEventListener('keydown', tasti);
   scena.addEventListener('click', () => passo(1));
@@ -2896,26 +2947,19 @@ function visoreSimili(gruppo, progetto, onScarta) {
     tastoDiff.className = differenze ? '' : 'ghost';
     disegnaDiff();
   });
-  const tieni = el('button', {}, 'Tieni questa, scarta le altre');
-  tieni.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    const via = nomi.filter((n) => n !== nomi[indice]);
-    chiudi();
-    await onScarta(via);
-  });
-  const scartaQuesta = el('button', { class: 'ghost' }, 'Scarta questa');
-  scartaQuesta.addEventListener('click', async (e) => {
-    e.stopPropagation();
-    const nome = nomi[indice];
-    if (nomi.length < 2) { toast('e\' rimasta sola: non si scarta', true); return; }
-    chiudi();
-    await onScarta([nome]);
-  });
   overlay.append(
-    el('div', { class: 'visore-barra' }, titolo,
-      el('div', { class: 'row' }, tastoDiff, tieni, scartaQuesta,
+    el('div', { class: 'visore-barra' },
+      avanzamento, titolo,
+      el('div', { class: 'row' },
+        el('button', { onclick: tieniQuesta }, 'Tieni questa (1)'),
+        el('button', { class: 'ghost', onclick: tieniTutte }, 'Tienile tutte (T)'),
+        el('button', { class: 'ghost', onclick: scartaQuesta }, 'Scarta questa (X)'),
+        tastoDiff,
         el('button', { class: 'ghost', onclick: chiudi }, 'Chiudi (Esc)')),
-      aiuto),
+      el('div', { class: 'hint' },
+        'frecce o barra: alterna i fotogrammi del gruppo — e\' alternandoli che si vede '
+        + 'la differenza. 1 tiene questo e scarta gli altri, T li tiene tutti: in tutti e '
+        + 'due i casi si passa subito al gruppo dopo.')),
     scena);
   document.body.append(overlay);
   mostra();
@@ -2981,9 +3025,11 @@ function cardQuasiIdentiche(panel, value) {
     card.append(el('p', { class: 'avviso' },
       `${gruppi.length} gruppi di fotogrammi quasi identici: ne resterebbero fuori ${quante} `
       + 'su ' + (dati.images || '—') + '. Di ogni gruppo si tiene il primo.'));
-    const via = el('button', {}, `Scarta tutte e ${quante}`);
+    const rivediTutti = el('button', {}, `Guardali a tutto schermo (${gruppi.length})`);
+    rivediTutti.addEventListener('click', () => rivedi(0));
+    const via = el('button', { class: 'ghost' }, `Scarta tutte e ${quante} senza guardarle`);
     via.addEventListener('click', () => scarta(gruppi.flatMap((g) => g.drop)));
-    card.append(el('div', { class: 'row' }, via));
+    card.append(el('div', { class: 'row' }, rivediTutti, via));
     for (const g of gruppi.slice(0, 40)) {
       const riga = el('div', { class: 'simili-gruppo' });
       riga.append(el('div', { class: 'hint' },
@@ -2999,16 +3045,14 @@ function cardQuasiIdentiche(panel, value) {
           el('div', { class: 'hint' }, tenuta ? 'questa resta' : 'da scartare')));
       }
       riga.append(strip);
-      const guarda = el('button', { class: 'ghost sq2' }, 'Guardale a tutto schermo');
-      guarda.addEventListener('click', () => visoreSimili(g, state.projectId, scarta));
+      const posto = gruppi.indexOf(g);
+      const guarda = el('button', { class: 'ghost sq2' }, 'Guarda da qui');
+      guarda.addEventListener('click', () => rivedi(posto));
       strip.addEventListener('click', (e) => {
-        // Un clic su una miniatura apre il visore su quella: e' il gesto che viene
-        // naturale, e guardare e' l'unico modo per decidere.
-        const voce = e.target.closest('.simili-voce');
-        if (!voce) return;
-        const nome = voce.dataset.nome;
-        visoreSimili({ ...g, names: [nome, ...g.names.filter((n) => n !== nome)] },
-                     state.projectId, scarta);
+        // Un clic su una miniatura apre la revisione da quel gruppo: guardare e' l'unico
+        // modo per decidere, e da li' in poi si va avanti a tastiera.
+        if (!e.target.closest('.simili-voce')) return;
+        rivedi(posto);
       });
       const b = el('button', { class: 'ghost sq2' }, `Scarta le altre ${g.drop.length}`);
       b.addEventListener('click', () => scarta(g.drop));
@@ -3016,15 +3060,30 @@ function cardQuasiIdentiche(panel, value) {
       card.append(riga);
     }
   };
-  const scarta = async (nomi) => {
+  const scarta = async (nomi, silenzioso) => {
     if (!nomi.length) return;
-    try {
-      const esito = await api(`/projects/${state.projectId}/duplicates/drop`,
-        { body: { names: nomi } });
+    const esito = await api(`/projects/${state.projectId}/duplicates/drop`,
+      { body: { names: nomi } });
+    if (dati) dati.groups = (dati.groups || []).filter((g) => !nomi.includes(g.names[0])
+      && !g.names.every((n) => nomi.includes(n)));
+    if (!silenzioso) {
       toast(`${esito.dropped} immagini tolte dalla cartella · ne restano ${esito.left}`);
       await reload();
-    } catch (errore) { toast(errore.message, true); }
+    }
   };
+  const tieni = async (nomi) => {
+    await api(`/projects/${state.projectId}/duplicates/keep`, { body: { names: nomi } });
+  };
+  /* La revisione: si apre a tutto schermo sul gruppo indicato e si va avanti da li'.
+
+     Ricaricare la pagina a ogni decisione butterebbe via proprio quello che serve — essere
+     gia' sul gruppo dopo — quindi durante la revisione si scrive e basta, e si ricarica
+     una volta sola alla fine. */
+  const rivedi = (da) => visoreSimili(dati.groups || [], da, state.projectId, {
+    scarta: (nomi) => scarta(nomi, true),
+    tieni,
+    finito: async () => { await reload(); },
+  });
   disegna();
 }
 

@@ -1259,3 +1259,11 @@ img.depth-crop {
   image-rendering: auto; user-select: none;
 }
 .visore-diff { display: none; pointer-events: none; }
+.visore-avanzamento {
+  font-size: 12px; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 999px; padding: 2px 10px; white-space: nowrap;
+}
+/* Mentre la decisione viene scritta i tasti non rispondono: si vede, cosi' non si preme
+   due volte credendo che il primo colpo sia andato perso. */
+.visore.occupato .visore-scena { opacity: .45; }
+.visore.occupato .visore-barra button { pointer-events: none; opacity: .6; }
