@@ -970,7 +970,8 @@ img.depth-crop {
   position: relative; border: 1px solid var(--line); border-radius: 8px;
   background: #000; overflow: hidden; flex: 1 1 260px; min-width: 220px;
 }
-.scala-zoom.tacca-live { border-color: rgba(255, 79, 216, .8); }
+.scala-zoom.tacca-live { border-color: rgba(255, 79, 216, .8); min-height: 140px; }
+.scala-zoom.tacca-live.vuota { background: rgba(255, 79, 216, .035); }
 .scala-zoom.tacca-live .scala-zoom-titolo { color: #ff8be5; }
 .scala-zoom-titolo {
   position: absolute; top: 0; left: 0; right: 0; z-index: 2; font-size: 11px;
@@ -999,6 +1000,11 @@ img.depth-crop {
   content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 13px;
 }
 .scala-zoom-tacca:hover { opacity: 1; border-top-width: 2px; }
+.scala-zoom-tacca.attiva {
+  opacity: 1; border-top: 3px solid #ff4fd8;
+  box-shadow: 0 -1px 0 rgba(0,0,0,.85), 0 1px 0 rgba(255,255,255,.35);
+}
+.scala-zoom-tacca.attiva .scala-zoom-y { color: #ff8be5; font-weight: 700; }
 .scala-zoom-via {
   position: absolute; right: -26px; top: -11px; width: 22px; height: 22px; padding: 0;
   line-height: 20px; text-align: center; border-radius: 50%; cursor: pointer;

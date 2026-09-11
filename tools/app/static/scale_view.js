@@ -128,6 +128,7 @@ async function createScaleViewer(projectId) {
       tacca.style.top = `${t * s}px`;
       tacca.style.left = `${((f.x ?? 0) - 30) * s}px`;
       tacca.style.width = `${60 * s}px`;
+      tacca.addEventListener('pointerenter', () => preparaZoomTacca(t));
       tacca.addEventListener('pointerdown', (e) => {
         if (e.target.closest('.scala-tacca-via')) return;
         e.stopPropagation();
@@ -212,6 +213,8 @@ async function createScaleViewer(projectId) {
   const zoom = {};
   let modoZoom = 'estremo';
   let taccaInModifica = null;
+  let taccaOrigine = null;
+  let trascinandoTacca = false;
   const centroZoom = (chiave, f) => chiave === 'y_tacca' ? taccaInModifica : f[chiave];
 
   const finestraZoom = (f, y) => {
@@ -291,8 +294,14 @@ async function createScaleViewer(projectId) {
       if (y == null || !z.cursore) return;
       z.cursore.style.display = '';
       z.cursore.style.top = `${(y - z.finestra[1]) * scalaZoom(chiave)}px`;
-      z.dettaglio.textContent = `y=${y} · ${modoZoom === 'estremo'
-        ? `posiziona ${z.etichetta}` : modoZoom === 'aggiungi' ? 'aggiungi tacca' : 'elimina tacca'}`;
+      if (chiave === 'y_tacca' && taccaInModifica != null) {
+        const delta = taccaOrigine == null ? 0 : Math.round(taccaInModifica - taccaOrigine);
+        z.dettaglio.textContent = `tacca y=${Math.round(taccaInModifica)} · Δ ${delta > 0 ? '+' : ''}${delta} px`
+          + (trascinandoTacca ? ' · trascinamento in corso' : ' · pronta da trascinare');
+      } else {
+        z.dettaglio.textContent = `y=${y} · ${modoZoom === 'estremo'
+          ? `posiziona ${z.etichetta}` : modoZoom === 'aggiungi' ? 'aggiungi tacca' : 'elimina tacca'}`;
+      }
     });
     piano.addEventListener('pointerleave', () => {
       const z = zoom[chiave];
@@ -313,6 +322,14 @@ async function createScaleViewer(projectId) {
   const zoomZero = creaZoom('y_zero', 'zero', '#3fb950');
   const zoomFondo = creaZoom('y_far', 'fondo', '#d29922');
   const zoomTacca = creaZoom('y_tacca', 'tacca in modifica', '#ff4fd8');
+  const preparaZoomTacca = (y) => {
+    if (trascinandoTacca || y == null) return;
+    const cambiata = taccaInModifica == null || Math.round(taccaInModifica) !== Math.round(y);
+    taccaInModifica = y;
+    taccaOrigine = y;
+    if (cambiata && zoom.y_tacca) zoom.y_tacca.finestra = null;
+    aggiornaZoom();
+  };
   const vicinanzaSel = el('select', { style: 'width:108px' },
     ...[['0.25', 'dettaglio massimo'], ['0.5', 'molto vicino'], ['1', 'vicino'],
          ['2', 'largo'], ['4', 'tutta la barra']]
@@ -340,8 +357,18 @@ async function createScaleViewer(projectId) {
     for (const chiave of ['y_zero', 'y_far', 'y_tacca']) {
       const z = zoom[chiave];
       const y = centroZoom(chiave, f);
-      z.scatola.style.display = (y == null || f.x == null) ? 'none' : '';
-      if (y == null || f.x == null) continue;
+      const taccaLive = chiave === 'y_tacca';
+      z.scatola.style.display = (!taccaLive && (y == null || f.x == null)) ? 'none' : '';
+      z.scatola.classList.toggle('vuota', taccaLive && (y == null || f.x == null));
+      if (y == null || f.x == null) {
+        if (taccaLive) {
+          z.titolo.textContent = 'tacca: passaci sopra o afferrala';
+          z.img.style.visibility = 'hidden';
+          z.piano.innerHTML = '';
+        }
+        continue;
+      }
+      z.img.style.visibility = '';
       const nuova = finestraZoom(f, y);
       // Durante il trascinamento la lente della tacca resta ferma: si deve vedere la linea
       // muoversi rispetto ai pixel originali, non tenere la linea ferma spostando l'immagine.
@@ -369,11 +396,14 @@ async function createScaleViewer(projectId) {
       const passoMm = (f.ruler || {}).step_mm || f.D_step_mm || null;
       for (const t of f.ticks || []) {
         if (t < z.finestra[1] || t > z.finestra[3]) continue;
-        const tacca = el('div', { class: 'scala-zoom-tacca',
+        const attiva = taccaInModifica != null
+          && Math.round(t) === Math.round(taccaInModifica);
+        const tacca = el('div', { class: `scala-zoom-tacca${attiva ? ' attiva' : ''}`,
           title: 'trascina: da qui il passo · alt+trascina: solo questa' },
           el('span', { class: 'scala-zoom-y' }, `y ${Math.round(t)}`),
           el('button', { class: 'scala-zoom-via', title: 'togli la tacca e il suo numero' }, '×'));
         tacca.style.top = `${(t - z.finestra[1]) * s}px`;
+        tacca.addEventListener('pointerenter', () => preparaZoomTacca(t));
         tacca.addEventListener('pointerdown', (e) => {
           if (e.target.closest('.scala-zoom-via')) return;
           if (modoZoom === 'elimina') {
@@ -411,6 +441,11 @@ async function createScaleViewer(projectId) {
       mira.style.top = `${(y - z.finestra[1]) * s}px`;
       const cursore = el('div', { class: 'scala-zoom-cursore', style: 'display:none' });
       const dettaglio = el('div', { class: 'scala-zoom-dettaglio' });
+      if (chiave === 'y_tacca' && taccaInModifica != null) {
+        const delta = taccaOrigine == null ? 0 : Math.round(taccaInModifica - taccaOrigine);
+        dettaglio.textContent = `tacca y=${Math.round(taccaInModifica)} · Δ ${delta > 0 ? '+' : ''}${delta} px`
+          + (trascinandoTacca ? ' · trascinamento in corso' : ' · pronta da trascinare');
+      }
       z.cursore = cursore; z.dettaglio = dettaglio;
       z.piano.append(mira, cursore, dettaglio);
     }
@@ -622,8 +657,11 @@ async function createScaleViewer(projectId) {
     const primaPitch = f.pitch;
     let attuale = y;
     let mossa = false;
+    const nuovaTacca = taccaInModifica == null || Math.round(taccaInModifica) !== Math.round(y);
     taccaInModifica = y;
-    if (zoom.y_tacca) zoom.y_tacca.finestra = null;
+    taccaOrigine = y;
+    trascinandoTacca = true;
+    if (nuovaTacca && zoom.y_tacca) zoom.y_tacca.finestra = null;
     aggiornaZoom();
     ricorda();
     const muovi = (e) => {
@@ -647,6 +685,8 @@ async function createScaleViewer(projectId) {
     const molla = async () => {
       window.removeEventListener('pointermove', muovi);
       window.removeEventListener('pointerup', molla);
+      trascinandoTacca = false;
+      aggiornaZoom();
       if (!mossa) { storia.pop(); return; }
       if (!insieme) {
         // Spostare una tacca sola, per il modulo, e' toglierla da dov'era e rimetterla qui.
@@ -1296,6 +1336,8 @@ async function createScaleViewer(projectId) {
     if (!elenco.includes(corrente())) indice = frames.indexOf(elenco[0]);
     const f = corrente();
     taccaInModifica = null;
+    taccaOrigine = null;
+    trascinandoTacca = false;
     if (zoom.y_tacca) zoom.y_tacca.finestra = null;
     attesaSecondoClic = null;
     image.src = `/api/projects/${projectId}/image?name=${encodeURIComponent(f.name)}&w=980`;
