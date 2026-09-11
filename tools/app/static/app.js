@@ -2811,7 +2811,10 @@ async function cardCoperturaScala(host, projectId) {
 function visoreSimili(gruppi, partenza, progetto, azioni) {
   let quale = partenza;          // il gruppo in revisione
   let indice = 0;                // il fotogramma mostrato dentro al gruppo
-  let differenze = false;
+  // Le differenze si vedono da subito: e' la domanda per cui si apre questa finestra -
+  // «in cosa differiscono?» - e doverla chiedere con un tasto voleva dire premerlo su
+  // ogni gruppo. Si spegne con D quando si vuole guardare l'immagine pulita.
+  let differenze = true;
   let occupato = false;
   const overlay = el('div', { class: 'visore' });
   const scena = el('div', { class: 'visore-scena' });
@@ -2941,7 +2944,7 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
   window.addEventListener('keydown', tasti);
   scena.addEventListener('click', () => passo(1));
 
-  const tastoDiff = el('button', { class: 'ghost' }, 'Differenze (D)');
+  const tastoDiff = el('button', {}, 'Differenze (D)');
   tastoDiff.addEventListener('click', (e) => {
     e.stopPropagation(); differenze = !differenze;
     tastoDiff.className = differenze ? '' : 'ghost';
