@@ -54,7 +54,7 @@ function cloneBoxes(source) {
 
 /* Un editor su una singola immagine. `boxes` viene mutato in posto; `onChange` avvisa. */
 function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoubleClick,
-                           margins, projectId, imageName, soloControlli }) {
+                           margins, projectId, imageName, soloControlli, lensSource }) {
   const marginState = margins || { x: 0, y: 0 };
   const root = el('div', { class: 'editor' });
   // Due colonne, come ovunque: l'immagine a sinistra, i comandi a destra. I comandi
@@ -81,6 +81,8 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
   const originalHeight = () => (sampleSize && sampleSize[1]) || image.naturalHeight || 1;
   const scaleX = () => image.clientWidth / originalWidth();
   const scaleY = () => image.clientHeight / originalHeight();
+  const lensIdentity = lensSource
+    || `box:${projectId || ''}:${imageName || ''}:${Object.keys(boxes).sort().join(',')}`;
 
   function clampBox(box) {
     const maxX = originalWidth() - 1;
@@ -108,7 +110,6 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
       node.style.width = `${(box.right - box.left) * scaleX()}px`;
       node.style.height = `${(box.bottom - box.top) * scaleY()}px`;
       node.classList.toggle('selected', spec.key === selected);
-      if (Lente.viva()) Lente.aggiorna(contestoLente());
       const readout = sliderRows[spec.key];
       if (readout) {
         readout.size.textContent =
@@ -143,6 +144,10 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
         }
       }
     }
+    // Una sola sincronizzazione per frame, e soltanto se questa e' davvero la sezione che
+    // ha aperto la lente. Un editor a schermo intero o gia' staccato dal DOM non deve
+    // sovrascrivere il contenuto dell'altra finestra.
+    if (root.isConnected) Lente.aggiornaSeAttiva(contestoLente());
   }
 
   function drag(spec, mode, event) {
@@ -211,6 +216,7 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
       const slider = el('input', { type: 'range', min: '0', max: String(max), step: '1' });
       const number = el('input', { type: 'number', style: 'width:84px' });
       const set = (raw) => {
+        selected = spec.key;
         const box = boxes[spec.key];
         box[side] = parseInt(raw || '0', 10) || 0;
         clampBox(box);
@@ -241,6 +247,7 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
         const number = el('input', { type: 'number', min: '-25', max: '25', step: '0.1',
                                      style: 'width:84px' });
         const set = (raw) => {
+          selected = spec.key;
           marginState[axis] = Math.max(-25, Math.min(25, parseFloat(raw) || 0));
           paint();
           if (onChange) onChange(boxes, marginState);
@@ -263,8 +270,28 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
     stage.addEventListener('dblclick', (event) => { event.preventDefault(); onDoubleClick(); });
     stage.title = 'doppio clic per aprire a schermo intero';
   }
+  /* La modalita' «segue» della lente deve funzionare anche negli editor condivisi da
+     import, vendor, sonda e rettangolo: prima questi pannelli non le inviavano mai il
+     puntatore, quindi il pulsante nella lente non aveva alcun effetto. */
+  stage.addEventListener('pointermove', (event) => {
+    if (!Lente.attiva(lensIdentity) || !Lente.segueOra()) return;
+    const r = image.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    Lente.segui(
+      (event.clientX - r.left) * originalWidth() / r.width,
+      (event.clientY - r.top) * originalHeight() / r.height,
+      lensIdentity,
+    );
+  });
   image.addEventListener('load', paint);
-  window.addEventListener('resize', paint);
+  const resizePaint = () => {
+    if (!root.isConnected) {
+      window.removeEventListener('resize', resizePaint);
+      return;
+    }
+    paint();
+  };
+  window.addEventListener('resize', resizePaint);
   if (image.complete) setTimeout(paint, 0);
 
   /* Cosa mandare alla lente: il box selezionato per primo, che e' quello su cui si sta
@@ -281,7 +308,7 @@ function createBoxEditor({ imageSrc, boxes, sampleSize, onChange, height, onDoub
       voci.push({ box: boxes[spec.key], color: spec.color, label: spec.label });
     }
     return {
-      source: `box:${imageName || ''}`,
+      source: lensIdentity,
       projectId, name: imageName,
       size: [originalWidth(), originalHeight()],
       boxes: voci,

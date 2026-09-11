@@ -213,6 +213,8 @@ lavorando, oppure torna indietro.</div>
       const largo = Math.abs(ultimo.x - partenza.x);
       const alto = Math.abs(ultimo.y - partenza.y);
       if (largo < 3 || alto < 3 || !ctx || !ctx.onDraw) return;
+      puntoSeguito = null;
+      seguitoInAttesa = null;
       ctx.onDraw({
         left: Math.round(Math.min(partenza.x, ultimo.x)),
         right: Math.round(Math.max(partenza.x, ultimo.x)),
@@ -269,6 +271,8 @@ lavorando, oppure torna indietro.</div>
         scena.removeEventListener('pointercancel', molla);
         if (mosso || !ctx || !ctx.onPunto || !e || e.type !== 'pointerup') return;
         const r = img.getBoundingClientRect();
+        puntoSeguito = null;
+        seguitoInAttesa = null;
         ctx.onPunto({
           x: Math.round(finestra[0] + (e.clientX - r.left) / (s || 1)),
           y: Math.round(finestra[1] + (e.clientY - r.top) / (s || 1)),
@@ -419,6 +423,8 @@ lavorando, oppure torna indietro.</div>
       if (!ctx || !ctx.onChange || sospesa) return;
       ev.preventDefault();
       ev.stopPropagation();
+      puntoSeguito = null;
+      seguitoInAttesa = null;
       const img = d.getElementById('crop');
       const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
       const partenza = { x: ev.clientX, y: ev.clientY };
@@ -478,6 +484,8 @@ lavorando, oppure torna indietro.</div>
     const img = d.getElementById('crop');
     const scena = d.getElementById('scena');
     const principale = (ctx.boxes || []).find((b) => b.box) || null;
+    const bersaglioScelto = (ctx.targets || []).find(
+      (voce) => voce.id === miraScelta && voce.box) || null;
     // Cosa inquadrare: di solito il riquadro, ma chi chiama puo' dire un'altra zona. Sul
     // rettangolo ecografico il riquadro e' mezzo schermo - inquadrarlo sarebbe non
     // ingrandire niente - mentre quello che si guarda e' l'angolo che si sta spostando, o
@@ -486,7 +494,8 @@ lavorando, oppure torna indietro.</div>
     const mira = (segueIlPuntatore && puntoSeguito)
       ? { left: puntoSeguito.x - 45, right: puntoSeguito.x + 45,
           top: puntoSeguito.y - 30, bottom: puntoSeguito.y + 30 }
-      : (ctx.focus || (principale && principale.box) || null);
+      : ((bersaglioScelto && bersaglioScelto.box)
+        || ctx.focus || (principale && principale.box) || null);
     if (!mira) {
       scena.style.display = 'none';
       const v = d.getElementById('vuoto');
@@ -700,6 +709,11 @@ lavorando, oppure torna indietro.</div>
       if (voce.id === miraScelta) b.className = 'on';
       b.addEventListener('click', () => {
         miraScelta = voce.id;
+        // Un bersaglio scelto esplicitamente deve vincere sull'ultimo punto sul quale e'
+        // passato il mouse. Altrimenti il chip si accende, ma la lente resta dov'era e
+        // sembra che il comando non funzioni.
+        puntoSeguito = null;
+        seguitoInAttesa = null;
         finestraManuale = false;
         latoScelto = voce.side || null;
         miraInFinestra = null;      // costringe a rifare la finestra su questo bersaglio
@@ -732,9 +746,9 @@ lavorando, oppure torna indietro.</div>
      riparte da zero: la vista di prima inquadrava un'altra cosa, il bersaglio acceso non
      esiste piu', il lato scelto nemmeno. Tenerli era il motivo per cui la lente, passando
      da una sezione all'altra, restava a meta' fra le due. */
-  const aggiorna = (nuovo) => {
+  const aggiorna = (nuovo, riparti) => {
     const chi = (nuovo && nuovo.source) || '';
-    if (chi !== padrone) {
+    if (riparti || chi !== padrone) {
       padrone = chi;
       finestra = null;
       miraInFinestra = null;
@@ -742,6 +756,8 @@ lavorando, oppure torna indietro.</div>
       miraScelta = '';
       latoScelto = null;
       finestraManuale = false;
+      puntoSeguito = null;
+      seguitoInAttesa = null;
       zoomServito = 0;
       nodi = [];
       const d = viva() ? win.document : null;
@@ -751,6 +767,16 @@ lavorando, oppure torna indietro.</div>
     if (viva()) win.document.body.classList.remove('sospesa');
     ctx = nuovo;
     disegna();
+  };
+
+  /* I ridisegni automatici (resize, caricamento immagine, risposte asincrone) possono
+     arrivare anche da un pannello che non e' piu' quello aperto. Non devono mai rubare la
+     lente alla sezione scelta dall'utente: solo il suo pulsante puo' cambiare padrone. */
+  const attiva = (source) => viva() && !sospesa && ((source || '') === padrone);
+  const aggiornaSeAttiva = (nuovo) => {
+    if (!nuovo || !attiva(nuovo.source)) return false;
+    aggiorna(nuovo);
+    return true;
   };
 
   /* La pagina ha cambiato sezione. Non si sa ancora se la nuova usera' la lente, quindi non
@@ -779,12 +805,19 @@ lavorando, oppure torna indietro.</div>
     const testo = etichetta || 'Lente su un\'altra finestra';
     const b = el('button', { class: 'ghost' }, testo);
     b.addEventListener('click', () => {
-      ctx = dammiContesto();
-      padrone = (ctx && ctx.source) || '';
+      const nuovo = dammiContesto();
+      const eraViva = viva();
+      const riparti = !eraViva || sospesa || ((nuovo && nuovo.source) || '') !== padrone;
+      // Alla prima apertura `apri` disegna subito: si prepara prima il contesto, evitando
+      // perfino un lampo del ritaglio precedente. Con una finestra gia' viva si aggiorna
+      // invece dopo averla portata davanti.
+      if (!eraViva) aggiorna(nuovo, true);
       if (!apri()) {
         toast('il browser ha bloccato la finestra: permetti i popup per questo sito', true);
         return;
       }
+      if (eraViva) aggiorna(nuovo, riparti);
+      win.focus();
       sincronizzaBottoni();
     });
     bottoni.push([b, testo]);
@@ -803,8 +836,8 @@ lavorando, oppure torna indietro.</div>
      dire non disegnare mai. Si tiene l'ultimo punto e si disegna al frame dopo; il ritaglio
      si ricarica solo quando il punto esce dalla zona gia' inquadrata, che e' la stessa
      regola di sempre. */
-  const segui = (x, y) => {
-    if (!viva() || !segueIlPuntatore || sospesa) return;
+  const segui = (x, y, source) => {
+    if (!attiva(source) || !segueIlPuntatore) return;
     seguitoInAttesa = { x: Math.round(x), y: Math.round(y) };
     if (frameChiesto) return;
     frameChiesto = true;
@@ -823,5 +856,7 @@ lavorando, oppure torna indietro.</div>
   };
   const segueOra = () => segueIlPuntatore;
 
-  return { apri, chiudi, aggiorna, sospendi, viva, bottone, segui, segueOra };
+  return {
+    apri, chiudi, aggiorna, aggiornaSeAttiva, attiva, sospendi, viva, bottone, segui, segueOra,
+  };
 })();

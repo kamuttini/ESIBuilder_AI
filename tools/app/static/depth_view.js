@@ -378,25 +378,45 @@ async function createDepthViewer(projectId, sampleSize) {
   image.addEventListener('pointerdown', (e) => disegnaRiquadro(e, 'grande'));
   zoomImg.addEventListener('pointerdown', (e) => disegnaRiquadro(e, 'zoom'));
 
+  const lensSource = `depth:${projectId}`;
+  stage.addEventListener('pointermove', (event) => {
+    if (!Lente.attiva(lensSource) || !Lente.segueOra()) return;
+    const r = image.getBoundingClientRect();
+    const [W, H] = nativo();
+    if (!r.width || !r.height || !W || !H) return;
+    Lente.segui((event.clientX - r.left) * W / r.width,
+                (event.clientY - r.top) * H / r.height, lensSource);
+  });
+
   /* Cosa vede la lente: il riquadro di questa immagine, col valore letto. */
   const contestoLente = () => {
     const r = byName.get(names[index]) || {};
     const box = (modificabile() ? bozza : r.box) || r.box;
+    const [W, H] = nativo();
+    const applicaBox = (nuovo) => {
+      bozza = normalizza({ ...nuovo });
+      disegna();
+      disegnaZoom();
+      renderRiquadro();
+      salvaRiquadroAutomatico();
+    };
     return {
-      source: 'depth',
-      projectId, name: names[index], size: nativo(),
+      source: lensSource,
+      projectId, name: names[index], size: [W, H],
       boxes: box ? [{ box, color: (modes[r.mode] || {}).color || '#3fb950',
                       label: r.depth_mm == null ? 'depth' : `${r.depth_mm} mm` }] : [],
-      caption: r.ocr_text ? `letto «${r.ocr_text}»` : '',
-      // Trascinabile solo dove il riquadro si puo' davvero cambiare: sulle immagini dove
-      // la depth viene dalla scala non c'e' un riquadro da spostare.
-      onChange: (box && modificabile()) ? (nuovo) => {
-        bozza = normalizza({ ...nuovo });
-        disegna();
-        disegnaZoom();
-        renderRiquadro();
-        salvaRiquadroAutomatico();
-      } : null,
+      // Anche senza box la lente apre su un punto reale dell'immagine e poi segue il
+      // mouse: non resta una finestra vuota proprio quando serve trovare l'etichetta.
+      focus: box || (W && H ? {
+        left: Math.max(0, Math.round(W / 2) - 70), right: Math.min(W, Math.round(W / 2) + 70),
+        top: Math.max(0, Math.round(H / 2) - 45), bottom: Math.min(H, Math.round(H / 2) + 45),
+      } : null),
+      caption: r.ocr_text ? `letto «${r.ocr_text}»`
+        : (box ? '' : 'muovi il puntatore sul numero, poi disegna qui'),
+      onChange: (box && modificabile()) ? applicaBox : null,
+      // Un riquadro assente o completamente sbagliato si puo' disegnare direttamente
+      // nell'ingrandimento, non soltanto nella preview piccola.
+      onDraw: modificabile() ? applicaBox : null,
     };
   };
 
@@ -406,7 +426,7 @@ async function createDepthViewer(projectId, sampleSize) {
     if (!r || !box) {
       boxNode.style.display = 'none';
       // Anche il vuoto va detto alla lente, se no resta il riquadro dell'immagine di prima.
-      if (Lente.viva()) Lente.aggiorna(contestoLente());
+      if (root.isConnected) Lente.aggiornaSeAttiva(contestoLente());
       return;
     }
     const s = scala();
@@ -421,7 +441,7 @@ async function createDepthViewer(projectId, sampleSize) {
     boxNode.style.width = `${(box.right - box.left) * s.x}px`;
     boxNode.style.height = `${(box.bottom - box.top) * s.y}px`;
     for (const h of maniglie) h.style.display = modificabile() ? 'block' : 'none';
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    if (root.isConnected) Lente.aggiornaSeAttiva(contestoLente());
   };
 
   const mostra = () => {
@@ -863,10 +883,10 @@ async function createDepthViewer(projectId, sampleSize) {
       riquadro.append(el('p', { class: 'hint' },
         r.mode === 'scale'
           ? 'questa depth e\' dedotta dalla scala, ma puoi disegnare qui il numero che vedi '
-            + 'nell\'interfaccia: il riquadro viene salvato solo su questa immagine.'
+            + 'nell\'interfaccia, anche dalla lente: il riquadro viene salvato solo su questa immagine.'
           : r.status === 'missing'
-          ? 'nessun riquadro ancora: stringine uno su un\'immagine dove la depth e\' stata '
-            + 'trovata, e da li\' si applica anche a questa.'
+          ? 'nessun riquadro ancora: disegnalo sull\'immagine oppure direttamente nella '
+            + 'lente; viene salvato su questa immagine e potrai poi applicarlo alla cartella.'
           : 'nessun riquadro su questa immagine'));
       return;
     }

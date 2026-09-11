@@ -635,6 +635,7 @@ function panelImport(panel) {
       sampleSize: value.image_sample_size,
       projectId: state.projectId,
       imageName: anteprima,
+      lensSource: `import:${state.projectId}:timestamp`,
       onChange: () => {
         statoOra.textContent = 'modifica rilevata: ricalcolo automatico tra un attimo…';
         if (timerDedup) clearTimeout(timerDedup);
@@ -1313,6 +1314,12 @@ function templateBlockEditor(panel, value, key, line, note) {
 function templateBoxPanel(panel, step, value, key, color, emptyHint) {
   const imported = (state.project.steps.import || {}).value || {};
   const sampleSize = imported.image_sample_size || state.project.codes.image_sample_size;
+  // Questa zona si ridisegna da sola quando si crea il primo box. Ridisegnare l'intero
+  // pannello lo ricostruiva invece dal progetto salvato e perdeva subito il box appena
+  // creato: nelle sonde senza proposta il pulsante sembrava non fare nulla e la lente non
+  // diventava mai disponibile.
+  const host = el('div', {});
+  panel.append(host);
   const dirty = el('span', { class: 'dirty' }, 'modifiche non salvate');
   dirty.style.display = 'none';
   const readout = el('div', { class: 'hint' });
@@ -1340,56 +1347,62 @@ function templateBoxPanel(panel, step, value, key, color, emptyHint) {
     refresh();
   };
 
-  if (!value.preview_image) {
-    panel.append(el('p', { class: 'hint' }, 'nessuna anteprima: lancia prima l\'analisi.'));
-    return { refresh, save };
-  }
-  if (!value[key]) {
-    panel.append(el('p', { class: 'hint' }, emptyHint));
-    const crea = el('button', { class: 'ghost' }, 'Disegna il box qui sopra');
-    crea.addEventListener('click', () => {
-      const w = Math.round((sampleSize?.[0] || 1920) * 0.08);
-      const h = Math.round((sampleSize?.[1] || 1080) * 0.03);
-      value[key] = { top: 10, left: 10, bottom: 10 + h, right: 10 + w,
-                     check: 1, params: { threshold: 0 } };
-      render();
-    });
-    panel.append(el('div', { class: 'row' }, crea));
-    return { refresh, save };
-  }
+  const renderEditor = () => {
+    host.innerHTML = '';
+    if (!value.preview_image) {
+      host.append(el('p', { class: 'hint' }, 'nessuna anteprima: lancia prima l\'analisi.'));
+      return;
+    }
+    if (!value[key]) {
+      const crea = el('button', { class: 'ghost' }, 'Disegna il box qui sopra');
+      crea.addEventListener('click', () => {
+        const w = Math.round((sampleSize?.[0] || 1920) * 0.08);
+        const h = Math.round((sampleSize?.[1] || 1080) * 0.03);
+        value[key] = { top: 10, left: 10, bottom: 10 + h, right: 10 + w,
+                       check: 1, params: { threshold: 0 } };
+        renderEditor();
+      });
+      host.append(el('p', { class: 'hint' }, emptyHint), el('div', { class: 'row' }, crea));
+      return;
+    }
 
-  const editor = createBoxEditor({
-    imageSrc: `/api/projects/${state.projectId}/image` +
-      `?name=${encodeURIComponent(value.preview_image)}&w=980`,
-    boxes: cloneBoxes(value),
-    sampleSize,
-    projectId: state.projectId,
-    imageName: value.preview_image,
-    onChange: applyBoxes,
-    onDoubleClick: () => openFullscreenEditor({
-      projectId: state.projectId,
-      startValue: value,
+    const editor = createBoxEditor({
+      imageSrc: `/api/projects/${state.projectId}/image` +
+        `?name=${encodeURIComponent(value.preview_image)}&w=980`,
+      boxes: cloneBoxes(value),
       sampleSize,
-      startImage: value.preview_image,
-      onSave: (boxes) => { applyBoxes(boxes); save(); },
-    }),
-  });
-  panel.append(editor.root);
-  panel.append(el('div', { class: 'row' }, Lente.bottone(editor.contestoLente),
-    el('span', { class: 'hint' }, 'una finestra a parte con il riquadro ingrandito: '
-      + 'si trascina sul secondo schermo e segue quello che fai qui')));
-  panel.append(el('p', { class: 'hint' },
-    'trascina il box o usa le maniglie · doppio clic per aprire a schermo intero e ' +
-    'scorrere le immagini · il box vale per tutta la cartella'));
-  panel.append(readout);
-  panel.append(el('div', { class: 'row' },
-    el('button', { onclick: save }, 'Salva il box'),
-    dirty,
-    el('button', {
-      class: 'ghost',
-      onclick: () => { render(); toast('modifiche annullate'); },
-    }, 'Annulla le modifiche')));
-  refresh();
+      projectId: state.projectId,
+      imageName: value.preview_image,
+      lensSource: `template:${state.projectId}:${step.id}:${key}`,
+      onChange: applyBoxes,
+      onDoubleClick: () => openFullscreenEditor({
+        projectId: state.projectId,
+        startValue: value,
+        sampleSize,
+        startImage: value.preview_image,
+        onSave: (boxes) => { applyBoxes(boxes); save(); },
+      }),
+    });
+    host.append(
+      editor.root,
+      el('div', { class: 'row' }, Lente.bottone(editor.contestoLente),
+        el('span', { class: 'hint' }, 'una finestra a parte con il riquadro ingrandito: '
+          + 'si trascina sul secondo schermo e segue quello che fai qui')),
+      el('p', { class: 'hint' },
+        'trascina il box o usa le maniglie · doppio clic per aprire a schermo intero e '
+          + 'scorrere le immagini · il box vale per tutta la cartella'),
+      readout,
+      el('div', { class: 'row' },
+        el('button', { onclick: save }, 'Salva il box'),
+        dirty,
+        el('button', {
+          class: 'ghost',
+          onclick: () => { render(); toast('modifiche annullate'); },
+        }, 'Annulla le modifiche')),
+    );
+    refresh();
+  };
+  renderEditor();
   return { refresh, save };
 }
 
@@ -1851,7 +1864,7 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     }
 
     return {
-      source: 'rect',
+      source: `rect:${state.projectId}`,
       projectId: state.projectId,
       name: image.title || '',
       size: [(size && size[0]) || 0, (size && size[1]) || 0],
@@ -2181,7 +2194,7 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     } else {
       info.textContent = 'per questo gruppo non c\'e\' ancora lo studio delle corde: lancia il giro 3';
     }
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    if (card.isConnected) Lente.aggiornaSeAttiva(contestoLente());
   };
   // Il pannello puo' chiedere di ridisegnare: succede quando si cambia un numero sotto.
   if (ganci) ganci.ridisegna = draw;
@@ -2732,6 +2745,16 @@ function rectStudyCard(panel, chainIniziale, ganci) {
     stage,           // l'immagine con le elaborazioni
     legenda,         // che colore e' cosa
   );
+  stage.addEventListener('pointermove', (event) => {
+    const source = `rect:${state.projectId}`;
+    if (!Lente.attiva(source) || !Lente.segueOra()) return;
+    const r = image.getBoundingClientRect();
+    const [W, H] = [(size && size[0]) || image.naturalWidth || 0,
+                    (size && size[1]) || image.naturalHeight || 0];
+    if (!r.width || !r.height || !W || !H) return;
+    Lente.segui((event.clientX - r.left) * W / r.width,
+                (event.clientY - r.top) * H / r.height, source);
+  });
   const colonnaDestra = el('div', { class: 'rect-lato' },
     info,            // i numeri di questo gruppo
     correzione,      // correggere la corda che si sta guardando
@@ -2901,6 +2924,7 @@ function panelRect(panel, step) {
       margins,
       projectId: state.projectId,
       imageName: value.preview_image,
+      lensSource: `rect-draft:${state.projectId}`,
       onChange: applyBoxes,
       // Finche' c'e' soltanto l'abbozzo questa e' l'unica immagine della sezione. Quando
       // arrivano corde e orientamenti, l'immagine passa allo studio sopra e qui restano i

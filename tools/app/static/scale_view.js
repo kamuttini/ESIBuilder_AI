@@ -528,7 +528,9 @@ async function createScaleViewer(projectId) {
         indicaRighello(attesaSecondoClic, y);
         attesaSecondoClic = null;
       }
-      disegna(); return;
+      disegna();
+      Lente.aggiornaSeAttiva(contestoLente());
+      return;
     }
     if (event.shiftKey) generaDaTacca(y);
   });
@@ -548,7 +550,7 @@ async function createScaleViewer(projectId) {
     if (zoom.y_tacca) zoom.y_tacca.finestra = null;
     salva({ ticks: [...f.ticks] });
     disegna(); aggiornaZoom();
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    Lente.aggiornaSeAttiva(contestoLente());
   };
 
   /* Una tacca sola, e le altre vengono da se'.
@@ -573,7 +575,7 @@ async function createScaleViewer(projectId) {
         ticks: esito.ticks, pitch: esito.pitch, y_far: esito.y_far };
       stato(`${esito.ticks.length} tacche a passo ${esito.pitch} px — ${esito.from}`);
       disegna(); aggiornaZoom(); renderPasso(); renderDati(); renderLista();
-      if (Lente.viva()) Lente.aggiorna(contestoLente());
+      Lente.aggiornaSeAttiva(contestoLente());
     } catch (errore) { stato(errore.message); toast(errore.message, true); }
   };
 
@@ -765,7 +767,7 @@ async function createScaleViewer(projectId) {
     }
     salva(campi);
     disegna(); aggiornaZoom(); renderDati();
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    Lente.aggiornaSeAttiva(contestoLente());
     stato(aveva ? 'tacca e numero tolti' : 'tacca tolta');
   };
   const taccaVicina = (y, quanto = 12) => {
@@ -1318,14 +1320,15 @@ async function createScaleViewer(projectId) {
   /* La lente segue il puntatore anche qui: sul righello serve piu' che altrove, perche'
      quello che si cerca - una tacca, lo zero - e' alto due pixel. */
   const seguiConLaLente = (event) => {
-    if (!Lente.viva() || !Lente.segueOra()) return;
+    const source = `scala:${projectId}`;
+    if (!Lente.attiva(source) || !Lente.segueOra()) return;
     const r = image.getBoundingClientRect();
     if (!r.width || !r.height) return;
     const f = corrente();
     const sx = (f.w || image.naturalWidth || 0) / r.width;
     const sy = (f.h || image.naturalHeight || 0) / r.height;
     if (!sx || !sy) return;
-    Lente.segui((event.clientX - r.left) * sx, (event.clientY - r.top) * sy);
+    Lente.segui((event.clientX - r.left) * sx, (event.clientY - r.top) * sy, source);
   };
   stage.addEventListener('pointermove', seguiConLaLente);
 
@@ -1349,7 +1352,7 @@ async function createScaleViewer(projectId) {
       didascalia.append(el('span', {}, ' · righello non trovato: due clic per indicarlo'));
     }
     disegna(); aggiornaZoom(); renderDati(); renderPasso(); renderAzioni(); renderLista();
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    if (root.isConnected) Lente.aggiornaSeAttiva(contestoLente());
   };
   const passo = (delta) => {
     const elenco = visibili();
@@ -1489,11 +1492,41 @@ async function createScaleViewer(projectId) {
       aggiungiTacca(y);
       stato(`tacca a y=${y}`);
     }
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    Lente.aggiornaSeAttiva(contestoLente());
   };
   const contestoLente = () => {
     const f = corrente();
-    if (f.x == null) return { source: 'scala', projectId, name: f.name, boxes: [] };
+    if (f.x == null) {
+      const primo = attesaSecondoClic;
+      const cx = primo ? primo.x : Math.round((f.w || 0) / 2);
+      const cy = primo ? primo.y_zero : Math.round((f.h || 0) / 2);
+      return {
+        source: `scala:${projectId}`, projectId, name: f.name, size: [f.w || 0, f.h || 0],
+        boxes: [],
+        lines: primo ? [
+          { x: primo.x, color: '#40d0ff', label: 'colonna' },
+          { y: primo.y_zero, color: '#3fb950', label: 'zero' },
+        ] : [],
+        focus: (f.w && f.h) ? {
+          left: Math.max(0, cx - 70), right: Math.min(f.w, cx + 70),
+          top: Math.max(0, cy - 45), bottom: Math.min(f.h, cy + 45),
+        } : null,
+        caption: primo ? 'zero indicato: ora clicca il fondo'
+          : 'righello non trovato: clicca prima lo zero, poi il fondo',
+        onPunto: ({ x, y }) => {
+          if (!attesaSecondoClic) {
+            attesaSecondoClic = { x, y_zero: y };
+            stato('ora clicca il fondo del righello');
+          } else {
+            indicaRighello(attesaSecondoClic, y);
+            attesaSecondoClic = null;
+          }
+          disegna(); aggiornaZoom(); renderDati(); renderPasso(); renderAzioni();
+          Lente.aggiornaSeAttiva(contestoLente());
+        },
+        puntoLabel: primo ? 'indica il fondo del righello' : 'indica lo zero e la colonna',
+      };
+    }
     const x = Number(f.x);
     const ys = [f.y_zero, f.y_far].filter((v) => v != null).map(Number);
     const su = ys.length ? Math.min(...ys) : 0;
@@ -1501,7 +1534,7 @@ async function createScaleViewer(projectId) {
     const attorno = (y, meta) => ({ left: x - 60, right: x + 60,
                                     top: Math.round(y - meta), bottom: Math.round(y + meta) });
     return {
-      source: 'scala',
+      source: `scala:${projectId}`,
       projectId, name: f.name, size: [f.w || 0, f.h || 0],
       boxes: righelloVisibile ? [{ box: { left: x - 26, right: x + 26, top: su, bottom: giu },
                 color: '#40d0ff', label: 'righello' }] : [],
@@ -1527,7 +1560,7 @@ async function createScaleViewer(projectId) {
         modoLente = voce.id;
         // Il cartellino in alto dice cosa fara' il prossimo clic: se non si rinfresca,
         // resta quello di prima e si clicca credendo di fare un'altra cosa.
-        if (Lente.viva()) Lente.aggiorna(contestoLente());
+        Lente.aggiornaSeAttiva(contestoLente());
       },
       onPunto: ({ y, alt, target }) => applicaPuntoLente(target || modoLente, y, alt),
       puntoLabel: MODI_LENTE[modoLente] || MODI_LENTE.tacca,
@@ -1540,7 +1573,7 @@ async function createScaleViewer(projectId) {
     righelloVisibile = !righelloVisibile;
     visibilita.textContent = righelloVisibile ? 'Nascondi righello' : 'Mostra righello';
     disegna(); aggiornaZoom();
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    Lente.aggiornaSeAttiva(contestoLente());
   });
   const barraImmagine = el('div', { class: 'barra-immagine' },
     el('div', { class: 'ov-nav' },

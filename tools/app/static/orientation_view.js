@@ -186,7 +186,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     const mira = (modificaMarker && bozzaMarker) || (drawing && bozzaIndicata)
       || (row && row.box) || busta || null;
     return {
-      source: 'orientamento',
+      source: `orientamento:${projectId}`,
       projectId, name: names[index], size: [size[0] || 0, size[1] || 0], boxes: voci,
       focus: mira,
       caption: modificaMarker ? 'stringilo sul glifo'
@@ -203,7 +203,7 @@ async function createOrientationViewer(projectId, sampleSize) {
         } else {
           indicaMarker(nuovo);
         }
-        if (Lente.viva()) Lente.aggiorna(contestoLente());
+        Lente.aggiornaSeAttiva(contestoLente());
       } : null,
       // Stringere un marker vuol dire guardarlo da vicino: e' il caso in cui la lente
       // serve di piu', quindi qui si trascina anche da li'.
@@ -231,7 +231,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     // stretta appena fatta.
     place(markerNode, modificaMarker ? bozzaMarker : (row && row.box));
     mostraManiglie();
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    if (root.isConnected) Lente.aggiornaSeAttiva(contestoLente());
     detail.innerHTML = '';
     if (row) {
       detail.append(el('span', {},
@@ -391,13 +391,14 @@ async function createOrientationViewer(projectId, sampleSize) {
      sta di lato: passando sopra a un marker lo si vuole vedere ingrandito li', subito,
      senza prima dire alla lente dove andare. */
   const seguiConLaLente = (event) => {
-    if (!Lente.viva() || !Lente.segueOra()) return;
+    const source = `orientamento:${projectId}`;
+    if (!Lente.attiva(source) || !Lente.segueOra()) return;
     const r = image.getBoundingClientRect();
     if (!r.width || !r.height) return;
     const sx = (size[0] || image.naturalWidth || 0) / r.width;
     const sy = (size[1] || image.naturalHeight || 0) / r.height;
     if (!sx || !sy) return;
-    Lente.segui((event.clientX - r.left) * sx, (event.clientY - r.top) * sy);
+    Lente.segui((event.clientX - r.left) * sx, (event.clientY - r.top) * sy, source);
   };
   stage.addEventListener('pointermove', seguiConLaLente);
 
@@ -747,7 +748,7 @@ async function createOrientationViewer(projectId, sampleSize) {
       place(markerNode, bozzaMarker);
       mostraManiglie();
       renderModifica();
-      if (Lente.viva()) Lente.aggiorna(contestoLente());
+      Lente.aggiornaSeAttiva(contestoLente());
     };
     const molla = () => {
       bersaglio.removeEventListener('pointermove', muovi);
@@ -782,7 +783,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     if (!on) paint(); else place(markerNode, bozzaMarker);
     mostraManiglie();
     renderModifica();
-    if (!on) { if (Lente.viva()) Lente.aggiorna(contestoLente()); return; }
+    if (!on) { Lente.aggiornaSeAttiva(contestoLente()); return; }
     // La risposta puo' arrivare dopo che si e' gia' cambiata immagine o usciti: in quel
     // caso e' la risposta a una domanda che non si fa piu', e va lasciata cadere.
     const chiesta = names[index];
@@ -805,7 +806,7 @@ async function createOrientationViewer(projectId, sampleSize) {
       strettaAutomatica = { changed: false, reason: errore.message };
     }
     renderModifica();
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    Lente.aggiornaSeAttiva(contestoLente());
   };
   modificaButton.addEventListener('click', () => setModifica(!modificaMarker));
 
@@ -835,7 +836,7 @@ async function createOrientationViewer(projectId, sampleSize) {
         place(markerNode, bozzaMarker);
         mostraManiglie();
         renderModifica();
-        if (Lente.viva()) Lente.aggiorna(contestoLente());
+        Lente.aggiornaSeAttiva(contestoLente());
       });
       modificaPanel.append(el('div', { class: 'depth-prestito' },
         `il bordo di sfondo l'ho tolto io: ${t.top || 0} px sopra, ${t.bottom || 0} sotto, `
@@ -900,7 +901,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     attesaPannello = setTimeout(() => proponiMarkerBox(bozzaIndicata), 160);
     // La lente deve vedere la misura nuova: il suo riquadro si muove da solo mentre lo
     // trascini, ma la riga in alto - «24 x 24 px · top…» - la scrive dal contesto.
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    Lente.aggiornaSeAttiva(contestoLente());
   };
   const drawNode = el('div', { class: 'editor-box draw-box' });
   drawNode.style.display = 'none';
@@ -918,7 +919,7 @@ async function createOrientationViewer(projectId, sampleSize) {
       ? '← trascina un rettangolo attorno al marker vero, stretto sul glifo — '
         + 'meglio ancora dentro la lente, dove e\' ingrandito'
       : '';
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    Lente.aggiornaSeAttiva(contestoLente());
     if (!on) {
       drawNode.style.display = 'none';
       drawStart = null;
@@ -963,7 +964,7 @@ async function createOrientationViewer(projectId, sampleSize) {
       return;
     }
     proponiMarker(a, end);
-    if (Lente.viva()) Lente.aggiorna(contestoLente());
+    Lente.aggiornaSeAttiva(contestoLente());
   });
 
   /* Prima di rilanciare si vede cosa si sta per usare: il ritaglio ingrandito, la sua
