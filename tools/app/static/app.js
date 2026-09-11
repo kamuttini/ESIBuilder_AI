@@ -628,6 +628,7 @@ function panelImport(panel) {
       dett.append(corpo);
       panel.append(dett);
     }
+    cardQuasiIdentiche(panel, value);
   }
 
   /* I due piani.
@@ -2791,6 +2792,101 @@ async function cardCoperturaScala(host, projectId) {
     }
   }
   host.append(card);
+}
+
+
+/* --- fotogrammi che si somigliano dentro l'ecografia ---------------------------------
+   La passata dell'orologio prende solo i fotogrammi identici a meno dell'ora. Ma una
+   macchina che scansiona dal vivo non ripete mai lo stesso rumore: due scatti sullo stesso
+   vaso, stessa interfaccia e stessa depth, differiscono in decine di migliaia di pixel di
+   speckle. A occhio sono la stessa immagine; per un confronto esatto sono due immagini
+   diverse, e restano tutte e due.
+
+   Qui non si confronta l'uguaglianza, si misura **quanto** cambia dentro al rettangolo.
+   Poi non decide il programma: si vedono affiancate, in ordine di somiglianza, e si
+   scarta quello che si vuole scartare. */
+function cardQuasiIdentiche(panel, value) {
+  const card = el('div', { class: 'card' });
+  panel.append(card);
+  let dati = value.similar || null;
+  const soglia = el('input', {
+    type: 'number', min: '0', max: '5', step: '0.05',
+    value: String((dati && dati.threshold) || 0.2), style: 'width:70px',
+    title: 'quanto possono differire dentro al rettangolo per essere considerate la stessa',
+  });
+  const stato = el('span', { class: 'hint' });
+
+  const disegna = () => {
+    card.innerHTML = '';
+    card.append(el('h3', { style: 'margin-top:0' }, 'fotogrammi quasi identici'));
+    card.append(el('p', { class: 'hint' },
+      'due scatti della stessa scena non sono mai uguali pixel per pixel — l\'ecografia si '
+      + 'muove — ma sono la stessa immagine. Qui si misura di quanto differiscono dentro al '
+      + 'rettangolo: sotto la soglia finiscono in elenco, e decidi tu. Per riferimento: due '
+      + 'fotogrammi identici a meno dell\'ora danno 0, due scatti «uguali a occhio» danno '
+      + 'qualche centesimo, due immagini diverse qualche unita\'.'));
+    const avvia = el('button', { class: 'ghost' },
+      dati ? 'Cerca di nuovo' : 'Cerca i fotogrammi quasi identici');
+    avvia.addEventListener('click', async () => {
+      avvia.disabled = true;
+      try {
+        const inizio = await api(`/projects/${state.projectId}/duplicates/similar`,
+          { body: { threshold: parseFloat(soglia.value) || 0.2 } });
+        const job = await pollJob(inizio.job_id, stato);
+        dati = { threshold: parseFloat(soglia.value) || 0.2, groups: job.result.groups,
+                 images: job.result.images };
+        stato.textContent = '';
+        disegna();
+      } catch (errore) { toast(errore.message, true); stato.textContent = errore.message; }
+      finally { avvia.disabled = false; }
+    });
+    card.append(el('div', { class: 'row' },
+      el('span', { class: 'hint' }, 'soglia'), soglia, avvia, stato));
+    if (!dati) return;
+    const gruppi = dati.groups || [];
+    if (!gruppi.length) {
+      card.append(el('p', { class: 'hint' },
+        `nessun gruppo sotto ${dati.threshold}: in questa cartella non ci sono fotogrammi `
+        + 'che si somiglino cosi\' tanto.'));
+      return;
+    }
+    const quante = gruppi.reduce((n, g) => n + g.drop.length, 0);
+    card.append(el('p', { class: 'avviso' },
+      `${gruppi.length} gruppi di fotogrammi quasi identici: ne resterebbero fuori ${quante} `
+      + 'su ' + (dati.images || '—') + '. Di ogni gruppo si tiene il primo.'));
+    const via = el('button', {}, `Scarta tutte e ${quante}`);
+    via.addEventListener('click', () => scarta(gruppi.flatMap((g) => g.drop)));
+    card.append(el('div', { class: 'row' }, via));
+    for (const g of gruppi.slice(0, 40)) {
+      const riga = el('div', { class: 'simili-gruppo' });
+      riga.append(el('div', { class: 'hint' },
+        `differenza ${g.max_diff} · interfaccia identica`));
+      const strip = el('div', { class: 'simili-strip' });
+      for (const nome of g.names) {
+        const tenuta = nome === g.keep;
+        strip.append(el('div', { class: 'simili-voce' + (tenuta ? ' tenuta' : '') },
+          el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
+                      alt: nome, loading: 'lazy' }),
+          el('div', { class: 'hint' }, nome.split('/').pop()),
+          el('div', { class: 'hint' }, tenuta ? 'questa resta' : 'da scartare')));
+      }
+      riga.append(strip);
+      const b = el('button', { class: 'ghost sq2' }, `Scarta le altre ${g.drop.length}`);
+      b.addEventListener('click', () => scarta(g.drop));
+      riga.append(b);
+      card.append(riga);
+    }
+  };
+  const scarta = async (nomi) => {
+    if (!nomi.length) return;
+    try {
+      const esito = await api(`/projects/${state.projectId}/duplicates/drop`,
+        { body: { names: nomi } });
+      toast(`${esito.dropped} immagini tolte dalla cartella · ne restano ${esito.left}`);
+      await reload();
+    } catch (errore) { toast(errore.message, true); }
+  };
+  disegna();
 }
 
 

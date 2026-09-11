@@ -1219,3 +1219,19 @@ img.depth-crop {
 }
 .ov-pool-voce .hint { text-align: center; line-height: 1.35; }
 .ov-pool-tag { font-size: 11px; color: var(--accent); }
+
+
+/* I gruppi di fotogrammi quasi identici: si guardano affiancati, perche' la differenza
+   e' cosi' piccola che elencarne i nomi non direbbe niente. */
+.simili-gruppo {
+  border-top: 1px solid var(--line); padding: 10px 0; display: flex;
+  flex-direction: column; gap: 6px; align-items: flex-start;
+}
+.simili-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+.simili-voce {
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px; background: #000;
+  max-width: 268px;
+}
+.simili-voce.tenuta { border-color: var(--ok, #3fb950); }
+.simili-voce img { display: block; width: 100%; border-radius: 3px; }
+.simili-voce .hint { padding: 2px 2px 0; word-break: break-all; }

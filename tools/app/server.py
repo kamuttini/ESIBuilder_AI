@@ -42,7 +42,8 @@ from datetime import datetime  # noqa: E402
 
 from anagrafica import Anagrafica, default_path  # noqa: E402
 from importer import (  # noqa: E402
-    IMAGE_SUFFIXES, deduplicate, import_folder, resize_proposal, scan_folder,
+    IMAGE_SUFFIXES, MARGINE_OROLOGIO_PX, deduplicate, import_folder, resize_proposal,
+    scan_folder,
 )
 from inference import Engine, ModelPaths, sample_paths  # noqa: E402
 from rotation import estimate_rotation  # noqa: E402
@@ -3853,6 +3854,205 @@ def api_orientation_marker_tight(project_id: str):
         return jsonify({"box": box, "before": box, "changed": False,
                         "reason": "il bordo scuro non c'e' o quel che resterebbe e' troppo poco"})
     return jsonify({**esito, "before": box, "changed": True})
+
+
+# --- fotogrammi che si somigliano dentro l'ecografia -----------------------------------
+#
+# La passata dell'orologio prende solo i fotogrammi **identici** a meno dell'ora. Ma una
+# macchina che scansiona dal vivo non ripete mai due volte lo stesso rumore: due scatti a
+# sei secondi di distanza sullo stesso vaso, con la stessa interfaccia e la stessa depth,
+# differiscono in quarantamila pixel di speckle - a occhio sono la stessa immagine, per un
+# confronto esatto sono due immagini diverse, e restano tutte e due.
+#
+# Percio' qui non si confronta l'uguaglianza: si misura **quanto** differiscono dentro al
+# rettangolo ecografico. Su `prova del 9` la scala parla da sola: doppioni veri 0.000, due
+# fotogrammi «uguali a occhio» 0.047, e la mediana di tutte le coppie 6.46. Fra 0.05 e 6
+# c'e' spazio per una soglia, e non la sceglie il programma: si mostrano le coppie piu'
+# simili, in ordine, e decide lei.
+LATO_FIRMA = 128
+
+
+def _firma_ecografia(percorso: Path, rect: Dict, lato: int = LATO_FIRMA):
+    """Il rettangolo ecografico ridotto a un quadratino di grigi: la firma di quel frame."""
+    from PIL import Image  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+
+    with Image.open(percorso) as raw:
+        dentro = raw.convert("L").crop(
+            (int(rect["left"]), int(rect["top"]), int(rect["right"]) + 1, int(rect["bottom"]) + 1))
+        return np.asarray(dentro.resize((lato, lato), Image.BOX), dtype=np.float32)
+
+
+def _differenza_fuori(a: Path, b: Path, rect: Dict, ora: Optional[Dict]) -> int:
+    """Quanti pixel cambiano **fuori** dall'ecografia, tolto l'orologio.
+
+    E' la domanda che separa «lo stesso fotogramma due volte» da «un'altra impostazione»:
+    se l'interfaccia e' diversa, per quanto simile sia l'ecografia quelle due immagini
+    raccontano due cose diverse e non sono doppioni.
+    """
+    from PIL import Image  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+
+    with Image.open(a) as ia, Image.open(b) as ib:
+        xa = np.asarray(ia.convert("L"), dtype=np.int16)
+        xb = np.asarray(ib.convert("L"), dtype=np.int16)
+    if xa.shape != xb.shape:
+        return xa.size
+    d = np.abs(xa - xb) > 0
+    d[int(rect["top"]):int(rect["bottom"]) + 1, int(rect["left"]):int(rect["right"]) + 1] = False
+    if ora:
+        m = MARGINE_OROLOGIO_PX
+        d[max(0, int(ora["top"]) - m):int(ora["bottom"]) + 1 + m,
+          max(0, int(ora["left"]) - m):int(ora["right"]) + 1 + m] = False
+    return int(d.sum())
+
+
+def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
+    try:
+        import numpy as np  # noqa: PLC0415
+
+        project = _project(project_id)
+        rect = _final_rect(project)
+        if not rect:
+            raise ValueError("serve il rettangolo ecografico: senza non si sa dove guardare")
+        cartella = project.dedup_link_dir() or project.working_dir() or Path("")
+        nomi = [n for n in project.dedup_names()
+                if (cartella / n).is_file()]
+        if len(nomi) < 2:
+            raise ValueError("servono almeno due immagini")
+        ora = (project.step_value("import") or {}).get("timestamp_box")
+
+        firme = {}
+        for indice, nome in enumerate(nomi):
+            if indice % 10 == 0:
+                _job_update(job_id, stage=f"leggo le immagini ({indice} di {len(nomi)})",
+                            done=indice, total=len(nomi))
+            try:
+                firme[nome] = _firma_ecografia(cartella / nome, rect)
+            except Exception:  # noqa: BLE001 - un file illeggibile non e' un doppione
+                continue
+
+        _job_update(job_id, stage="confronto tutte le coppie", done=0, total=0)
+        vivi = list(firme)
+        coppie = []
+        for i, a in enumerate(vivi):
+            for b in vivi[i + 1:]:
+                scarto = float(np.abs(firme[a] - firme[b]).mean())
+                if scarto <= soglia:
+                    coppie.append({"a": a, "b": b, "diff": round(scarto, 4)})
+        coppie.sort(key=lambda c: c["diff"])
+
+        # Solo sulle coppie candidate si paga il confronto a piena risoluzione: e' quello
+        # che dice se anche l'interfaccia e' la stessa.
+        for indice, c in enumerate(coppie[:400]):
+            if indice % 10 == 0:
+                _job_update(job_id, stage=f"controllo l'interfaccia ({indice} di {len(coppie)})",
+                            done=indice, total=len(coppie))
+            c["outside_px"] = _differenza_fuori(cartella / c["a"], cartella / c["b"], rect, ora)
+
+        # Gruppi: se A somiglia a B e B a C, sono tre scatti della stessa cosa e si
+        # guardano insieme - scartarne due a coppie sarebbe lo stesso lavoro fatto due volte.
+        padre: Dict[str, str] = {}
+
+        def radice(x: str) -> str:
+            padre.setdefault(x, x)
+            while padre[x] != x:
+                padre[x] = padre[padre[x]]
+                x = padre[x]
+            return x
+
+        for c in coppie:
+            if c.get("outside_px", 0) != 0:
+                continue
+            ra, rb = radice(c["a"]), radice(c["b"])
+            if ra != rb:
+                padre[rb] = ra
+        gruppi: Dict[str, List[str]] = {}
+        for nome in padre:
+            gruppi.setdefault(radice(nome), []).append(nome)
+        elenco = []
+        for capo, membri in gruppi.items():
+            if len(membri) < 2:
+                continue
+            membri = sorted(membri)
+            dentro = [c for c in coppie
+                      if c["a"] in membri and c["b"] in membri and c.get("outside_px", 0) == 0]
+            elenco.append({
+                "keep": membri[0], "drop": membri[1:], "names": membri,
+                "max_diff": round(max((c["diff"] for c in dentro), default=0.0), 4),
+            })
+        elenco.sort(key=lambda g: g["max_diff"])
+
+        def mutate(_p: Project, value: Dict) -> Dict:
+            value["similar"] = {
+                "threshold": soglia, "groups": elenco,
+                "pairs": coppie[:200],
+                "images": len(firme),
+                "at": datetime.now().isoformat(timespec="seconds"),
+            }
+            return value
+
+        _write_step(project_id, "import", mutate, invalidate=False)
+        _job_update(job_id, status="done", stage="fatto",
+                    result={"groups": elenco, "pairs": len(coppie), "images": len(firme),
+                            "threshold": soglia,
+                            "droppable": sum(len(g["drop"]) for g in elenco)})
+    except Exception as error:  # noqa: BLE001
+        _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
+@app.post("/api/projects/<project_id>/duplicates/similar")
+def api_duplicates_similar(project_id: str):
+    """Cerca i fotogrammi che si somigliano dentro l'ecografia, sopra una soglia."""
+    _project(project_id)
+    soglia = float(_payload().get("threshold") or 0.2)
+    return jsonify({"job_id": _start_job(_run_simili, project_id, soglia)})
+
+
+@app.post("/api/projects/<project_id>/duplicates/drop")
+def api_duplicates_drop(project_id: str):
+    """Toglie dal progetto le immagini indicate: restano sul disco, escono dalla cartella.
+
+    Non si cancella niente: si accorcia l'elenco delle immagini del progetto, che e' la
+    stessa cosa che succede a uno sdoppiamento L/T. I moduli gia' girati non vanno rifatti -
+    le loro righe su quelle immagini smettono semplicemente di essere guardate.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    via = [str(n).strip() for n in (payload.get("names") or []) if str(n).strip()]
+    if not via:
+        return jsonify({"error": "nessuna immagine indicata"}), 400
+    restano = [n for n in project.dedup_names() if n not in set(via)]
+    if not restano:
+        return jsonify({"error": "toglierebbe tutte le immagini della cartella"}), 400
+    tolte = len(project.dedup_names()) - len(restano)
+    project.save_dedup_images(restano)
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        doppi = dict(value.get("duplicates") or {})
+        simili = list(doppi.get("simili") or [])
+        adesso = datetime.now().isoformat(timespec="seconds")
+        for nome in via:
+            simili.append({"name": nome, "kind": "simile", "at": adesso})
+        doppi["simili"] = simili
+        value["duplicates"] = doppi
+        value["duplicates_removed"] = (value.get("duplicates_removed") or 0) + tolte
+        value["images_total"] = len(restano)
+        # Le proposte che restano non devono citare immagini che non ci sono piu'.
+        simile = dict(value.get("similar") or {})
+        if simile.get("groups"):
+            rimasti = []
+            for g in simile["groups"]:
+                nomi = [n for n in g["names"] if n in set(restano)]
+                if len(nomi) > 1:
+                    rimasti.append({**g, "names": nomi, "keep": nomi[0], "drop": nomi[1:]})
+            simile["groups"] = rimasti
+            value["similar"] = simile
+        return value
+
+    valore = _write_step(project_id, "import", mutate, invalidate=False)
+    return jsonify({"dropped": tolte, "left": len(restano),
+                    "groups": len((valore.get("similar") or {}).get("groups") or [])})
 
 
 @app.get("/api/projects/<project_id>/orientation/candidates")
