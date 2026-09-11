@@ -1081,10 +1081,11 @@ function panelImport(panel) {
 
 /* Visore comune per le immagini dell'import: resta nello stesso ordine della
    cartella e si può attraversare anche con la tastiera. */
-function visoreImmagini(nomi, partenza, progetto) {
+function visoreImmagini(nomi, partenza, progetto, onExclude) {
   const ordine = (nomi || []).slice();
   if (!ordine.length) return;
   let indice = Math.max(0, Math.min(Number(partenza) || 0, ordine.length - 1));
+  let modificate = false;
   const pieno = el('div', { class: 'piani-pieno' });
   const testa = el('div', { class: 'piani-pieno-testa' });
   const scena = el('div', { class: 'piani-pieno-scena' });
@@ -1092,6 +1093,8 @@ function visoreImmagini(nomi, partenza, progetto) {
   const info = el('span', { class: 'hint' });
   const indietro = el('button', { class: 'ghost sq', title: 'immagine precedente' }, '‹');
   const avanti = el('button', { class: 'ghost sq', title: 'immagine successiva' }, '›');
+  const escludi = el('button', { class: 'ghost', title: 'toglie questa immagine dal progetto' },
+    'Escludi questa');
   const chiudi = el('button', { class: 'ghost' }, 'chiudi (Esc)');
 
   const mostra = () => {
@@ -1110,6 +1113,7 @@ function visoreImmagini(nomi, partenza, progetto) {
   const chiudiOra = () => {
     window.removeEventListener('keydown', tasti);
     pieno.remove();
+    if (modificate) reload();
   };
   const tasti = (evento) => {
     if (evento.key === 'ArrowLeft') { evento.preventDefault(); vai(-1); }
@@ -1118,8 +1122,22 @@ function visoreImmagini(nomi, partenza, progetto) {
   };
   indietro.addEventListener('click', () => vai(-1));
   avanti.addEventListener('click', () => vai(1));
+  escludi.addEventListener('click', async () => {
+    if (!onExclude || !ordine.length) return;
+    escludi.disabled = true;
+    const nome = ordine[indice];
+    try {
+      await onExclude(nome);
+      modificate = true;
+      ordine.splice(indice, 1);
+      if (!ordine.length) { chiudiOra(); return; }
+      if (indice >= ordine.length) indice = 0;
+      mostra();
+    } catch (errore) { toast(errore.message, true); }
+    finally { escludi.disabled = false; }
+  });
   chiudi.addEventListener('click', chiudiOra);
-  testa.append(indietro, avanti, info, chiudi);
+  testa.append(indietro, avanti, info, escludi, chiudi);
   scena.append(immagine);
   pieno.append(testa, scena);
   document.body.append(pieno);
@@ -1142,11 +1160,12 @@ function cardTutteLeImmagini(panel) {
   let dati = null;
   let mostrate = 120;
 
-  const escludi = async (nomi) => {
+  const escludi = async (nomi, ricarica = true) => {
     const esito = await api(`/projects/${state.projectId}/duplicates/drop`,
       { body: { names: nomi } });
     toast(`${esito.dropped} tolte · ne restano ${esito.left}`);
-    await reload();
+    if (ricarica) await reload();
+    return esito;
   };
   const rimetti = async (nomi) => {
     const esito = await api(`/projects/${state.projectId}/duplicates/restore`,
@@ -1168,7 +1187,9 @@ function cardTutteLeImmagini(panel) {
     for (const nome of nomi.slice(0, mostrate)) {
       const anteprima = el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
                     loading: 'lazy', alt: nome, title: 'apri a tutto schermo' });
-      anteprima.addEventListener('click', () => visoreImmagini(nomi, nomi.indexOf(nome), state.projectId));
+      anteprima.addEventListener('click', () => visoreImmagini(
+        nomi, nomi.indexOf(nome), state.projectId,
+        (daTogliere) => escludi([daTogliere], false)));
       const fig = el('figure', { class: 'thumb-voce', style: 'margin:0' },
         anteprima,
         el('figcaption', {}, nome.split('/').pop()
