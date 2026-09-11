@@ -6748,8 +6748,13 @@ def _righello_effettivo(frame: Dict, correzione: Optional[Dict],
         valore = frame.get(dal_frame)
         return float(valore) if valore not in (None, "") else None
 
-    tacche = [float(t) for t in (c.get("ticks") or frame.get("ticks") or [])]
-    if not c.get("ticks") and (c.get("ticks_add") or c.get("ticks_del")):
+    # Anche `ticks: []` e' una correzione valida: significa che spostando lo zero tutte
+    # le vecchie tacche sono finite dal lato sbagliato. Usare `or` qui le faceva
+    # ricomparire dal risultato originale al primo ricaricamento.
+    tacche_corrette = "ticks" in c
+    sorgente_tacche = c.get("ticks") if tacche_corrette else frame.get("ticks")
+    tacche = [float(t) for t in (sorgente_tacche or [])]
+    if not tacche_corrette and (c.get("ticks_add") or c.get("ticks_del")):
         via = {round(float(v)) for v in (c.get("ticks_del") or [])}
         tacche = sorted([t for t in tacche if round(t) not in via]
                         + [float(v) for v in (c.get("ticks_add") or [])])
@@ -6757,11 +6762,13 @@ def _righello_effettivo(frame: Dict, correzione: Optional[Dict],
     if len(tacche) > 1:
         salti = sorted(tacche[k + 1] - tacche[k] for k in range(len(tacche) - 1))
         passo = salti[len(salti) // 2]
-    passo_px = passo if passo else (float(frame["pitch"]) if frame.get("pitch") else None)
+    passo_px = (passo if passo else
+                (None if tacche_corrette and not tacche
+                 else (float(frame["pitch"]) if frame.get("pitch") else None)))
     # La scala del rilevatore vale per **la sua** scala di tacche. Se quella e' stata
     # sostituita, quel numero non descrive piu' niente: si torna a misurare la barra
     # contro la depth, che e' l'altra strada e resta valida.
-    mm_per_px = (None if c.get("ticks")
+    mm_per_px = (None if tacche_corrette
                  else (float(frame["mm_per_px"]) if frame.get("mm_per_px") else None))
     passo_mm = float(frame["D_step_mm"]) if frame.get("D_step_mm") else None
     # Un numero scritto da lei su una tacca **e'** la calibrazione: dice quanti millimetri

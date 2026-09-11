@@ -256,7 +256,8 @@ async function createScaleViewer(projectId) {
         const f = corrente();
         ricorda();
         f[chiave] = y;
-        salva({ [chiave]: y });
+        if (chiave === 'y_zero') pulisciTaccheFuoriDalloZero(f);
+        salva(chiave === 'y_zero' ? campiZero(f) : { [chiave]: y });
         stato(`${etichetta} a y=${y}`);
         disegna(); aggiornaZoom(); renderDati(); renderPasso();
       };
@@ -358,6 +359,24 @@ async function createScaleViewer(projectId) {
   };
 
   /* --- trascinare: un lato, o tutto il righello insieme ------------------------------- */
+  const dallaParteDelFondo = (y, zero, fondo) => {
+    if (zero == null) return true;
+    if (fondo == null) return y >= zero;
+    return fondo >= zero ? y >= zero && y <= fondo : y <= zero && y >= fondo;
+  };
+  const pulisciTaccheFuoriDalloZero = (f, tacche, etichette) => {
+    f.ticks = (tacche || f.ticks || [])
+      .filter((y) => dallaParteDelFondo(y, f.y_zero, f.y_far));
+    f.labels = (etichette || f.labels || [])
+      .filter(([y]) => dallaParteDelFondo(y, f.y_zero, f.y_far));
+  };
+  const campiZero = (f) => ({
+    y_zero: f.y_zero,
+    ticks: [...(f.ticks || [])],
+    nums: (correzione().nums || [])
+      .filter(([y]) => dallaParteDelFondo(y, f.y_zero, f.y_far)),
+  });
+
   function trascina(event, quale, scalaFn) {
     event.preventDefault();
     event.stopPropagation();
@@ -367,7 +386,7 @@ async function createScaleViewer(projectId) {
     const fy = typeof s === 'object' ? s.y : s;
     const da = { cx: event.clientX, cy: event.clientY,
                  x: f.x, y_zero: f.y_zero, y_far: f.y_far,
-                 ticks: [...(f.ticks || [])] };
+                 ticks: [...(f.ticks || [])], labels: (f.labels || []).map((v) => [...v]) };
     ricorda();
     const muovi = (e) => {
       const dx = Math.round((e.clientX - da.cx) / (fx || 1));
@@ -381,6 +400,7 @@ async function createScaleViewer(projectId) {
         f.x = limita(da.x + dx, f.w);
       } else {
         f[quale] = limita(da[quale] + dy, f.h);
+        if (quale === 'y_zero') pulisciTaccheFuoriDalloZero(f, da.ticks, da.labels);
       }
       disegna(); aggiornaZoom(); renderDati();
     };
@@ -389,7 +409,7 @@ async function createScaleViewer(projectId) {
       window.removeEventListener('pointerup', molla);
       const campi = quale === 'tutto'
         ? { x: f.x, y_zero: f.y_zero, y_far: f.y_far, ticks_add: f.ticks }
-        : { [quale]: f[quale] };
+        : (quale === 'y_zero' ? campiZero(f) : { [quale]: f[quale] });
       salva(campi);
     };
     window.addEventListener('pointermove', muovi);
@@ -1234,8 +1254,9 @@ async function createScaleViewer(projectId) {
       const chiave = event.altKey ? 'y_far' : 'y_zero';
       ricorda();
       f[chiave] = limita((f[chiave] || 0) + su_giu, f.h);
+      if (chiave === 'y_zero') pulisciTaccheFuoriDalloZero(f);
       disegna(); aggiornaZoom(); renderDati();
-      salva({ [chiave]: f[chiave] });
+      salva(chiave === 'y_zero' ? campiZero(f) : { [chiave]: f[chiave] });
       return;
     }
     if (event.key === 'ArrowLeft') { event.preventDefault(); passo(-1); }
