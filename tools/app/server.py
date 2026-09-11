@@ -7673,6 +7673,20 @@ def api_scale_study(project_id: str):
         # esterno che dice se il righello e' al posto giusto, e va visto accanto a lui.
         righello = _righello_effettivo(frame, correzioni.get(frame["name"]),
                                        (atteso or {}).get("end"))
+        # La review deve riaprire esattamente quello che l'utente ha salvato, anche prima
+        # di rilanciare il modulo. In precedenza `ruler` conteneva la correzione ma i campi
+        # disegnati dalla UI restavano quelli grezzi del detector: sembrava che tacche,
+        # zero e numeri non fossero stati memorizzati.
+        frame.update({
+            "x": righello.get("x"), "y_zero": righello.get("y_zero"),
+            "y_far": righello.get("y_far"), "ticks": righello.get("ticks") or [],
+            "pitch": righello.get("pitch"), "mm_per_px": righello.get("mm_per_px"),
+            "B_zero_end": righello.get("zero_end"),
+        })
+        correzione = correzioni.get(frame["name"]) or {}
+        if "nums" in correzione:
+            frame["labels"] = [[float(y), float(mm) / 10.0]
+                               for y, mm in (correzione.get("nums") or [])]
         controllo = _controlla_righello(frame, righello, confermate.get(frame["name"]))
         controllo["labels_on_ticks"] = _etichette_sulle_tacche(frame, righello["ticks"])
         frame["depth_check"] = controllo

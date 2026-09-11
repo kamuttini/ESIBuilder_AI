@@ -917,12 +917,12 @@ img.depth-crop {
   background: #40d0ff; border: 1px solid rgba(0, 0, 0, .55); border-radius: 2px;
 }
 .scala-tacca-via {
-  position: absolute; right: -20px; top: -9px; width: 17px; height: 17px; padding: 0;
-  line-height: 1; font-size: 12px; border-radius: 50%; opacity: 0;
+  position: absolute; right: -25px; top: -11px; width: 22px; height: 22px; padding: 0;
+  line-height: 1; font-size: 14px; border-radius: 50%; opacity: .72;
   background: rgba(248, 81, 73, .85); color: #fff; border: none; cursor: pointer;
 }
 .scala-tacca:hover { opacity: 1; }
-.scala-tacca:hover .scala-tacca-via { opacity: 1; }
+.scala-tacca:hover .scala-tacca-via { opacity: 1; transform: scale(1.08); }
 .scala-tacca.proposta .scala-tacca-presa, .scala-tacca.proposta .scala-tacca-via {
   display: none;
 }
@@ -998,13 +998,26 @@ img.depth-crop {
 }
 .scala-zoom-tacca:hover { opacity: 1; border-top-width: 2px; }
 .scala-zoom-via {
-  position: absolute; right: -18px; top: -9px; width: 16px; height: 16px; padding: 0;
-  line-height: 14px; text-align: center; border-radius: 50%; cursor: pointer;
+  position: absolute; right: -26px; top: -11px; width: 22px; height: 22px; padding: 0;
+  line-height: 20px; text-align: center; border-radius: 50%; cursor: pointer;
   background: #161b22; color: var(--muted); border: 1px solid var(--line);
-  font-size: 11px; opacity: 0;
+  font-size: 14px; opacity: .82;
 }
 .scala-zoom-tacca:hover .scala-zoom-via { opacity: 1; }
 .scala-zoom-via:hover { color: #f85149; border-color: #f85149; }
+.scala-zoom-y {
+  position: absolute; left: 3px; top: -17px; padding: 0 3px; border-radius: 3px;
+  color: #fff; background: rgba(0, 0, 0, .72); font-size: 10px; white-space: nowrap;
+}
+.scala-zoom-cursore {
+  position: absolute; left: 0; right: 0; z-index: 5; height: 0;
+  border-top: 1px dashed #ff4fd8; pointer-events: none;
+}
+.scala-zoom-dettaglio {
+  position: absolute; left: 6px; bottom: 5px; z-index: 6; pointer-events: none;
+  padding: 2px 6px; border-radius: 4px; color: #fff; background: rgba(0, 0, 0, .78);
+  font-size: 11px;
+}
 /* Il numero della tacca, a destra: si legge e si riscrive senza uscire dalla finestra. */
 .scala-zoom-numero {
   position: absolute; right: 4px; transform: translateY(-50%); z-index: 2;
@@ -1018,6 +1031,23 @@ img.depth-crop {
   width: 52px; padding: 0 2px; font-size: 11px; background: #000; color: #40d0ff;
   border: 1px solid #d29922; border-radius: 3px;
 }
+.scala-editor-tacche {
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+  padding: 9px; max-height: 300px; overflow: auto;
+}
+.scala-editor-titolo { font-weight: 650; margin-bottom: 6px; }
+.scala-editor-riga {
+  display: grid; grid-template-columns: 76px minmax(54px, 1fr) 24px 30px;
+  gap: 5px; align-items: center; padding: 3px 0; border-top: 1px solid rgba(255,255,255,.05);
+}
+.scala-editor-y { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.scala-valore-input { min-width: 0; width: 100%; padding: 4px 6px; }
+.scala-editor-via {
+  width: 26px; height: 26px; padding: 0; border-radius: 50%; line-height: 22px;
+  color: #fff; background: rgba(248,81,73,.72); border-color: rgba(248,81,73,.9);
+}
+.scala-editor-via:hover { background: #f85149; }
+.scala-zoom-modi { gap: 4px; }
 
 
 /* La fascia che dice a che punto e' il giro delle correzioni: salvate, riletto, cambiato. */
