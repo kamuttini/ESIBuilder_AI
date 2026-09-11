@@ -2374,19 +2374,30 @@ def api_orientation(project_id: str):
             }
         )
         by_name[name] = row
-    # Il punteggio e la posizione che contano sono quelli della validazione (il ritaglio
-    # consegnato cercato dentro l'envelope): e' la previsione di cosa fara' ESI. Mostrare il
-    # box della scoperta col punteggio della validazione faceva sembrare vecchio il ritaglio.
-    # Le immagini corrette restano dove le ha messe l'utente.
+    # Il punteggio, la posizione **e il gruppo** che contano sono quelli del ritaglio
+    # consegnato cercato dentro gli envelope: e' la previsione di cosa fara' ESI.
+    #
+    # Il gruppo no, prima: restava quello del batch. Cosi' la sezione disegnava il marker
+    # dove lo trova il ritaglio consegnato ma lo archiviava nel gruppo che aveva detto il
+    # batch, e i due non sono la stessa cosa - su `prova del 9` il batch diceva UD su 111
+    # immagini su 148, mentre gli envelope ne contano 26. Premendo un gruppo si vedevano
+    # dentro i marker di un altro: due verita' diverse sulla stessa immagine, e quella
+    # buona e' la seconda, perche' e' quella con cui sono fatti gli envelope.
+    consegnate_ui = stored.get("marker_rows_delivered") or {}
     for row_name, row in by_name.items():
-        v = validation_rows.get(row_name)
-        if not v or row.get("corrected"):
+        if row.get("corrected"):
+            continue
+        v = consegnate_ui.get(row_name) or validation_rows.get(row_name)
+        if not v:
             continue
         row["score_batch"] = row.get("score")
         row["score"] = v.get("score")
         row["box_batch"] = row.get("box")
         if v.get("box"):
             row["box"] = v["box"]
+        if v.get("group"):
+            row["group_batch"] = row.get("group")
+            row["group"] = v["group"]
     # Solo le immagini di questo progetto: gli artefatti del marker sono di quando e'
     # girato, e dopo uno sdoppiamento elencano ancora quelle dell'altro piano.
     mie = _sue_immagini(project)

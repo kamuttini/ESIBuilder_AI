@@ -516,14 +516,34 @@ lavorando, oppure torna indietro.</div>
     // La zona da inquadrare puo' cambiare senza che il riquadro esca dalla finestra (e'
     // quello che succede passando da un angolo all'altro): allora la finestra si rifa'
     // lo stesso. Mentre si trascina no, se no la striscia scappa sotto al cursore.
-    const miraCambiata = !miraInFinestra
-      || Math.abs(miraInFinestra.left - mira.left) > 2
-      || Math.abs(miraInFinestra.top - mira.top) > 2
-      || Math.abs(miraInFinestra.right - mira.right) > 2
-      || Math.abs(miraInFinestra.bottom - mira.bottom) > 2;
+    // Inseguendo il puntatore la mira si muove **sempre**, quindi confrontarla con quella
+    // di prima direbbe sempre «cambiata» e il ritaglio verrebbe richiesto a ogni frame: una
+    // richiesta al server per ogni pixel di mouse. Finche' il punto sta comodo dentro alla
+    // finestra non c'e' niente da ricaricare - si muovono solo i disegni sopra, che costano
+    // niente. La striscia si rifa' quando il punto si avvicina al bordo.
+    const inseguendo = segueIlPuntatore && !!puntoSeguito;
+    let miraCambiata;
+    if (inseguendo) {
+      const mx = finestra ? (finestra[2] - finestra[0]) * 0.3 : 0;
+      const my = finestra ? (finestra[3] - finestra[1]) * 0.3 : 0;
+      const comodo = !!finestra
+        && puntoSeguito.x > finestra[0] + mx && puntoSeguito.x < finestra[2] - mx
+        && puntoSeguito.y > finestra[1] + my && puntoSeguito.y < finestra[3] - my;
+      miraCambiata = !comodo;
+    } else {
+      miraCambiata = !miraInFinestra
+        || Math.abs(miraInFinestra.left - mira.left) > 2
+        || Math.abs(miraInFinestra.top - mira.top) > 2
+        || Math.abs(miraInFinestra.right - mira.right) > 2
+        || Math.abs(miraInFinestra.bottom - mira.bottom) > 2;
+    }
     if (finestraManuale && miraCambiata) finestraManuale = false;
+    // Inseguendo, il riquadro attorno al punto sborda dalla finestra molto prima che il
+    // punto ci arrivi: qui comanda solo la regola del «comodo», se no si ricarica lo stesso
+    // a ogni frame.
+    const daRifare = inseguendo ? miraCambiata : (miraCambiata || fuoriFinestra(mira));
     if (!trascinando && !finestraManuale
-        && (nomeInFinestra !== ctx.name || miraCambiata || fuoriFinestra(mira))) {
+        && (nomeInFinestra !== ctx.name || daRifare)) {
       finestra = nuovaFinestra(mira, size);
       if (nomeInFinestra !== ctx.name) ritaglioRotto = '';
       nomeInFinestra = ctx.name;
