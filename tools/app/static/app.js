@@ -663,6 +663,7 @@ function panelImport(panel) {
       panel.append(dett);
     }
     cardQuasiIdentiche(panel, value);
+    cardTolteAMano(panel, value);
   }
 
   /* I due piani.
@@ -711,8 +712,15 @@ function panelImport(panel) {
         + ((sospese.examples || []).length
           ? ` Per esempio: ${(sospese.examples || []).join(', ')}.` : '')));
     }
+    // Il riconoscimento gira sulle immagini che il progetto ha **adesso**, cioe' dopo il
+    // dedup e dopo quello che hai tolto tu: e' scritto qui perche' lanciarlo dopo una
+    // pulizia e' proprio il momento in cui serve, e sapere su cosa gira e' la meta' della
+    // risposta.
+    const quante = ((state.project.steps.import || {}).value || {}).images_total;
     const riconosci = el('button', { class: 'ghost' },
-      Object.keys(conteggi).length ? 'Rifai il riconoscimento del piano' : 'Riconosci il piano di ogni immagine');
+      Object.keys(conteggi).length
+        ? `Rifai il riconoscimento del piano${quante ? ` sulle ${quante} tenute` : ''}`
+        : 'Riconosci il piano di ogni immagine');
     riconosci.addEventListener('click', async () => {
       riconosci.disabled = true;
       try {
@@ -2951,15 +2959,12 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
       overlay.classList.remove('occupato');
     }
   };
-  const tieniQuesta = () => decidi(async (g) => {
-    const via = g.names.filter((n) => n !== g.names[indice]);
-    if (via.length) await azioni.scarta(via);
-  });
-  const tieniTutte = () => decidi(async (g) => { await azioni.tieni(g.names); });
-  const scartaQuesta = () => decidi(async (g) => {
-    if (g.names.length < 2) throw new Error('e\' rimasta sola: non si scarta');
-    await azioni.scarta([g.names[indice]]);
-  });
+  // Le tre scelte le porta chi apre il visore, con la loro etichetta: gli stessi gesti
+  // servono a rivedere i gruppi da scartare e a ripescare quelli gia' scartati, e sono due
+  // domande diverse con le stesse risposte - questa, tutte, nessuna.
+  const uno = () => decidi((g) => azioni.uno.fai(g, g.names[indice]));
+  const tutte = () => decidi((g) => azioni.tutte.fai(g, g.names[indice]));
+  const nessuna = () => decidi((g) => azioni.nessuna.fai(g, g.names[indice]));
 
   const chiudi = () => {
     window.removeEventListener('keydown', tasti);
@@ -2971,9 +2976,9 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
     if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); passo(1); return; }
     if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); passo(-1); return; }
     if (e.key === 'd' || e.key === 'D') { e.preventDefault(); differenze = !differenze; disegnaDiff(); return; }
-    if (e.key === '1') { e.preventDefault(); tieniQuesta(); return; }
-    if (e.key === '2' || e.key === 't' || e.key === 'T') { e.preventDefault(); tieniTutte(); return; }
-    if (e.key === 'x' || e.key === 'X') { e.preventDefault(); scartaQuesta(); }
+    if (e.key === '1') { e.preventDefault(); uno(); return; }
+    if (e.key === '2' || e.key === 't' || e.key === 'T') { e.preventDefault(); tutte(); return; }
+    if (e.key === 'x' || e.key === 'X') { e.preventDefault(); nessuna(); }
   };
   window.addEventListener('keydown', tasti);
   scena.addEventListener('click', () => passo(1));
@@ -2988,15 +2993,14 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
     el('div', { class: 'visore-barra' },
       avanzamento, titolo,
       el('div', { class: 'row' },
-        el('button', { onclick: tieniQuesta }, 'Tieni questa (1)'),
-        el('button', { class: 'ghost', onclick: tieniTutte }, 'Tienile tutte (T)'),
-        el('button', { class: 'ghost', onclick: scartaQuesta }, 'Scarta questa (X)'),
+        el('button', { onclick: uno }, `${azioni.uno.label} (1)`),
+        el('button', { class: 'ghost', onclick: tutte }, `${azioni.tutte.label} (T)`),
+        el('button', { class: 'ghost', onclick: nessuna }, `${azioni.nessuna.label} (X)`),
         tastoDiff,
         el('button', { class: 'ghost', onclick: chiudi }, 'Chiudi (Esc)')),
       el('div', { class: 'hint' },
         'frecce o barra: alterna i fotogrammi del gruppo — e\' alternandoli che si vede '
-        + 'la differenza. 1 tiene questo e scarta gli altri, T li tiene tutti: in tutti e '
-        + 'due i casi si passa subito al gruppo dopo.')),
+        + 'la differenza. Dopo 1, T o X si passa subito al gruppo dopo.')),
     scena);
   document.body.append(overlay);
   mostra();
@@ -3065,7 +3069,13 @@ function cardQuasiIdentiche(panel, value) {
     const rivediTutti = el('button', {}, `Guardali a tutto schermo (${gruppi.length})`);
     rivediTutti.addEventListener('click', () => rivedi(0));
     const via = el('button', { class: 'ghost' }, `Scarta tutte e ${quante} senza guardarle`);
-    via.addEventListener('click', () => scarta(gruppi.flatMap((g) => g.drop)));
+    via.addEventListener('click', async () => {
+      // Anche in blocco si tiene traccia di chi era il doppione di chi: e' quello che
+      // permette di tornare a guardarle dopo, invece di ritrovarsi una lista di nomi.
+      for (const g of gruppi) await scarta(g.drop, true, g.keep, g.max_diff);
+      toast(`${quante} immagini tolte · le ritrovi in «le immagini che hai tolto»`);
+      await reload();
+    });
     card.append(el('div', { class: 'row' }, rivediTutti, via));
     for (const g of gruppi.slice(0, 40)) {
       const riga = el('div', { class: 'simili-gruppo' });
@@ -3092,15 +3102,15 @@ function cardQuasiIdentiche(panel, value) {
         rivedi(posto);
       });
       const b = el('button', { class: 'ghost sq2' }, `Scarta le altre ${g.drop.length}`);
-      b.addEventListener('click', () => scarta(g.drop));
+      b.addEventListener('click', () => scarta(g.drop, false, g.keep, g.max_diff));
       riga.append(el('div', { class: 'row' }, guarda, b));
       card.append(riga);
     }
   };
-  const scarta = async (nomi, silenzioso) => {
+  const scarta = async (nomi, silenzioso, gemella, scarto) => {
     if (!nomi.length) return;
     const esito = await api(`/projects/${state.projectId}/duplicates/drop`,
-      { body: { names: nomi } });
+      { body: { names: nomi, of: gemella || '', diff: scarto } });
     if (dati) dati.groups = (dati.groups || []).filter((g) => !nomi.includes(g.names[0])
       && !g.names.every((n) => nomi.includes(n)));
     if (!silenzioso) {
@@ -3117,11 +3127,117 @@ function cardQuasiIdentiche(panel, value) {
      gia' sul gruppo dopo — quindi durante la revisione si scrive e basta, e si ricarica
      una volta sola alla fine. */
   const rivedi = (da) => visoreSimili(dati.groups || [], da, state.projectId, {
-    scarta: (nomi) => scarta(nomi, true),
-    tieni,
+    uno: { label: 'Tieni questa',
+           fai: async (g, nome) => {
+             const via = g.names.filter((n) => n !== nome);
+             if (via.length) await scarta(via, true, nome, g.max_diff);
+           } },
+    tutte: { label: 'Tienile tutte', fai: async (g) => { await tieni(g.names); } },
+    nessuna: { label: 'Scarta questa',
+               fai: async (g, nome) => {
+                 if (g.names.length < 2) throw new Error('e\' rimasta sola: non si scarta');
+                 await scarta([nome], true, g.names.find((n) => n !== nome), g.max_diff);
+               } },
     finito: async () => { await reload(); },
   });
   disegna();
+}
+
+
+/* Le immagini tolte a mano, per tornare a guardarle.
+
+   Scartare non cancella niente - i file restano sul disco - quindi la decisione deve
+   poter essere rivista, e non solo subito: anche fra una settimana, e soprattutto quando
+   si e' scartato in blocco senza guardarle una per una. Che e' il modo in cui si scarta
+   quando si ha fretta, ed e' proprio quello su cui poi viene il dubbio.
+
+   Si ritrovano accanto alla gemella che era stata tenuta, con gli stessi gesti: si
+   alternano, si vedono le differenze, e si rimettono dentro se la decisione era sbagliata. */
+function cardTolteAMano(panel, value) {
+  const tolte = ((value.duplicates || {}).simili || []);
+  if (!tolte.length) return;
+  const card = el('div', { class: 'card' });
+  panel.append(card);
+
+  // Una scartata e la sua gemella fanno un gruppo da guardare. Le vecchie non hanno la
+  // gemella salvata (sono state tolte prima che la registrassimo): restano da sole, e si
+  // guardano lo stesso.
+  const gruppi = [];
+  const perGemella = new Map();
+  for (const v of tolte) {
+    const capo = v.of || '';
+    if (!capo) { gruppi.push({ names: [v.name], keep: '', max_diff: v.diff, tolte: [v.name] }); continue; }
+    if (!perGemella.has(capo)) {
+      const g = { names: [capo], keep: capo, max_diff: v.diff, tolte: [] };
+      perGemella.set(capo, g);
+      gruppi.push(g);
+    }
+    const g = perGemella.get(capo);
+    g.names.push(v.name);
+    g.tolte.push(v.name);
+    if (v.diff != null) g.max_diff = Math.max(g.max_diff || 0, v.diff);
+  }
+
+  const rimetti = async (nomi) => {
+    const esito = await api(`/projects/${state.projectId}/duplicates/restore`,
+      { body: { names: nomi } });
+    return esito;
+  };
+  const rivedi = (da) => visoreSimili(gruppi, da, state.projectId, {
+    uno: { label: 'Rimetti questa',
+           fai: async (g, nome) => {
+             if (!g.tolte.includes(nome)) throw new Error('questa non era stata tolta: e\' la gemella rimasta');
+             await rimetti([nome]);
+           } },
+    tutte: { label: 'Rimettile tutte', fai: async (g) => { await rimetti(g.tolte); } },
+    nessuna: { label: 'Lasciala fuori', fai: async () => {} },
+    finito: async () => { await reload(); },
+  });
+
+  card.append(el('h3', { style: 'margin-top:0' },
+    `le ${tolte.length} immagini che hai tolto perche' quasi identiche`));
+  card.append(el('p', { class: 'hint' },
+    'sono ancora sul disco: qui si rivedono accanto alla gemella che era rimasta, e si '
+    + 'rimettono dentro se la decisione era sbagliata. Vale anche per quelle scartate in '
+    + 'blocco senza guardarle.'));
+  const riga = el('div', { class: 'row' });
+  const guarda = el('button', {}, `Guardale a tutto schermo (${gruppi.length})`);
+  guarda.addEventListener('click', () => rivedi(0));
+  const tutte = el('button', { class: 'ghost' }, 'Rimettile tutte dentro');
+  tutte.addEventListener('click', async () => {
+    try {
+      const esito = await rimetti(tolte.map((v) => v.name));
+      toast(`${esito.restored.length} immagini rimesse · ora sono ${esito.left}`);
+      await reload();
+    } catch (errore) { toast(errore.message, true); }
+  });
+  riga.append(guarda, tutte);
+  card.append(riga);
+
+  const elenco = el('details', { class: 'ov-fold' },
+    el('summary', {}, 'l\'elenco, con la gemella rimasta'));
+  const corpo = el('div', { class: 'depth-rimaste' });
+  for (const v of tolte.slice(0, 400)) {
+    const voce = el('div', { class: 'row', style: 'margin:2px 0' },
+      el('span', { class: 'hint' },
+        `${v.name.split('/').pop()}`
+        + (v.of ? ` — gemella di ${v.of.split('/').pop()}` : ' — gemella non registrata')
+        + (v.diff != null ? ` · differenza ${v.diff}` : '')
+        + (v.at ? ` · tolta il ${v.at.replace('T', ' alle ')}` : '')));
+    const b = el('button', { class: 'ghost sq2' }, 'rimetti');
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        await rimetti([v.name]);
+        toast(`${v.name.split('/').pop()} rimessa dentro`);
+        await reload();
+      } catch (errore) { toast(errore.message, true); b.disabled = false; }
+    });
+    voce.append(b);
+    corpo.append(voce);
+  }
+  elenco.append(corpo);
+  card.append(elenco);
 }
 
 

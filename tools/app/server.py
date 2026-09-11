@@ -4064,16 +4064,24 @@ def api_duplicates_drop(project_id: str):
     tolte = len(project.dedup_names()) - len(restano)
     project.save_dedup_images(restano)
 
+    # Di chi era il doppione, e di quanto differiva: senza, l'elenco delle scartate e' una
+    # lista di nomi orfani, e tornare a guardarle non vorrebbe dire niente - non si saprebbe
+    # accanto a quale metterle.
+    gemella = str(payload.get("of") or "").strip()
+    scarto = payload.get("diff")
+
     def mutate(_p: Project, value: Dict) -> Dict:
         doppi = dict(value.get("duplicates") or {})
         simili = list(doppi.get("simili") or [])
         adesso = datetime.now().isoformat(timespec="seconds")
         for nome in via:
-            simili.append({"name": nome, "kind": "simile", "at": adesso})
+            simili.append({"name": nome, "kind": "simile", "at": adesso,
+                           "of": gemella, "diff": scarto})
         doppi["simili"] = simili
         value["duplicates"] = doppi
         value["duplicates_removed"] = (value.get("duplicates_removed") or 0) + tolte
         value["images_total"] = len(restano)
+        value = _riconta_piani(value, restano)
         # Le proposte che restano non devono citare immagini che non ci sono piu'.
         simile = dict(value.get("similar") or {})
         if simile.get("groups"):
@@ -4089,6 +4097,75 @@ def api_duplicates_drop(project_id: str):
     valore = _write_step(project_id, "import", mutate, invalidate=False)
     return jsonify({"dropped": tolte, "left": len(restano),
                     "groups": len((valore.get("similar") or {}).get("groups") or [])})
+
+
+def _riconta_piani(value: Dict, restano: Sequence[str]) -> Dict:
+    """Il piano L/T ricontato sulle sole immagini che il progetto ha adesso.
+
+    La rete ha classificato le immagini che c'erano allora. Togliendone, le loro etichette
+    restavano dentro al conto: il riepilogo continuava a dire «L 142» su una cartella che
+    ne ha cento, e la divisione L/T sarebbe partita da un censimento vecchio. Qui non si
+    riclassifica niente - le immagini rimaste sono le stesse di prima e la rete direbbe la
+    stessa cosa - si ricontano soltanto.
+
+    Le etichette restano tutte, anche quelle delle immagini tolte: il piano e' una
+    proprieta' di quell'immagine, non del fatto che sia dentro alla cartella. Se la rimetti
+    dentro, si riconta e basta - non c'e' da rifare la rete su di lei.
+    """
+    dentro = set(restano)
+    conteggi: Dict[str, int] = {}
+    for nome, voce in (value.get("planes") or {}).items():
+        if nome not in dentro:
+            continue
+        chiave = voce.get("plane") or "?"
+        conteggi[chiave] = conteggi.get(chiave, 0) + 1
+    value["plane_counts"] = conteggi
+    return value
+
+
+@app.post("/api/projects/<project_id>/duplicates/restore")
+def api_duplicates_restore(project_id: str):
+    """Rimette nel progetto le immagini tolte perche' quasi identiche.
+
+    Scartarle non le cancella - restano sul disco - quindi tornare indietro deve essere
+    possibile, e non solo subito: anche fra una settimana, dopo averle scartate in blocco
+    senza guardarle una per una.
+    """
+    project = _project(project_id)
+    nomi = [str(n).strip() for n in (_payload().get("names") or []) if str(n).strip()]
+    if not nomi:
+        return jsonify({"error": "nessuna immagine indicata"}), 400
+    # Non nello specchio di lavoro: quello contiene solo le immagini che il progetto ha
+    # adesso, e una tolta da li' e' sparita - cercarla la' sarebbe cercare proprio dove non
+    # puo' essere. Il file sta nella cartella di origine, che non si tocca mai.
+    origine = Path(project.source.get("folder") or "")
+    presenti = set(project.dedup_names())
+    tornate = []
+    for nome in nomi:
+        if nome in presenti:
+            continue
+        if origine.is_dir() and _immagine_nella_cartella(origine, nome) is None:
+            continue
+        tornate.append(nome)
+    if not tornate:
+        return jsonify({"error": "queste immagini o ci sono gia', o non sono piu' "
+                                 "sul disco"}), 400
+    project.save_dedup_images(sorted(presenti | set(tornate)))
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        doppi = dict(value.get("duplicates") or {})
+        doppi["simili"] = [v for v in (doppi.get("simili") or [])
+                           if v.get("name") not in set(tornate)]
+        value["duplicates"] = doppi
+        value["duplicates_removed"] = max(0, (value.get("duplicates_removed") or 0) - len(tornate))
+        value["images_total"] = len(presenti | set(tornate))
+        # Rimettendole dentro tornano anche nel conto dei piani, con l'etichetta che gia'
+        # avevano: la rete su di loro aveva gia' detto la sua.
+        value = _riconta_piani(value, sorted(presenti | set(tornate)))
+        return value
+
+    _write_step(project_id, "import", mutate, invalidate=False)
+    return jsonify({"restored": sorted(tornate), "left": len(presenti | set(tornate))})
 
 
 @app.post("/api/projects/<project_id>/duplicates/keep")
