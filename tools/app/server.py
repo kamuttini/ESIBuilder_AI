@@ -179,7 +179,7 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         prima = project.step_value("import") or {}
         da_tenere = {k: prima[k] for k in
                      ("timestamp_box", "timestamp_detection", "timestamp_disabled",
-                      "planes", "plane_corrections", "plane_counts")
+                      "planes", "plane_corrections", "plane_counts", "similar")
                      if prima.get(k) is not None}
         # La dedup a meno dell'orologio si fa **dopo** la rotazione, piu' sotto: l'area la
         # si indica su un'anteprima gia' dritta, e confrontarla su immagini storte
@@ -442,11 +442,13 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         # piani, il job si ferma ordinatamente alla divisione; dopo lo split riparte su
         # ciascuna meta'. I risultati confermati/corretti dall'utente non vengono scelti
         # dal pianificatore automatico.
+        similar_job = _start_job(_run_simili, project_id, SOGLIA_SIMILI)
         automatic_job = _schedule_auto_pipeline(project_id)
         esito = {
             "import": imported,
             "analysis": analysis,
             "codes_filled": filled,
+            "similar_job_id": similar_job,
             "advanced_job_id": automatic_job,
             "next": ("riconoscimento piano L/T e moduli avviati automaticamente"
                      if automatic_job else "moduli gia' confermati: nessun ricalcolo automatico"),
@@ -4173,6 +4175,53 @@ def api_duplicates_restore(project_id: str):
 
     _write_step(project_id, "import", mutate, invalidate=False)
     return jsonify({"restored": sorted(tornate), "left": len(presenti | set(tornate))})
+
+
+@app.get("/api/projects/<project_id>/images")
+def api_project_images(project_id: str):
+    """Tutte le immagini del progetto, e tutte quelle che ne sono state tolte.
+
+    L'elenco dell'import ne mostrava sessanta: era un assaggio, e per escluderne una che
+    non fosse fra quelle non c'era modo. Qui ci sono tutte, con scritto chi e' dentro e chi
+    e' fuori - e da fuori si puo' sempre rientrare.
+    """
+    project = _project(project_id)
+    dentro = project.dedup_names()
+    valore = project.step_value("import")
+    doppi = valore.get("duplicates") or {}
+    fuori = []
+    for chiave, perche in (("simili", "tolta da te"), ("timestamp", "cambiava solo l'ora"),
+                           ("identical", "identica a un'altra")):
+        for voce in (doppi.get(chiave) or []):
+            fuori.append({"name": voce.get("name"), "why": perche, "kind": chiave,
+                          "of": voce.get("of") or "", "at": voce.get("at") or "",
+                          "diff": voce.get("diff")})
+    piani = valore.get("planes") or {}
+    return jsonify({
+        "names": dentro,
+        "total": len(dentro),
+        "planes": {n: (piani.get(n) or {}).get("plane") for n in dentro if piani.get(n)},
+        "out": fuori,
+    })
+
+
+@app.post("/api/projects/<project_id>/duplicates/unkeep")
+def api_duplicates_unkeep(project_id: str):
+    """Disfa un «le tengo tutte»: quel gruppo torna a farsi guardare alla ricerca dopo."""
+    project = _project(project_id)
+    nomi = set(str(n).strip() for n in (_payload().get("names") or []) if str(n).strip())
+    if not nomi:
+        return jsonify({"error": "nessun gruppo indicato"}), 400
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        simile = dict(value.get("similar") or {})
+        simile["kept"] = [v for v in (simile.get("kept") or [])
+                          if set(v.get("names") or []) != nomi]
+        value["similar"] = simile
+        return value
+
+    valore = _write_step(project_id, "import", mutate, invalidate=False)
+    return jsonify({"kept": len(((valore.get("similar") or {}).get("kept") or []))})
 
 
 @app.post("/api/projects/<project_id>/duplicates/keep")

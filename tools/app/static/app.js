@@ -338,12 +338,25 @@ async function pollJob(jobId, status) {
   }
 }
 
+async function pollPipelineContinuation(result, status) {
+  const seguito = result || {};
+  if (seguito.similar_job_id) {
+    status.textContent = 'cerco i fotogrammi quasi identici…';
+    await pollJob(seguito.similar_job_id, status);
+  }
+  if (seguito.advanced_job_id) {
+    status.textContent = 'calcolo orientamento, depth e scala…';
+    await pollJob(seguito.advanced_job_id, status);
+  }
+}
+
 function panelImport(panel) {
   const value = (state.project.steps.import || {}).value || {};
   const analysis = state.project.analysis || {};
 
   panel.append(el('p', { class: 'hint' },
-    'dedup, rotazione, ecografo, sonda, rettangolo e piano L/T partono da soli. Se il '
+    'dedup dei fotogrammi identici e quasi identici, rotazione, ecografo, sonda, rettangolo '
+    + 'e piano L/T partono da soli. Se il '
     + 'piano contiene sia L sia T, l\'app ti chiede solo di dividerli: poi orientamento, '
     + 'depth e scala continuano automaticamente un piano per volta.'));
 
@@ -366,8 +379,9 @@ function panelImport(panel) {
     button.disabled = true;
     try {
       const { job_id } = await api(`/projects/${state.projectId}/import`, { body: { folder: input.value } });
-      await pollJob(job_id, status);
-      toast('analisi iniziale completata · ora controlla il piano L/T');
+      const iniziale = await pollJob(job_id, status);
+      await pollPipelineContinuation(iniziale.result, status);
+      toast('analisi completata · fotogrammi quasi identici e moduli elaborati');
       await reload();
     } catch (error) {
       toast(error.message, true);
@@ -662,9 +676,13 @@ function panelImport(panel) {
       dett.append(corpo);
       panel.append(dett);
     }
-    cardQuasiIdentiche(panel, value);
-    cardTolteAMano(panel, value);
   }
+  // Fuori dal ramo dell'orologio: queste due riguardano la cartella, non il riquadro
+  // dell'ora, e stavano dentro solo per come era cresciuta la funzione. Chi non aveva
+  // l'anteprima dell'ora non le vedeva - cioe' non poteva nemmeno tornare sulle proprie
+  // scelte.
+  cardQuasiIdentiche(panel, value);
+  cardTolteAMano(panel, value);
 
   /* I due piani.
 
@@ -1030,16 +1048,97 @@ function panelImport(panel) {
     }
   }
 
-  if ((value.images || []).length) {
-    panel.append(el('h3', {}, `immagini (${value.images_listed} di ${value.images_total})`));
+  if ((value.images || []).length) cardTutteLeImmagini(panel);
+}
+
+
+/* Tutte le immagini della cartella, non le prime sessanta.
+
+   L'elenco in fondo ne mostrava un assaggio, e per escluderne una che non fosse fra quelle
+   non c'era modo: si poteva togliere solo cio' che il confronto aveva proposto. Ma una
+   immagine si esclude anche per altri motivi - e' mossa, e' di un'altra sonda, la sonda e'
+   staccata - e quelli li vede solo chi guarda.
+
+   Le miniature si caricano quando servono (`loading: lazy`), cosi' duecentocinquanta
+   immagini non diventano duecentocinquanta richieste tutte insieme. */
+function cardTutteLeImmagini(panel) {
+  const card = el('div', {});
+  panel.append(card);
+  let dati = null;
+  let mostrate = 120;
+
+  const escludi = async (nomi) => {
+    const esito = await api(`/projects/${state.projectId}/duplicates/drop`,
+      { body: { names: nomi } });
+    toast(`${esito.dropped} tolte · ne restano ${esito.left}`);
+    await reload();
+  };
+  const rimetti = async (nomi) => {
+    const esito = await api(`/projects/${state.projectId}/duplicates/restore`,
+      { body: { names: nomi } });
+    toast(`${esito.restored.length} rimesse · ora sono ${esito.left}`);
+    await reload();
+  };
+
+  const disegna = () => {
+    card.innerHTML = '';
+    if (!dati) { card.append(el('p', { class: 'hint' }, 'carico l\'elenco…')); return; }
+    const nomi = dati.names || [];
+    card.append(el('h3', {}, `immagini (${nomi.length} nel progetto)`));
+    card.append(el('p', { class: 'hint' },
+      'passa sopra a una e premi «escludi» per toglierla: resta sul disco e la ritrovi '
+      + 'qui sotto fra quelle fuori, da dove puoi rimetterla dentro.'));
     const thumbs = el('div', { class: 'thumbs' });
-    for (const image of value.images) {
-      thumbs.append(el('figure', { style: 'margin:0' },
-        el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(image.name)}&w=260`, loading: 'lazy' }),
-        el('figcaption', {}, image.name)));
+    for (const nome of nomi.slice(0, mostrate)) {
+      const fig = el('figure', { class: 'thumb-voce', style: 'margin:0' },
+        el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
+                    loading: 'lazy', alt: nome }),
+        el('figcaption', {}, nome.split('/').pop()
+          + ((dati.planes || {})[nome] ? ` · piano ${dati.planes[nome]}` : '')));
+      const b = el('button', { class: 'ghost sq2 thumb-via' }, 'escludi');
+      b.addEventListener('click', async () => {
+        b.disabled = true;
+        try { await escludi([nome]); } catch (errore) { toast(errore.message, true); b.disabled = false; }
+      });
+      fig.append(b);
+      thumbs.append(fig);
     }
-    panel.append(thumbs);
-  }
+    card.append(thumbs);
+    if (nomi.length > mostrate) {
+      const ancora = el('button', { class: 'ghost' },
+        `Mostra le altre ${nomi.length - mostrate}`);
+      ancora.addEventListener('click', () => { mostrate = nomi.length; disegna(); });
+      card.append(el('div', { class: 'row' }, ancora));
+    }
+    const fuori = dati.out || [];
+    if (fuori.length) {
+      const dett = el('details', { class: 'ov-fold' },
+        el('summary', {}, `le ${fuori.length} immagini fuori dal progetto`));
+      const corpo = el('div', { class: 'depth-rimaste' });
+      for (const v of fuori.slice(0, 500)) {
+        const riga = el('div', { class: 'row', style: 'margin:2px 0' },
+          el('span', { class: 'hint' },
+            `${(v.name || '').split('/').pop()} — ${v.why}`
+            + (v.of ? `, gemella di ${v.of.split('/').pop()}` : '')
+            + (v.diff != null ? ` · differenza ${v.diff}` : '')));
+        const b = el('button', { class: 'ghost sq2' }, 'rimetti dentro');
+        b.addEventListener('click', async () => {
+          b.disabled = true;
+          try { await rimetti([v.name]); } catch (errore) { toast(errore.message, true); b.disabled = false; }
+        });
+        riga.append(b);
+        corpo.append(riga);
+      }
+      dett.append(corpo);
+      card.append(dett);
+    }
+  };
+  disegna();
+  api(`/projects/${state.projectId}/images`).then((r) => { dati = r; disegna(); })
+    .catch((errore) => {
+      card.innerHTML = '';
+      card.append(el('p', { class: 'hint' }, `elenco non leggibile: ${errore.message}`));
+    });
 }
 
 /* --- step 2: ecografo e sonda --- */
@@ -3155,9 +3254,11 @@ function cardQuasiIdentiche(panel, value) {
    alternano, si vedono le differenze, e si rimettono dentro se la decisione era sbagliata. */
 function cardTolteAMano(panel, value) {
   const tolte = ((value.duplicates || {}).simili || []);
-  if (!tolte.length) return;
+  const tenute = ((value.similar || {}).kept || []);
+  if (!tolte.length && !tenute.length) return;
   const card = el('div', { class: 'card' });
   panel.append(card);
+  if (!tolte.length) { cardTenuteApposta(card, tenute); return; }
 
   // Una scartata e la sua gemella fanno un gruppo da guardare. Le vecchie non hanno la
   // gemella salvata (sono state tolte prima che la registrassimo): restano da sole, e si
@@ -3238,6 +3339,39 @@ function cardTolteAMano(panel, value) {
   }
   elenco.append(corpo);
   card.append(elenco);
+  cardTenuteApposta(card, tenute);
+}
+
+
+/* I gruppi su cui hai detto «le tengo tutte».
+
+   E' una decisione come le altre, quindi si deve poter cambiare: quel gruppo non torna a
+   chiedere nemmeno rifacendo la ricerca, ed e' giusto - ma se ci ripensi devi poterlo
+   rimettere in gioco, se no la decisione e' definitiva per sempre. */
+function cardTenuteApposta(card, tenute) {
+  if (!tenute.length) return;
+  const dett = el('details', { class: 'ov-fold' },
+    el('summary', {}, `i ${tenute.length} gruppi che hai deciso di tenere interi`));
+  const corpo = el('div', { class: 'depth-rimaste' });
+  for (const g of tenute) {
+    const riga = el('div', { class: 'row', style: 'margin:2px 0' },
+      el('span', { class: 'hint' },
+        (g.names || []).map((n) => n.split('/').pop()).join(' + ')
+        + (g.at ? ` · deciso il ${g.at.replace('T', ' alle ')}` : '')));
+    const b = el('button', { class: 'ghost sq2' }, 'rimettilo in gioco');
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        await api(`/projects/${state.projectId}/duplicates/unkeep`, { body: { names: g.names } });
+        toast('tornera\' a chiedere alla prossima ricerca');
+        await reload();
+      } catch (errore) { toast(errore.message, true); b.disabled = false; }
+    });
+    riga.append(b);
+    corpo.append(riga);
+  }
+  dett.append(corpo);
+  card.append(dett);
 }
 
 

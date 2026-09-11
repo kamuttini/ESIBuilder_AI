@@ -1267,3 +1267,11 @@ img.depth-crop {
    due volte credendo che il primo colpo sia andato perso. */
 .visore.occupato .visore-scena { opacity: .45; }
 .visore.occupato .visore-barra button { pointer-events: none; opacity: .6; }
+
+
+/* Ogni miniatura dell'elenco completo porta il suo «escludi», che compare passandoci
+   sopra: sempre visibile sarebbe una fila di bottoni, e l'elenco serve a guardare. */
+.thumb-voce { position: relative; }
+.thumb-voce .thumb-via { position: absolute; top: 6px; right: 6px; opacity: 0; }
+.thumb-voce:hover .thumb-via { opacity: 1; }
+.thumb-voce .thumb-via:hover { color: #f85149; border-color: #f85149; }
