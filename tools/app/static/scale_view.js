@@ -211,6 +211,8 @@ async function createScaleViewer(projectId) {
   const ALTA_ZOOM = () => Math.round(44 * VICINANZA);
   const zoom = {};
   let modoZoom = 'estremo';
+  let taccaInModifica = null;
+  const centroZoom = (chiave, f) => chiave === 'y_tacca' ? taccaInModifica : f[chiave];
 
   const finestraZoom = (f, y) => {
     const larghezza = Math.min(LARGA_ZOOM(), f.w || LARGA_ZOOM());
@@ -235,12 +237,15 @@ async function createScaleViewer(projectId) {
      aggiunge e si toglie una tacca, si scrive e si cancella il numero. L'immagine intera
      resta per guardare il righello per intero, non per lavorarci di precisione. */
   const creaZoom = (chiave, etichetta, colore) => {
-    const scatola = el('div', { class: 'scala-zoom' });
+    const scatola = el('div', { class: `scala-zoom${chiave === 'y_tacca' ? ' tacca-live' : ''}` });
     const img = el('img', { alt: '' });
     const titolo = el('div', { class: 'scala-zoom-titolo' }, etichetta);
     const piano = el('div', { class: 'scala-zoom-piano' });
     scatola.append(titolo, img, piano);
     piano.addEventListener('pointerdown', (e) => {
+      // Lo zoom della tacca e' soprattutto uno specchio in tempo reale. La tacca disegnata
+      // dentro resta comunque afferrabile; il vuoto non sposta zero o fondo per errore.
+      if (chiave === 'y_tacca' && !e.target.closest('.scala-zoom-tacca')) return;
       // Sopra una tacca o un numero comandano loro: qui si prende solo il vuoto.
       if (e.target.closest('.scala-zoom-tacca, .scala-zoom-numero')) return;
       const partenza = { x: e.clientX, y: e.clientY };
@@ -307,6 +312,7 @@ async function createScaleViewer(projectId) {
   };
   const zoomZero = creaZoom('y_zero', 'zero', '#3fb950');
   const zoomFondo = creaZoom('y_far', 'fondo', '#d29922');
+  const zoomTacca = creaZoom('y_tacca', 'tacca in modifica', '#ff4fd8');
   const vicinanzaSel = el('select', { style: 'width:108px' },
     ...[['0.25', 'dettaglio massimo'], ['0.5', 'molto vicino'], ['1', 'vicino'],
          ['2', 'largo'], ['4', 'tutta la barra']]
@@ -314,7 +320,7 @@ async function createScaleViewer(projectId) {
         { value: v, ...(v === '1' ? { selected: '' } : {}) }, etichetta)));
   vicinanzaSel.addEventListener('change', () => {
     VICINANZA = parseFloat(vicinanzaSel.value) || 1;
-    for (const chiave of ['y_zero', 'y_far']) zoom[chiave].finestra = null;
+    for (const chiave of ['y_zero', 'y_far', 'y_tacca']) zoom[chiave].finestra = null;
     aggiornaZoom();
   });
   const modiZoom = el('div', { class: 'row scala-zoom-modi' });
@@ -331,13 +337,17 @@ async function createScaleViewer(projectId) {
 
   const aggiornaZoom = () => {
     const f = corrente();
-    for (const chiave of ['y_zero', 'y_far']) {
+    for (const chiave of ['y_zero', 'y_far', 'y_tacca']) {
       const z = zoom[chiave];
-      const y = f[chiave];
+      const y = centroZoom(chiave, f);
       z.scatola.style.display = (y == null || f.x == null) ? 'none' : '';
       if (y == null || f.x == null) continue;
       const nuova = finestraZoom(f, y);
-      if (!z.finestra || z.finestra.join() !== nuova.join()) {
+      // Durante il trascinamento la lente della tacca resta ferma: si deve vedere la linea
+      // muoversi rispetto ai pixel originali, non tenere la linea ferma spostando l'immagine.
+      const cambiaFinestra = !z.finestra
+        || (chiave !== 'y_tacca' && z.finestra.join() !== nuova.join());
+      if (cambiaFinestra) {
         z.finestra = nuova;
         z.img.src = `/api/projects/${projectId}/depth/crop`
           + `?name=${encodeURIComponent(f.name)}&zoom=${INGRANDIMENTO_SCALA}&raw=1`
@@ -499,6 +509,8 @@ async function createScaleViewer(projectId) {
     const f = corrente();
     ricorda();
     f.ticks = [...(f.ticks || []), y].sort((a, b) => a - b);
+    taccaInModifica = y;
+    if (zoom.y_tacca) zoom.y_tacca.finestra = null;
     salva({ ticks: [...f.ticks] });
     disegna(); aggiornaZoom();
     if (Lente.viva()) Lente.aggiorna(contestoLente());
@@ -610,12 +622,16 @@ async function createScaleViewer(projectId) {
     const primaPitch = f.pitch;
     let attuale = y;
     let mossa = false;
+    taccaInModifica = y;
+    if (zoom.y_tacca) zoom.y_tacca.finestra = null;
+    aggiornaZoom();
     ricorda();
     const muovi = (e) => {
       const dy = (e.clientY - partenza) / (s || 1);
       if (Math.abs(dy) < 0.5 && !mossa) return;
       mossa = true;
       attuale = limita(originale + dy, f.h);
+      taccaInModifica = attuale;
       if (insieme) {
         const passo = Math.abs(attuale - f.y_zero) / passi;
         f.pitch = Math.round(passo * 10) / 10;
@@ -696,6 +712,10 @@ async function createScaleViewer(projectId) {
     ricorda();
     const vicino = (yy) => Math.abs(yy - y) <= 6;
     f.ticks = (f.ticks || []).filter((t) => Math.round(t) !== Math.round(y));
+    if (taccaInModifica != null && Math.round(taccaInModifica) === Math.round(y)) {
+      taccaInModifica = null;
+      if (zoom.y_tacca) zoom.y_tacca.finestra = null;
+    }
     const aveva = (f.labels || []).some(([yy]) => vicino(yy));
     f.labels = (f.labels || []).filter(([yy]) => !vicino(yy));
     const campi = { ticks: [...f.ticks] };
@@ -1275,6 +1295,8 @@ async function createScaleViewer(projectId) {
     if (!elenco.length) { didascalia.textContent = 'nessun fotogramma con questo filtro'; return; }
     if (!elenco.includes(corrente())) indice = frames.indexOf(elenco[0]);
     const f = corrente();
+    taccaInModifica = null;
+    if (zoom.y_tacca) zoom.y_tacca.finestra = null;
     attesaSecondoClic = null;
     image.src = `/api/projects/${projectId}/image?name=${encodeURIComponent(f.name)}&w=980`;
     didascalia.innerHTML = '';
@@ -1548,7 +1570,7 @@ async function createScaleViewer(projectId) {
           el('span', { class: 'hint' }, 'finestre ingrandite:'), vicinanzaSel,
           modiZoom,
           el('span', { class: 'hint' }, 'scegli l\'azione, poi clicca sul pixel preciso')),
-        el('div', { class: 'scala-zoom-coppia' }, zoomZero, zoomFondo),
+        el('div', { class: 'scala-zoom-coppia' }, zoomZero, zoomFondo, zoomTacca),
         stage),
       el('div', { class: 'ov-side' }, editorTacche, passoBox, datiBox, azioni,
         el('div', { class: 'row' }, rifai, avanzamento), listBox)),
