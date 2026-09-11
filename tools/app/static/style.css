@@ -37,6 +37,10 @@ header {
 
 .project-bar { display: flex; gap: 8px; align-items: center; }
 .head-status { margin-left: auto; color: var(--muted); font-size: 13px; }
+.job-status { color: var(--accent); font-size: 12px; max-width: 360px; }
+.job-status.running::before { content: '● '; color: var(--warn); }
+.job-status.done { color: var(--ok, #7ee787); }
+.job-status.error { color: var(--err); }
 
 main { display: flex; align-items: flex-start; }
 

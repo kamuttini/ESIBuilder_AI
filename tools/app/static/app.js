@@ -2,7 +2,7 @@
 
 const state = {
   meta: null, projectId: null, project: null, status: [], step: 'codes',
-  advancedStages: { ready: false, blocked_reason: '' },
+  advancedStages: { ready: false, blocked_reason: '' }, jobs: {},
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -154,6 +154,29 @@ function renderHead() {
     head.append(el('button', { class: 'ghost', onclick: () => selectStep(first.id) },
       'vai al primo problema'));
   }
+  renderJobStatus();
+}
+
+function renderJobStatus() {
+  const node = $('#job-status');
+  if (!node) return;
+  const jobs = Object.values(state.jobs || {});
+  const running = jobs.filter((job) => job.status === 'running');
+  const latest = jobs[jobs.length - 1];
+  node.className = 'job-status';
+  if (running.length) {
+    const job = running[running.length - 1];
+    node.classList.add('running');
+    node.textContent = `processo in esecuzione: ${job.stage}${job.total ? ` ${job.done}/${job.total}` : ''}`;
+    return;
+  }
+  if (latest && latest.status === 'error') {
+    node.classList.add('error');
+    node.textContent = `processo fallito: ${latest.error || latest.stage}`;
+  } else if (latest && latest.status === 'done') {
+    node.classList.add('done');
+    node.textContent = 'processo completato';
+  } else node.textContent = '';
 }
 
 function renderSteps() {
@@ -328,9 +351,13 @@ function panelCodes(panel) {
 
 /* --- step 0: import e analisi --- */
 async function pollJob(jobId, status) {
+  state.jobs[jobId] = { status: 'running', stage: 'avvio', done: 0, total: 0 };
+  renderJobStatus();
   for (;;) {
     await new Promise((resolve) => setTimeout(resolve, 700));
     const job = await api('/jobs/' + jobId);
+    state.jobs[jobId] = job;
+    renderJobStatus();
     const progress = job.total ? ` ${job.done}/${job.total}` : '';
     if (status) status.textContent = `${job.stage}${progress}...`;
     if (job.status === 'done') return job;
