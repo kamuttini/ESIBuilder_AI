@@ -1052,6 +1052,54 @@ function panelImport(panel) {
 }
 
 
+/* Visore comune per le immagini dell'import: resta nello stesso ordine della
+   cartella e si può attraversare anche con la tastiera. */
+function visoreImmagini(nomi, partenza, progetto) {
+  const ordine = (nomi || []).slice();
+  if (!ordine.length) return;
+  let indice = Math.max(0, Math.min(Number(partenza) || 0, ordine.length - 1));
+  const pieno = el('div', { class: 'piani-pieno' });
+  const testa = el('div', { class: 'piani-pieno-testa' });
+  const scena = el('div', { class: 'piani-pieno-scena' });
+  const immagine = el('img', { alt: '' });
+  const info = el('span', { class: 'hint' });
+  const indietro = el('button', { class: 'ghost sq', title: 'immagine precedente' }, '‹');
+  const avanti = el('button', { class: 'ghost sq', title: 'immagine successiva' }, '›');
+  const chiudi = el('button', { class: 'ghost' }, 'chiudi (Esc)');
+
+  const mostra = () => {
+    const nome = ordine[indice];
+    immagine.src = `/api/projects/${progetto}/image?name=${encodeURIComponent(nome)}&w=1600`;
+    immagine.alt = nome;
+    info.textContent = `${indice + 1} di ${ordine.length} · ${nome.split('/').pop()}`;
+    indietro.disabled = ordine.length < 2;
+    avanti.disabled = ordine.length < 2;
+  };
+  const vai = (passo) => {
+    if (ordine.length < 2) return;
+    indice = (indice + passo + ordine.length) % ordine.length;
+    mostra();
+  };
+  const chiudiOra = () => {
+    window.removeEventListener('keydown', tasti);
+    pieno.remove();
+  };
+  const tasti = (evento) => {
+    if (evento.key === 'ArrowLeft') { evento.preventDefault(); vai(-1); }
+    else if (evento.key === 'ArrowRight') { evento.preventDefault(); vai(1); }
+    else if (evento.key === 'Escape') { evento.preventDefault(); chiudiOra(); }
+  };
+  indietro.addEventListener('click', () => vai(-1));
+  avanti.addEventListener('click', () => vai(1));
+  chiudi.addEventListener('click', chiudiOra);
+  testa.append(indietro, avanti, info, chiudi);
+  scena.append(immagine);
+  pieno.append(testa, scena);
+  document.body.append(pieno);
+  window.addEventListener('keydown', tasti);
+  mostra();
+}
+
 /* Tutte le immagini della cartella, non le prime sessanta.
 
    L'elenco in fondo ne mostrava un assaggio, e per escluderne una che non fosse fra quelle
@@ -1087,12 +1135,15 @@ function cardTutteLeImmagini(panel) {
     card.append(el('h3', {}, `immagini (${nomi.length} nel progetto)`));
     card.append(el('p', { class: 'hint' },
       'passa sopra a una e premi «escludi» per toglierla: resta sul disco e la ritrovi '
-      + 'qui sotto fra quelle fuori, da dove puoi rimetterla dentro.'));
+      + 'qui sotto fra quelle fuori, da dove puoi rimetterla dentro. Clicca una miniatura '
+      + 'per aprirla a tutto schermo; usa le frecce per scorrere le immagini.'));
     const thumbs = el('div', { class: 'thumbs' });
     for (const nome of nomi.slice(0, mostrate)) {
+      const anteprima = el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
+                    loading: 'lazy', alt: nome, title: 'apri a tutto schermo' });
+      anteprima.addEventListener('click', () => visoreImmagini(nomi, nomi.indexOf(nome), state.projectId));
       const fig = el('figure', { class: 'thumb-voce', style: 'margin:0' },
-        el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
-                    loading: 'lazy', alt: nome }),
+        anteprima,
         el('figcaption', {}, nome.split('/').pop()
           + ((dati.planes || {})[nome] ? ` · piano ${dati.planes[nome]}` : '')));
       const b = el('button', { class: 'ghost sq2 thumb-via' }, 'escludi');
