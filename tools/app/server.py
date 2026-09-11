@@ -3892,6 +3892,11 @@ def api_orientation_marker_tight(project_id: str):
 # c'e' spazio per una soglia, e non la sceglie il programma: si mostrano le coppie piu'
 # simili, in ordine, e decide lei.
 LATO_FIRMA = 128
+# La soglia di partenza. Non e' una misura, e' una scelta su quanto largo gettare la rete:
+# piu' alta vuol dire piu' coppie da guardare, e a decidere e' sempre lei. Sui dati di
+# `prova del 9` i doppioni veri stanno a 0.000, due fotogrammi «uguali a occhio» a 0.047,
+# e la mediana di tutte le coppie e' 6.46.
+SOGLIA_SIMILI = 1.0
 
 
 def _firma_ecografia(percorso: Path, rect: Dict, lato: int = LATO_FIRMA):
@@ -4036,7 +4041,7 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
 def api_duplicates_similar(project_id: str):
     """Cerca i fotogrammi che si somigliano dentro l'ecografia, sopra una soglia."""
     _project(project_id)
-    soglia = float(_payload().get("threshold") or 0.2)
+    soglia = float(_payload().get("threshold") or SOGLIA_SIMILI)
     return jsonify({"job_id": _start_job(_run_simili, project_id, soglia)})
 
 

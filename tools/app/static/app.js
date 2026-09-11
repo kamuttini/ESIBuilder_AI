@@ -3019,7 +3019,7 @@ function cardQuasiIdentiche(panel, value) {
   let dati = value.similar || null;
   const soglia = el('input', {
     type: 'number', min: '0', max: '5', step: '0.05',
-    value: String((dati && dati.threshold) || 0.2), style: 'width:70px',
+    value: String((dati && dati.threshold) || 1), style: 'width:70px',
     title: 'quanto possono differire dentro al rettangolo per essere considerate la stessa',
   });
   const stato = el('span', { class: 'hint' });
@@ -3039,9 +3039,9 @@ function cardQuasiIdentiche(panel, value) {
       avvia.disabled = true;
       try {
         const inizio = await api(`/projects/${state.projectId}/duplicates/similar`,
-          { body: { threshold: parseFloat(soglia.value) || 0.2 } });
+          { body: { threshold: parseFloat(soglia.value) || 1 } });
         const job = await pollJob(inizio.job_id, stato);
-        dati = { threshold: parseFloat(soglia.value) || 0.2, groups: job.result.groups,
+        dati = { threshold: parseFloat(soglia.value) || 1, groups: job.result.groups,
                  images: job.result.images };
         stato.textContent = '';
         disegna();
