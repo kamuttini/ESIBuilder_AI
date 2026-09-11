@@ -383,6 +383,13 @@ function panelImport(panel) {
   const doppie = value.duplicates || {};
   const uguali = (doppie.identical || []).length;
   const orologio = (doppie.timestamp || []).length;
+  // Quelle che hai tolto tu guardandole: erano invisibili in questo riepilogo, che
+  // contava solo gli scarti automatici. Dopo una revisione di quattordici gruppi il
+  // conto diceva ancora «7», cioe' quelli dell'orologio, e sembrava che il lavoro fatto
+  // non fosse servito a niente.
+  const aMano = (doppie.simili || []).length;
+  const tenuteApposta = ((value.similar || {}).kept || [])
+    .reduce((n, g) => n + (g.names || []).length, 0);
   const rilevamentoOra = value.timestamp_detection || {};
   const statoAreaOra = value.timestamp_box
     ? (rilevamentoOra.source === 'ocr' && rilevamentoOra.reliable
@@ -390,12 +397,27 @@ function panelImport(panel) {
       : rilevamentoOra.source === 'user' ? 'corretta dall\'utente' : 'area salvata')
     : (value.timestamp_disabled ? 'disattivata dall\'utente'
       : rilevamentoOra.box ? 'proposta da controllare' : 'non riconosciuta');
+  // Il conto deve tornare a vista: trovate meno scartate uguale tenute. Se non torna,
+  // qualcuno dei numeri sta mentendo, ed e' meglio vederlo qui che scoprirlo dopo.
+  const tenute = (state.project.images_count != null ? state.project.images_count
+                  : value.images_total);
+  // Le righe in ordine di sottrazione: trovate, meno gli scarti, meno l'altro piano,
+  // uguale tenute. Prima «tenute» stava in cima e non si capiva da dove venisse: dopo una
+  // revisione di quattordici gruppi il riepilogo diceva ancora «7 scartate» - quelle
+  // dell'orologio - e delle ventisette tolte a mano non c'era traccia da nessuna parte.
+  const piano = state.project.source.plane || '';
+  const sdoppiato = !!(state.project.source.split_into || state.project.source.derived_from);
+  const diQuestoPiano = (value.plane_counts || {})[piano];
   for (const [key, val] of [
     ['immagini trovate', value.images_total_raw],
-    ['immagini tenute', value.images_total],
     ['scartate perche\' identiche', uguali],
     ['scartate perche\' cambia solo l\'ora',
       value.timestamp_box ? orologio : statoAreaOra],
+    ...(sdoppiato && diQuestoPiano != null
+      ? [[`di queste, del piano ${piano}`, diQuestoPiano]] : []),
+    ['scartate da te perche\' quasi identiche', aMano],
+    ...(tenuteApposta ? [['tenute da te anche se simili', tenuteApposta]] : []),
+    ['immagini tenute', tenute],
     ['input video (#06)', state.meta.video_inputs[value.video_input] || value.video_input],
     ['video input (#07/#08)', (value.video_input_size || []).join(' x ')],
     ['immagine campione (#09/#10)', (value.image_sample_size || []).join(' x ')],
@@ -616,14 +638,17 @@ function panelImport(panel) {
     }
     panel.append(riga);
     const elenco = [...((value.duplicates || {}).timestamp || []),
-                    ...((value.duplicates || {}).identical || [])];
+                    ...((value.duplicates || {}).identical || []),
+                    ...((value.duplicates || {}).simili || [])];
     if (elenco.length) {
       const dett = el('details', { class: 'ov-fold' },
         el('summary', {}, `le ${elenco.length} immagini scartate`));
       const corpo = el('div', { class: 'depth-rimaste' });
-      for (const voce of elenco.slice(0, 200)) {
-        corpo.append(el('div', { class: 'hint' },
-          `${voce.name} — ${voce.kind === 'identiche' ? 'identica a' : 'uguale a meno dell\'ora a'} ${voce.of}`));
+      for (const voce of elenco.slice(0, 400)) {
+        const perche = voce.kind === 'identiche' ? `identica a ${voce.of}`
+          : voce.kind === 'simile' ? `quasi identica a un'altra, tolta da te${voce.at ? ` il ${voce.at.replace('T', ' alle ')}` : ''}`
+          : `uguale a meno dell'ora a ${voce.of}`;
+        corpo.append(el('div', { class: 'hint' }, `${voce.name} — ${perche}`));
       }
       dett.append(corpo);
       panel.append(dett);
