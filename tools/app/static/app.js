@@ -123,6 +123,7 @@ async function openProject(projectId) {
   state.status = data.status;
   state.advancedStages = data.advanced_stages || { ready: true, blocked_reason: '' };
   state.splitPending = data.split_pending || null;
+  state.splitOther = data.split_other || null;
   state.rotationImages = data.rotation_images || [];
   state.fssPath = data.fss_path;
   $('#project-select').value = projectId;
@@ -406,6 +407,7 @@ function panelImport(panel) {
   // revisione di quattordici gruppi il riepilogo diceva ancora «7 scartate» - quelle
   // dell'orologio - e delle ventisette tolte a mano non c'era traccia da nessuna parte.
   const piano = state.project.source.plane || '';
+  const altro = state.splitOther || {};
   const sdoppiato = !!(state.project.source.split_into || state.project.source.derived_from);
   const diQuestoPiano = (value.plane_counts || {})[piano];
   for (const [key, val] of [
@@ -413,11 +415,18 @@ function panelImport(panel) {
     ['scartate perche\' identiche', uguali],
     ['scartate perche\' cambia solo l\'ora',
       value.timestamp_box ? orologio : statoAreaOra],
+    // Lo sdoppiamento raccontato per intero: quante di questa cartella sono del piano di
+    // qui, e dove sono finite le altre. E' l'unico modo perche' il conto torni: le
+    // immagini dell'altro piano non sono scartate, sono in un altro progetto.
     ...(sdoppiato && diQuestoPiano != null
-      ? [[`di queste, del piano ${piano}`, diQuestoPiano]] : []),
+      ? [[`di queste, del piano ${piano} (questo progetto)`, diQuestoPiano]] : []),
+    ...(sdoppiato && altro.project_id
+      ? [[`passate al piano ${altro.plane || '?'} — progetto «${altro.name || altro.project_id}»`,
+          altro.missing ? 'progetto non piu\' sul disco'
+            : `${altro.images} immagini`]] : []),
     ['scartate da te perche\' quasi identiche', aMano],
     ...(tenuteApposta ? [['tenute da te anche se simili', tenuteApposta]] : []),
-    ['immagini tenute', tenute],
+    ['immagini tenute in questo progetto', tenute],
     ['input video (#06)', state.meta.video_inputs[value.video_input] || value.video_input],
     ['video input (#07/#08)', (value.video_input_size || []).join(' x ')],
     ['immagine campione (#09/#10)', (value.image_sample_size || []).join(' x ')],

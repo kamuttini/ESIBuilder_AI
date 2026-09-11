@@ -1394,6 +1394,24 @@ def api_project_create():
     return jsonify({"project_id": project.data["project_id"]})
 
 
+def _altro_piano(project: Project) -> Dict:
+    """Il progetto gemello nato dallo sdoppiamento L/T, se c'e': nome, piano, immagini."""
+    altro_id = str(project.source.get("split_into") or project.source.get("derived_from") or "")
+    if not altro_id:
+        return {}
+    try:
+        altro = _project(altro_id)
+    except FileNotFoundError:
+        return {"project_id": altro_id, "missing": True}
+    return {
+        "project_id": altro.data.get("project_id") or altro_id,
+        "name": altro.codes.get("project_name") or altro.root.name,
+        "plane": altro.source.get("plane") or "",
+        "images": len(altro.dedup_names()),
+        "derived": bool(project.source.get("derived_from")),
+    }
+
+
 @app.get("/api/projects/<project_id>")
 def api_project(project_id: str):
     project = _project(project_id)
@@ -1408,6 +1426,10 @@ def api_project(project_id: str):
                 "blocked_reason": stages_blocked_reason,
             },
             "split_pending": _divisione_da_riapplicare(project),
+            # L'altro piano, quando la cartella e' stata sdoppiata: il riepilogo deve poter
+            # dire dove sono finite le immagini che qui non ci sono piu'. Senza, il conto
+            # «trovate 266, tenute 115» non torna e sembra che se ne siano perse cento.
+            "split_other": _altro_piano(project),
             # La selezione della rotazione mostra solo un lotto: non si trasferiscono migliaia
             # di nomi nel JSON di ogni refresh, ma si puo' comunque correggere una o piu'
             # immagini alla volta (le altre si raggiungono dalla cartella).
