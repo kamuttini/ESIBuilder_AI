@@ -1235,3 +1235,27 @@ img.depth-crop {
 .simili-voce.tenuta { border-color: var(--ok, #3fb950); }
 .simili-voce img { display: block; width: 100%; border-radius: 3px; }
 .simili-voce .hint { padding: 2px 2px 0; word-break: break-all; }
+
+
+/* Il visore a tutto schermo: due fotogrammi quasi identici si giudicano alternandoli,
+   non affiancandoli. Quindi l'immagine occupa tutto e non si muove di un pixel fra una e
+   l'altra - se si spostasse, il confronto a lampeggio non varrebbe piu' niente. */
+.visore {
+  position: fixed; inset: 0; z-index: 9999; background: #000;
+  display: flex; flex-direction: column;
+}
+.visore-barra {
+  display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+  padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.visore-titolo { font-size: 13px; }
+.visore-scena {
+  position: relative; flex: 1; min-height: 0; display: flex;
+  align-items: center; justify-content: center; cursor: pointer; overflow: hidden;
+}
+.visore-scena img, .visore-diff {
+  position: absolute; max-width: 100%; max-height: 100%;
+  width: auto; height: auto; object-fit: contain;
+  image-rendering: auto; user-select: none;
+}
+.visore-diff { display: none; pointer-events: none; }

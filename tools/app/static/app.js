@@ -2795,6 +2795,133 @@ async function cardCoperturaScala(host, projectId) {
 }
 
 
+/* Il visore a tutto schermo per decidere se due fotogrammi sono la stessa cosa.
+
+   Una differenza di qualche centesimo non si giudica su due miniature: si giudica
+   **alternandole**. E' il vecchio trucco del comparatore a lampeggio degli astronomi —
+   due lastre della stessa porzione di cielo, si passa dall'una all'altra e cio' che si e'
+   mosso salta all'occhio, mentre affiancate non lo vedresti mai. Qui le due immagini sono
+   sovrapposte e si passa dall'una all'altra con le frecce o con la barra spaziatrice: se
+   qualcosa cambia, si vede.
+
+   E per non doversi fidare dell'occhio c'e' la maschera: le differenze dipinte in rosso,
+   calcolate qui nel browser confrontando i pixel delle due. */
+function visoreSimili(gruppo, progetto, onScarta) {
+  let indice = 0;
+  let differenze = false;
+  const nomi = gruppo.names;
+  const overlay = el('div', { class: 'visore' });
+  const scena = el('div', { class: 'visore-scena' });
+  const img = el('img', { alt: '' });
+  const tela = el('canvas', { class: 'visore-diff' });
+  scena.append(img, tela);
+  const titolo = el('div', { class: 'visore-titolo' });
+  const aiuto = el('div', { class: 'hint' },
+    'frecce o barra: passa da una all\'altra (e' + ' quello che le confronta) · '
+    + 'D: dipinge le differenze · Esc: chiudi');
+
+  const disegnaDiff = async () => {
+    if (!differenze || nomi.length < 2) { tela.style.display = 'none'; return; }
+    const altra = nomi[(indice + 1) % nomi.length];
+    const carica = (nome) => new Promise((ok, ko) => {
+      const i = new Image();
+      i.crossOrigin = 'anonymous';
+      i.onload = () => ok(i);
+      i.onerror = ko;
+      i.src = `/api/projects/${progetto}/image?name=${encodeURIComponent(nome)}&w=1920`;
+    });
+    try {
+      const [x, y] = await Promise.all([carica(nomi[indice]), carica(altra)]);
+      const w = Math.min(x.naturalWidth, y.naturalWidth);
+      const h = Math.min(x.naturalHeight, y.naturalHeight);
+      const cx = document.createElement('canvas'); cx.width = w; cx.height = h;
+      const cy = document.createElement('canvas'); cy.width = w; cy.height = h;
+      cx.getContext('2d').drawImage(x, 0, 0);
+      cy.getContext('2d').drawImage(y, 0, 0);
+      const a = cx.getContext('2d').getImageData(0, 0, w, h);
+      const b = cy.getContext('2d').getImageData(0, 0, w, h);
+      tela.width = w; tela.height = h;
+      const fuori = tela.getContext('2d').createImageData(w, h);
+      let quanti = 0;
+      for (let k = 0; k < a.data.length; k += 4) {
+        const d = Math.max(Math.abs(a.data[k] - b.data[k]),
+                           Math.abs(a.data[k + 1] - b.data[k + 1]),
+                           Math.abs(a.data[k + 2] - b.data[k + 2]));
+        if (d > 6) {
+          quanti += 1;
+          fuori.data[k] = 255; fuori.data[k + 1] = 64; fuori.data[k + 2] = 48;
+          fuori.data[k + 3] = 190;
+        }
+      }
+      tela.getContext('2d').putImageData(fuori, 0, 0);
+      tela.style.display = 'block';
+      titolo.querySelector('.visore-diff-nota').textContent =
+        ` · ${quanti.toLocaleString('it')} pixel diversi da ${altra.split('/').pop()}`;
+    } catch (errore) {
+      tela.style.display = 'none';
+      toast('non riesco a calcolare le differenze qui nel browser', true);
+      differenze = false;
+    }
+  };
+
+  const mostra = () => {
+    const nome = nomi[indice];
+    img.src = `/api/projects/${progetto}/image?name=${encodeURIComponent(nome)}&w=1920`;
+    titolo.innerHTML = '';
+    titolo.append(
+      el('strong', {}, `${indice + 1} di ${nomi.length}`),
+      el('span', {}, ` · ${nome.split('/').pop()}`),
+      el('span', {}, nome === gruppo.keep ? ' · questa resta' : ' · proposta da scartare'),
+      el('span', { class: 'hint visore-diff-nota' }, ''));
+    disegnaDiff();
+  };
+  const passo = (d) => { indice = (indice + d + nomi.length) % nomi.length; mostra(); };
+
+  const chiudi = () => {
+    window.removeEventListener('keydown', tasti);
+    overlay.remove();
+  };
+  const tasti = (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); chiudi(); }
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); passo(1); }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); passo(-1); }
+    if (e.key === 'd' || e.key === 'D') { e.preventDefault(); differenze = !differenze; disegnaDiff(); }
+  };
+  window.addEventListener('keydown', tasti);
+  scena.addEventListener('click', () => passo(1));
+
+  const tastoDiff = el('button', { class: 'ghost' }, 'Differenze (D)');
+  tastoDiff.addEventListener('click', (e) => {
+    e.stopPropagation(); differenze = !differenze;
+    tastoDiff.className = differenze ? '' : 'ghost';
+    disegnaDiff();
+  });
+  const tieni = el('button', {}, 'Tieni questa, scarta le altre');
+  tieni.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const via = nomi.filter((n) => n !== nomi[indice]);
+    chiudi();
+    await onScarta(via);
+  });
+  const scartaQuesta = el('button', { class: 'ghost' }, 'Scarta questa');
+  scartaQuesta.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const nome = nomi[indice];
+    if (nomi.length < 2) { toast('e\' rimasta sola: non si scarta', true); return; }
+    chiudi();
+    await onScarta([nome]);
+  });
+  overlay.append(
+    el('div', { class: 'visore-barra' }, titolo,
+      el('div', { class: 'row' }, tastoDiff, tieni, scartaQuesta,
+        el('button', { class: 'ghost', onclick: chiudi }, 'Chiudi (Esc)')),
+      aiuto),
+    scena);
+  document.body.append(overlay);
+  mostra();
+}
+
+
 /* --- fotogrammi che si somigliano dentro l'ecografia ---------------------------------
    La passata dell'orologio prende solo i fotogrammi identici a meno dell'ora. Ma una
    macchina che scansiona dal vivo non ripete mai lo stesso rumore: due scatti sullo stesso
@@ -2864,16 +2991,28 @@ function cardQuasiIdentiche(panel, value) {
       const strip = el('div', { class: 'simili-strip' });
       for (const nome of g.names) {
         const tenuta = nome === g.keep;
-        strip.append(el('div', { class: 'simili-voce' + (tenuta ? ' tenuta' : '') },
+        strip.append(el('div', { class: 'simili-voce' + (tenuta ? ' tenuta' : ''),
+                                 'data-nome': nome, title: 'clic: guardala a tutto schermo' },
           el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
                       alt: nome, loading: 'lazy' }),
           el('div', { class: 'hint' }, nome.split('/').pop()),
           el('div', { class: 'hint' }, tenuta ? 'questa resta' : 'da scartare')));
       }
       riga.append(strip);
+      const guarda = el('button', { class: 'ghost sq2' }, 'Guardale a tutto schermo');
+      guarda.addEventListener('click', () => visoreSimili(g, state.projectId, scarta));
+      strip.addEventListener('click', (e) => {
+        // Un clic su una miniatura apre il visore su quella: e' il gesto che viene
+        // naturale, e guardare e' l'unico modo per decidere.
+        const voce = e.target.closest('.simili-voce');
+        if (!voce) return;
+        const nome = voce.dataset.nome;
+        visoreSimili({ ...g, names: [nome, ...g.names.filter((n) => n !== nome)] },
+                     state.projectId, scarta);
+      });
       const b = el('button', { class: 'ghost sq2' }, `Scarta le altre ${g.drop.length}`);
       b.addEventListener('click', () => scarta(g.drop));
-      riga.append(b);
+      riga.append(el('div', { class: 'row' }, guarda, b));
       card.append(riga);
     }
   };
