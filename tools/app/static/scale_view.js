@@ -26,7 +26,7 @@ function legenda() {
     ['alt + trascina', 'la tacca da sola · dalla colonna, tutto il righello'],
     ['doppio clic', 'aggiunge una tacca'],
     ['× sulla tacca', 'la toglie, col suo numero'],
-    ['clic sul numero', 'lo scrivi tu: da li\' esce la scala; vuoto lo toglie'],
+    ['clic su «scrivi cm»', 'inserisci il valore accanto a qualunque tacca; vuoto lo toglie'],
     ['nelle finestre ingrandite', 'clic mette zero o fondo, shift+clic una tacca'],
     ['nella lente', 'scegli in alto cosa indichi, poi clicca'],
     ['shift+↑↓ · alt+↑↓', 'zero · fondo, un pixel per volta'],
@@ -151,16 +151,17 @@ async function createScaleViewer(projectId) {
       const calcolato = (cm == null && passoMm != null && passi != null)
         ? (passi * passoMm) / 10 : null;
       const mostrato = cm != null ? cm : calcolato;
-      if (mostrato == null) continue;
       const numero = el('div', {
-        class: 'scala-numero' + (cm == null ? ' calcolato' : ''),
-        title: cm == null
+        class: 'scala-numero' + (mostrato == null ? ' vuoto' : (cm == null ? ' calcolato' : '')),
+        title: mostrato == null
+          ? 'clic per scrivere il valore di questa tacca'
+          : cm == null
           ? 'calcolato dal passo: clic per scriverlo tu'
           : 'letto dall\'immagine: clic per correggerlo',
-      }, `${Number(mostrato.toFixed(2))} cm`);
+      }, mostrato == null ? 'scrivi cm' : `${Number(mostrato.toFixed(2))} cm`);
       numero.style.top = `${t * s}px`;
       numero.style.left = `${((f.x ?? 0) + 34) * s}px`;
-      const apri = (e) => { e.stopPropagation(); cambiaNumero(numero, t, mostrato); };
+      const apri = (e) => { e.stopPropagation(); cambiaNumero(numero, t, mostrato ?? ''); };
       numero.addEventListener('click', apri);
       numero.addEventListener('dblclick', apri);
       strati.append(numero);
@@ -337,16 +338,16 @@ async function createScaleViewer(projectId) {
         const calcolato = (cm == null && passoMm != null && passi != null)
           ? (passi * passoMm) / 10 : null;
         const mostrato = cm != null ? cm : calcolato;
-        if (mostrato == null) continue;
         const numero = el('div', {
-          class: 'scala-zoom-numero' + (cm == null ? ' calcolato' : ''),
-          title: cm == null ? 'calcolato dal passo: clic per scriverlo tu'
-                            : 'letto dall\'immagine: clic per correggerlo, vuoto per toglierlo',
-        }, `${Number(mostrato.toFixed(2))} cm`);
+          class: 'scala-zoom-numero' + (mostrato == null ? ' vuoto' : (cm == null ? ' calcolato' : '')),
+          title: mostrato == null ? 'clic per scrivere il valore di questa tacca'
+                 : cm == null ? 'calcolato dal passo: clic per scriverlo tu'
+                              : 'letto dall\'immagine: clic per correggerlo, vuoto per toglierlo',
+        }, mostrato == null ? 'scrivi cm' : `${Number(mostrato.toFixed(2))} cm`);
         numero.style.top = `${(t - z.finestra[1]) * s}px`;
         numero.addEventListener('pointerdown', (e) => e.stopPropagation());
         numero.addEventListener('click', (e) => {
-          e.stopPropagation(); cambiaNumero(numero, t, mostrato);
+          e.stopPropagation(); cambiaNumero(numero, t, mostrato ?? '');
         });
         z.piano.append(numero);
       }
@@ -659,7 +660,8 @@ async function createScaleViewer(projectId) {
 
   /* --- i numeri si riscrivono dove stanno, senza finestrelle di sistema -------------- */
   const cambiaNumero = (nodo, y, valore) => {
-    const campo = el('input', { class: 'scala-numero-campo', type: 'text', value: String(valore) });
+    const campo = el('input', { class: 'scala-numero-campo', type: 'text',
+      inputmode: 'decimal', placeholder: 'cm', value: String(valore ?? '') });
     nodo.replaceChildren(campo);
     campo.focus(); campo.select();
     const chiudi = (salvare) => {
@@ -688,8 +690,9 @@ async function createScaleViewer(projectId) {
           : [...(f.labels || []), [y, cm]].sort((a, b) => a[0] - b[0]);
         salva({ nums: [...(correzione().nums || []).filter(([yy]) => Math.round(yy) !== Math.round(y)),
                        [Math.round(y), cm * 10]] });
+        stato(`valore della tacca: ${cm} cm`);
       }
-      disegna();
+      disegna(); aggiornaZoom(); renderDati(); renderPasso();
     };
     campo.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); chiudi(true); }

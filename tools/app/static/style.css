@@ -935,6 +935,12 @@ img.depth-crop {
    misura, cosi' non lo si scambia per una lettura riuscita. */
 .scala-numero.calcolato { opacity: .55; border-style: dashed; cursor: pointer; }
 .scala-numero.calcolato:hover { opacity: 1; }
+.scala-numero.vuoto, .scala-zoom-numero.vuoto {
+  color: #fff; border: 1px dashed #d29922; cursor: text; opacity: .9;
+}
+.scala-numero.vuoto:hover, .scala-zoom-numero.vuoto:hover {
+  color: #d29922; opacity: 1;
+}
 /* Letto dall'OCR ma non su una tacca: e' il disaccordo, e va visto. */
 .scala-numero.fuori { border-color: var(--warn); color: var(--warn); cursor: pointer; }
 /* Una verifica che viene da fuori (depth confermata, corde del rettangolo) e non torna. */
