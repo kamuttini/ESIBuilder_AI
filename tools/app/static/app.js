@@ -86,11 +86,14 @@ async function refreshProjects() {
 }
 
 async function createProject() {
-  const name = $('#new-project-name').value.trim();
+  // Il nome serve solo quando si decide davvero di creare: la barra alta resta dedicata
+  // alla selezione dei progetti esistenti e non mostra un campo vuoto permanente.
+  const richiesto = window.prompt('Nome del nuovo progetto');
+  if (richiesto === null) return;
+  const name = richiesto.trim();
   if (!name) return toast('serve un nome', true);
   try {
     const { project_id } = await api('/projects', { body: { name } });
-    $('#new-project-name').value = '';
     await refreshProjects();
     state.step = 'import';
     await openProject(project_id);
