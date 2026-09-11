@@ -321,6 +321,20 @@ async function createOrientationViewer(projectId, sampleSize) {
     };
   };
 
+  /* La lente segue il puntatore. Con due schermi si guarda l'immagine grande e la lente
+     sta di lato: passando sopra a un marker lo si vuole vedere ingrandito li', subito,
+     senza prima dire alla lente dove andare. */
+  const seguiConLaLente = (event) => {
+    if (!Lente.viva() || !Lente.segueOra()) return;
+    const r = image.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const sx = (size[0] || image.naturalWidth || 0) / r.width;
+    const sy = (size[1] || image.naturalHeight || 0) / r.height;
+    if (!sx || !sy) return;
+    Lente.segui((event.clientX - r.left) * sx, (event.clientY - r.top) * sy);
+  };
+  stage.addEventListener('pointermove', seguiConLaLente);
+
   const setCorrecting = (on) => {
     correcting = on;
     stage.classList.toggle('picking', on);
@@ -531,7 +545,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     renderList();
     try {
       const result = await api(`/projects/${projectId}/orientation/quick_fix`, {
-        body: { name: target, ...click },
+        body: { name: target, ...click, window: raggio() },
       });
       busyName = null;
       // la riga diventa "corretta" con i valori nuovi, senza rileggere tutto dal server
@@ -1463,8 +1477,25 @@ async function createOrientationViewer(projectId, sampleSize) {
       onclick: () => stepFound(1) }, 'prossima con marker'),
     sortSelect, listCount);
 
+  /* Quanto lontano dal punto indicato si cerca.
+
+     Era settanta pixel per lato: su un marker alto quindici, il vincitore poteva stare
+     nove marker piu' in la', e la correzione smetteva di essere una correzione per
+     diventare un secondo parere. Chi clicca il centro lo sbaglia di qualche pixel. Venti
+     e' il valore giusto quasi sempre; qui si cambia quando non lo e'. */
+  const raggioInput = el('input', {
+    type: 'number', min: '4', max: '200', step: '2', value: '20', style: 'width:62px',
+    title: 'quanto lontano dal punto che indichi puo\' stare il marker',
+  });
+  const raggio = () => {
+    const v = parseInt(raggioInput.value, 10);
+    return Number.isFinite(v) ? Math.max(4, Math.min(v, 200)) : 20;
+  };
+
   const fixBar = el('div', { class: 'ov-actions' },
     fixButton,
+    el('label', { class: 'serie', title: 'il marker viene cercato solo dentro a questo raggio dal punto che indichi' },
+      el('span', {}, 'raggio'), raggioInput, el('span', {}, 'px')),
     el('label', { class: 'serie', title: 'resta armato e passa alla prossima immagine dopo ogni correzione' },
       serieToggle, el('span', {}, 'in serie')),
     wrongButton, modificaButton,
@@ -1727,6 +1758,103 @@ async function createOrientationViewer(projectId, sampleSize) {
         'serve aspettarlo. Con «in serie» resti armato e passi alla prossima. Se invece il ' +
         'glifo cercato e\' proprio quello sbagliato, usa «Il marker trovato e\' sbagliato» e ' +
         'trascina un rettangolo attorno a quello vero.'))));
+
+  /* Il primo passo della revisione: **quale glifo**.
+
+     Il modulo sceglie il ritaglio che si ritrova sul maggior numero di immagini, non quello
+     col picco piu' alto. E' la regola giusta, ma resta una scelta fatta al buio da chi
+     guarda: due ritagli con copertura 1.0 sono uguali per la macchina e diversissimi per
+     chi sa cos'e' il marker — uno e' il simbolo, l'altro la sigla della sonda stampata li'
+     accanto. E finche' il glifo non e' quello giusto, tutto quello che viene dopo —
+     posizioni, gruppi, envelope — descrive un altro oggetto, e guardarlo e' tempo buttato.
+
+     Percio' sta in cima, prima di tutto il resto: si vede il vincitore, si vedono i
+     concorrenti con quello che hanno ottenuto, e si dice quale e'. Se e' quello che aveva
+     preso lui si tira dritto; se e' un altro, il modulo rifa' lo studio con quello. */
+  const poolCard = el('div', { class: 'card' });
+  let pool = null;
+  const scegliCandidato = async (indice) => {
+    setBusy(true, 'rifaccio lo studio col marker che hai scelto');
+    try {
+      const esito = await api(`/projects/${projectId}/orientation/candidate`,
+        { body: { index: indice } });
+      if (esito.same) {
+        toast('e\' lo stesso ritaglio: lo studio resta quello che vedi');
+        setBusy(false);
+        await caricaPool();
+        return;
+      }
+      const job = await pollJob(esito.job_id, { set textContent(v) { busyLabel.textContent = v; } });
+      setBusy(false);
+      await refreshData();
+      await caricaPool();
+      renderOverrideResult(job.result);
+      toast(`rifatto col marker scelto: ${job.result.matched} immagini su ${job.result.images}`);
+    } catch (errore) {
+      setBusy(false);
+      toast(errore.message, true);
+    }
+  };
+  const renderPool = () => {
+    poolCard.innerHTML = '';
+    if (!pool || !(pool.candidates || []).length) { poolCard.style.display = 'none'; return; }
+    poolCard.style.display = '';
+    const scelto = pool.candidates.find((c) => c.chosen);
+    poolCard.append(el('h3', { style: 'margin-top:0' },
+      pool.confirmed ? 'il marker della cartella — confermato da te' : 'il marker della cartella: e\' questo?'));
+    poolCard.append(el('p', { class: 'hint' },
+      pool.from_user
+        ? 'stai cercando il ritaglio che hai indicato tu.'
+        : 'il modulo ha scelto quello che si ritrova su piu\' immagini. Qui sotto gli altri '
+          + 'che ha provato: se il marker vero e\' uno di loro, scegli quello e rifa\' lo studio.'));
+    const fila = el('div', { class: 'ov-pool' });
+    for (const c of pool.candidates) {
+      const carta = el('div', { class: 'ov-pool-voce' + (c.chosen ? ' scelto' : '') });
+      carta.append(el('img', { src: c.url, alt: 'candidato' }));
+      carta.append(el('div', { class: 'hint' },
+        `${(c.size || []).join('x')} px`, el('br'),
+        `copertura ${c.coverage != null ? Math.round(c.coverage * 100) + '%' : '—'}`, el('br'),
+        `mediana ${c.median != null ? Number(c.median).toFixed(3) : '—'}`, el('br'),
+        el('span', { title: `dal fotogramma ${c.image}` }, (c.image || '').split('/').pop())));
+      if (c.chosen) {
+        carta.append(el('span', { class: 'ov-pool-tag' },
+          pool.from_user ? 'scelto da te' : 'scelto dal modulo'));
+      } else {
+        const b = el('button', { class: 'ghost sq2' }, 'usa questo');
+        b.addEventListener('click', () => scegliCandidato(c.index));
+        carta.append(b);
+      }
+      fila.append(carta);
+    }
+    poolCard.append(fila);
+    if (!pool.confirmed && scelto) {
+      const ok = el('button', {}, 'Si\', il marker e\' questo');
+      ok.addEventListener('click', async () => {
+        ok.disabled = true;
+        try {
+          await api(`/projects/${projectId}/orientation/candidate`, { body: { confirm: true } });
+          toast('marker confermato: da qui in poi si guarda dove cade');
+          await caricaPool();
+        } catch (errore) { toast(errore.message, true); ok.disabled = false; }
+      });
+      poolCard.append(el('div', { class: 'row' }, ok,
+        el('span', { class: 'hint' },
+          'confermarlo non cambia niente nei dati: dice che il resto della revisione si puo\' '
+          + 'guardare, perche\' parla del glifo giusto.')));
+    }
+    if (pool.confirmed) {
+      poolCard.append(el('p', { class: 'hint', style: 'color:var(--ok, #3fb950)' },
+        `confermato ${pool.confirmed_at ? `il ${pool.confirmed_at.replace('T', ' alle ')}` : ''}`));
+    }
+  };
+  const caricaPool = async () => {
+    try {
+      pool = await api(`/projects/${projectId}/orientation/candidates`);
+    } catch (errore) { pool = null; }
+    renderPool();
+  };
+  root.append(poolCard);
+  caricaPool();
 
   root.append(el('div', { class: 'ov-bar' }, filterRow));
 

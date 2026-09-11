@@ -64,7 +64,10 @@ def refine_from_click(
     vendor: str,
     preferred_template: str = "",
     exclusion_rect: Optional[Dict[str, int]] = None,
-    window: int = 70,
+    # Quanto lontano dal click si cerca, per lato. Venti pixel: chi indica il centro di un
+    # marker lo sbaglia di qualche pixel, non di settanta, e cercare largo trasformava la
+    # correzione in un secondo parere - il vincitore poteva essere un altro glifo.
+    window: int = 20,
     match_max_side: int = 560,
     scales: Sequence[float] = SCALES,
     own_templates: Sequence[Path] = (),

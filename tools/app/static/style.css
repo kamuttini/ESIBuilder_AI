@@ -1203,3 +1203,19 @@ img.depth-crop {
   border-radius: 50%; width: 16px; height: 16px; line-height: 14px; text-align: center;
   font-size: 11px; flex: 0 0 auto;
 }
+
+
+/* Il pool dei ritagli che si sono contesi il posto di marker. Si guardano affiancati:
+   e' il confronto che fa capire quale e' il simbolo e quale la scritta accanto. */
+.ov-pool { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+.ov-pool-voce {
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--panel);
+  display: flex; flex-direction: column; gap: 6px; align-items: center; min-width: 108px;
+}
+.ov-pool-voce.scelto { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.ov-pool-voce img {
+  image-rendering: pixelated; background: #000; border: 1px solid var(--line);
+  max-width: 96px; max-height: 96px;
+}
+.ov-pool-voce .hint { text-align: center; line-height: 1.35; }
+.ov-pool-tag { font-size: 11px; color: var(--accent); }

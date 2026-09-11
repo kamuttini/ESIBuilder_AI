@@ -1112,6 +1112,20 @@ async function createScaleViewer(projectId) {
     }
   };
 
+  /* La lente segue il puntatore anche qui: sul righello serve piu' che altrove, perche'
+     quello che si cerca - una tacca, lo zero - e' alto due pixel. */
+  const seguiConLaLente = (event) => {
+    if (!Lente.viva() || !Lente.segueOra()) return;
+    const r = image.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    const f = corrente();
+    const sx = (f.w || image.naturalWidth || 0) / r.width;
+    const sy = (f.h || image.naturalHeight || 0) / r.height;
+    if (!sx || !sy) return;
+    Lente.segui((event.clientX - r.left) * sx, (event.clientY - r.top) * sy);
+  };
+  stage.addEventListener('pointermove', seguiConLaLente);
+
   const didascalia = el('div', { class: 'hint' });
   const mostra = () => {
     const elenco = visibili();

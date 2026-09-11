@@ -27,6 +27,19 @@ const Lente = (() => {
   let sospesa = false;          // la sezione e' cambiata e la nuova non si e' ancora fatta viva
   let ritaglioRotto = '';       // il ritaglio che non si e' caricato, per non ridisegnarci sopra
   let zoomServito = 0;      // l'ingrandimento gia' chiesto al server, per non richiederlo
+  /* La lente che segue il puntatore.
+
+     Con due schermi la lente sta di lato e si guarda l'immagine grande: muovendo il mouse
+     sopra a un dettaglio si vorrebbe vederlo ingrandito li', subito, senza prima dire alla
+     lente dove andare. E' il gesto di chi cerca - passo sopra, guardo, passo oltre - e
+     senza di questo la lente serviva solo a guardare una cosa che si era gia' trovata.
+
+     Segue un punto, non un riquadro: la finestra si rifa' solo quando il punto esce dalla
+     zona gia' inquadrata, se no ci si muove dentro e non si ricarica niente. */
+  let segueIlPuntatore = true;
+  let puntoSeguito = null;    // {x, y} in coordinate native
+  let seguitoInAttesa = null; // l'ultimo punto arrivato, disegnato al prossimo frame
+  let frameChiesto = false;   // c'e' gia' un disegno prenotato: non prenotarne un altro
 
   const NOMI_LATO = { n: 'bordo alto', s: 'bordo basso', w: 'bordo sx', e: 'bordo dx',
                       nw: 'angolo ↖', ne: 'angolo ↗', sw: 'angolo ↙', se: 'angolo ↘',
@@ -63,6 +76,7 @@ const Lente = (() => {
   #zoombar button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
                     border-radius: 5px; padding: 1px 8px; font: inherit; cursor: pointer; }
   #zoombar button:hover { background: #30363d; }
+  #zoombar button.on { background: #1f6feb; border-color: #1f6feb; color: #fff; }
   #fattore { min-width: 46px; text-align: right; color: #8b949e; }
   .riq { position: absolute; border: 2px solid #3fb950; box-sizing: border-box;
          box-shadow: 0 0 0 1px rgba(0,0,0,.75); pointer-events: none; }
@@ -118,7 +132,8 @@ lavorando, oppure torna indietro.</div>
   <span id="zoombar"><button id="meno" title="rimpicciolisci (rotella)">\u2212</button>
     <span id="fattore"></span>
     <button id="piu" title="ingrandisci (rotella)">+</button>
-    <button id="adatta" title="torna a riempire la finestra">adatta</button></span>
+    <button id="adatta" title="torna a riempire la finestra">adatta</button>
+    <button id="segui" title="la lente segue il puntatore sull'altra finestra">segue</button></span>
   <span id="coord"></span>
   <span id="dettaglio"></span></div>
 <div id="scena"><img id="crop" alt=""></div>
@@ -338,6 +353,20 @@ lavorando, oppure torna indietro.</div>
     d.getElementById('piu').addEventListener('click', () => cambiaZoom(+1));
     d.getElementById('meno').addEventListener('click', () => cambiaZoom(-1));
     d.getElementById('adatta').addEventListener('click', () => { zoomManuale = null; disegna(true); });
+    const tastoSegui = d.getElementById('segui');
+    const pittaSegui = () => {
+      tastoSegui.className = segueIlPuntatore ? 'on' : '';
+      tastoSegui.textContent = segueIlPuntatore ? 'segue' : 'ferma';
+    };
+    pittaSegui();
+    tastoSegui.addEventListener('click', () => {
+      segueIlPuntatore = !segueIlPuntatore;
+      // Smettendo di seguire si torna a guardare quello che la sezione indicava: lasciare
+      // la lente dove il puntatore era passato per caso non e' «ferma», e' «persa».
+      if (!segueIlPuntatore) { puntoSeguito = null; miraInFinestra = null; }
+      pittaSegui();
+      disegna(true);
+    });
     // La rotella ingrandisce invece di scorrere: in una lente e' quello che si vuole fare.
     // Con shift resta lo scorrimento, per quando il ritaglio e' piu' grande della finestra.
     d.addEventListener('wheel', (ev) => {
@@ -453,7 +482,11 @@ lavorando, oppure torna indietro.</div>
     // rettangolo ecografico il riquadro e' mezzo schermo - inquadrarlo sarebbe non
     // ingrandire niente - mentre quello che si guarda e' l'angolo che si sta spostando, o
     // la corda del ventaglio.
-    const mira = ctx.focus || (principale && principale.box) || null;
+    // Il punto sotto al puntatore vince su tutto: e' quello che si sta guardando adesso.
+    const mira = (segueIlPuntatore && puntoSeguito)
+      ? { left: puntoSeguito.x - 45, right: puntoSeguito.x + 45,
+          top: puntoSeguito.y - 30, bottom: puntoSeguito.y + 30 }
+      : (ctx.focus || (principale && principale.box) || null);
     if (!mira) {
       scena.style.display = 'none';
       const v = d.getElementById('vuoto');
@@ -744,5 +777,31 @@ lavorando, oppure torna indietro.</div>
     return b;
   };
 
-  return { apri, chiudi, aggiorna, sospendi, viva, bottone };
+  /* Il puntatore si muove sull'altra finestra: qui si insegue, ma a passo di frame.
+
+     Un `pointermove` arriva anche cento volte al secondo e ridisegnare ogni volta vorrebbe
+     dire non disegnare mai. Si tiene l'ultimo punto e si disegna al frame dopo; il ritaglio
+     si ricarica solo quando il punto esce dalla zona gia' inquadrata, che e' la stessa
+     regola di sempre. */
+  const segui = (x, y) => {
+    if (!viva() || !segueIlPuntatore || sospesa) return;
+    seguitoInAttesa = { x: Math.round(x), y: Math.round(y) };
+    if (frameChiesto) return;
+    frameChiesto = true;
+    requestAnimationFrame(() => {
+      frameChiesto = false;
+      const punto = seguitoInAttesa;
+      seguitoInAttesa = null;
+      if (!punto || !viva() || !segueIlPuntatore) return;
+      // Sotto ai tre pixel non e' un movimento: e' la mano che trema sul mouse.
+      if (puntoSeguito && Math.abs(puntoSeguito.x - punto.x) < 3
+          && Math.abs(puntoSeguito.y - punto.y) < 3) return;
+      puntoSeguito = punto;
+      finestraManuale = false;
+      disegna();
+    });
+  };
+  const segueOra = () => segueIlPuntatore;
+
+  return { apri, chiudi, aggiorna, sospendi, viva, bottone, segui, segueOra };
 })();

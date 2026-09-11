@@ -801,6 +801,10 @@ def _run_advanced_stages(
                 rows_by_name, fuori_rect = _marker_nel_rettangolo(rows_by_name, final_rect)
                 results["marker"]["outside_rect"] = fuori_rect
                 template_info: Dict = {}
+                # Se questo giro non rifa' la gara fra i ritagli (per esempio perche' il
+                # marker l'hai indicato tu), il pool resta quello di prima: e' comunque il
+                # confronto con cui si e' scelto.
+                candidati_visti: List[Dict] = list(previous.get("marker_candidates") or [])
                 override = previous.get("marker_override") or {}
                 override_rows: Dict[str, Dict] = {}
                 consegnate: Dict[str, Dict] = {}
@@ -855,6 +859,18 @@ def _run_advanced_stages(
                             final.parent.mkdir(parents=True, exist_ok=True)
                             final.write_bytes(source.read_bytes())
                             template_info = {**chosen["chosen"], "path": str(final)}
+                            # Il vincitore si tiene, ma anche gli altri: «quale glifo hai
+                            # preso» e' la prima cosa da confermare, e senza vedere i
+                            # concorrenti non e' una scelta, e' un'ispezione. I ritagli
+                            # stanno gia' su disco (templates/candidates), qui si salva
+                            # cosa ha ottenuto ciascuno.
+                            candidati_visti = [
+                                {k: c.get(k) for k in
+                                 ("path", "size", "coverage", "median", "probe_images",
+                                  "seed_score", "seed_bank_template", "source_image",
+                                  "source_box")}
+                                for c in (chosen.get("candidates") or [])
+                            ]
                             # --- GLI ENVELOPE SONO DI CHI VERRA' CONSEGNATO ------------
                             # ESI cerchera' *questo* ritaglio, lo stesso in tutti e quattro i
                             # gruppi (nelle dieci configurazioni storiche i quattro
@@ -962,6 +978,7 @@ def _run_advanced_stages(
                     "missing_groups": missing,
                     "orientation_available": {g: g in groups for g in order},
                     "folder_template": template_info,
+                    "marker_candidates": candidati_visti,
                     "validation": {
                         k: validation.get(k) for k in ("coverage", "coverage_by_group", "images", "min_score")
                     },
@@ -2522,7 +2539,7 @@ def api_orientation_refine(project_id: str):
             vendor=vendor,
             preferred_template=(current or {}).get("template", ""),
             exclusion_rect=_marker_vendor_exclusion(project),
-            window=int(payload.get("window") or 70),
+            window=_raggio_click(payload),
         )
     except (FileNotFoundError, ImportError) as error:
         return jsonify({"error": str(error)}), 400
@@ -2625,6 +2642,29 @@ def _marker_context(project: Project) -> Dict:
         "vendor": ((analysis.get("vendor") or {}).get("vendor") or ""),
         "bundle": _models_dir().parents[1] / "41_orientation_marker_detector_bundle",
     }
+
+
+# Quanto lontano dal punto indicato si puo' cercare il marker.
+#
+# Era 70 px: mezza finestra per lato, 140x140 px di ricerca. Su un marker alto quindici
+# pixel vuol dire che il vincitore poteva stare nove marker piu' in la', e allora la
+# correzione non e' piu' una correzione - e' un secondo parere. Chi clicca il centro lo
+# sbaglia di qualche pixel, non di settanta: venti bastano, e quello che c'e' dentro e'
+# quello che si stava indicando.
+RAGGIO_CLICK_PX = 20
+RAGGIO_CLICK_MAX = 200
+
+
+def _raggio_click(payload: Dict) -> int:
+    """Il raggio di ricerca chiesto dall'interfaccia, dentro a limiti sensati."""
+    chiesto = payload.get("window") if payload.get("window") not in (None, "") else None
+    if chiesto is None:
+        chiesto = payload.get("radius") if payload.get("radius") not in (None, "") else None
+    try:
+        valore = int(round(float(chiesto))) if chiesto is not None else RAGGIO_CLICK_PX
+    except (TypeError, ValueError):
+        valore = RAGGIO_CLICK_PX
+    return max(4, min(valore, RAGGIO_CLICK_MAX))
 
 
 def _refine_click(project: Project, name: str, click: Dict, window: int) -> Dict:
@@ -2981,7 +3021,7 @@ def api_orientation_quick_fix(project_id: str):
     # quella con cui va convertito il click.
     click = _click_to_image(project.working_dir() or Path(""), name, payload)
     try:
-        refined = _refine_click(project, name, click, int(payload.get("window") or 70))
+        refined = _refine_click(project, name, click, _raggio_click(payload))
     except ValueError as error:
         return jsonify({"error": str(error), "click": click}), 400
     value = _save_correction(project_id, name, refined)
@@ -3068,13 +3108,16 @@ def _drop_outliers(rows: List[Dict], rect: Dict[str, int]) -> Tuple[List[Dict], 
 
 def _run_marker_override(
     job_id: str, project_id: str, name: str, box: Dict[str, int], min_score: float,
-    stretta: bool = False,
+    stretta: bool = False, ritaglio_pronto: str = "",
 ) -> None:
     """Il marker indicato a mano diventa IL marker della cartella, e il modulo riparte.
 
     Non passa dalla banca: quando la banca ha scelto il glifo sbagliato, ripescarla
     significherebbe ritrovare lo stesso errore. Il ritaglio e' quello che l'utente ha
     disegnato, e da lui si rifanno posizioni, gruppi, envelope e validazione.
+
+    `ritaglio_pronto` e' la stessa cosa per un ritaglio che esiste gia': quando si sceglie
+    un glifo dal pool dei candidati non c'e' niente da ritagliare, il file c'e'.
     """
     try:
         project = _project(project_id)
@@ -3086,10 +3129,19 @@ def _run_marker_override(
             if not re.search(MARKER_EXCLUDED, str(path), re.IGNORECASE)
         ]
 
-        _job_update(job_id, stage="1/4 ritaglio il marker che hai indicato")
-        crop = om.cut_at(
-            ctx["folder"] / name, box, project.root / "templates" / "marker_override.png"
-        )
+        destinazione = project.root / "templates" / "marker_override.png"
+        if ritaglio_pronto and Path(ritaglio_pronto).is_file():
+            _job_update(job_id, stage="1/4 prendo il ritaglio che hai scelto")
+            destinazione.parent.mkdir(parents=True, exist_ok=True)
+            destinazione.write_bytes(Path(ritaglio_pronto).read_bytes())
+            from PIL import Image  # noqa: PLC0415
+
+            with Image.open(destinazione) as ritaglio:
+                misura = [ritaglio.width, ritaglio.height]
+            crop = {"path": str(destinazione), "size": misura}
+        else:
+            _job_update(job_id, stage="1/4 ritaglio il marker che hai indicato")
+            crop = om.cut_at(ctx["folder"] / name, box, destinazione)
 
         _job_update(job_id, stage=f"2/4 lo cerco su tutte le {len(useful)} immagini", total=len(useful))
         found = om.match_all(
@@ -3726,6 +3778,146 @@ def api_orientation_marker_tight(project_id: str):
         return jsonify({"box": box, "before": box, "changed": False,
                         "reason": "il bordo scuro non c'e' o quel che resterebbe e' troppo poco"})
     return jsonify({**esito, "before": box, "changed": True})
+
+
+@app.get("/api/projects/<project_id>/orientation/candidates")
+def api_orientation_candidates(project_id: str):
+    """I ritagli che si sono contesi il posto di marker della cartella, in ordine.
+
+    Il modulo non sceglie il glifo col picco piu' alto: sceglie quello che si **ritrova**
+    sul maggior numero di immagini (`choose_by_coverage`). E' la regola giusta, ma resta
+    una scelta fatta al buio da chi guarda: due ritagli con copertura 1.0 sono uguali per
+    la macchina e diversissimi per chi sa cos'e' il marker - uno e' il simbolo, l'altro
+    la sigla della sonda stampata li' accanto.
+
+    Percio' il pool si mostra: il vincitore, i concorrenti, cosa ha ottenuto ciascuno.
+    """
+    project = _project(project_id)
+    stored = project.step_value("orientation")
+    scelti = stored.get("marker_candidates") or []
+    attuale = str((stored.get("folder_template") or {}).get("path") or "")
+    override = str((stored.get("marker_override") or {}).get("path") or "")
+    impronta = _impronta_file(attuale)
+    fuori = []
+    for indice, voce in enumerate(scelti):
+        percorso = str(voce.get("path") or "")
+        if not percorso or not Path(percorso).is_file():
+            continue
+        fuori.append({
+            **{k: voce.get(k) for k in
+               ("size", "coverage", "median", "probe_images", "seed_score",
+                "seed_bank_template", "source_box")},
+            "index": indice,
+            "image": Path(str(voce.get("source_image") or "")).name,
+            "url": f"/api/projects/{project_id}/orientation/candidate?i={indice}",
+            # Non «e' lo stesso file», ma «sono gli stessi pixel»: il ritaglio consegnato
+            # e' una copia, quindi il confronto per percorso direbbe sempre di no.
+            "chosen": bool(impronta) and _impronta_file(percorso) == impronta,
+        })
+    return jsonify({
+        "candidates": fuori,
+        "chosen_url": (f"/api/projects/{project_id}/orientation/folder_template"
+                       if attuale else ""),
+        "from_user": bool(override),
+        # Una conferma vale per **quel** glifo: se il ritaglio consegnato e' cambiato, la
+        # conferma di prima parlava di un'altra cosa e non conta piu'.
+        "confirmed": bool(impronta) and (stored.get("marker_confirmed") or {}).get("sha1") == impronta,
+        "confirmed_at": (stored.get("marker_confirmed") or {}).get("at") or "",
+    })
+
+
+def _impronta_file(percorso: str) -> str:
+    """Gli stessi pixel, non lo stesso percorso: il ritaglio consegnato e' una copia."""
+    if not percorso or not Path(percorso).is_file():
+        return ""
+    try:
+        return hashlib.sha1(Path(percorso).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+@app.get("/api/projects/<project_id>/orientation/candidate")
+def api_orientation_candidate_image(project_id: str):
+    """Un ritaglio candidato, come immagine."""
+    project = _project(project_id)
+    scelti = project.step_value("orientation").get("marker_candidates") or []
+    try:
+        voce = scelti[int(request.args.get("i") or -1)]
+    except (ValueError, IndexError):
+        return jsonify({"error": "candidato inesistente"}), 404
+    percorso = Path(str(voce.get("path") or ""))
+    if not percorso.is_file():
+        return jsonify({"error": "ritaglio non piu' sul disco"}), 404
+    return send_file(percorso, mimetype="image/png")
+
+
+@app.post("/api/projects/<project_id>/orientation/candidate")
+def api_orientation_candidate_choose(project_id: str):
+    """«Il marker e' questo». Se e' quello che aveva preso lui, si va avanti; se no, rifa.
+
+    E' il primo passo della revisione: finche' il glifo non e' quello giusto, tutto quello
+    che viene dopo - posizioni, gruppi, envelope - descrive un altro oggetto, e guardarlo
+    e' tempo buttato.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    stored = project.step_value("orientation")
+    scelti = stored.get("marker_candidates") or []
+    attuale = str((stored.get("folder_template") or {}).get("path") or "")
+
+    if payload.get("confirm"):
+        # «Va bene quello che hai preso»: si segna e si prosegue, senza rifare niente.
+        def mutate(_p: Project, value: Dict) -> Dict:
+            value["marker_confirmed"] = {
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "sha1": _impronta_file(attuale),
+            }
+            return value
+
+        _write_orientation(project_id, mutate)
+        return jsonify({"same": True, "confirmed": True})
+
+    try:
+        indice = int(payload.get("index"))
+        voce = scelti[indice]
+    except (TypeError, ValueError, IndexError):
+        return jsonify({"error": "candidato inesistente"}), 400
+    percorso = str(voce.get("path") or "")
+    if not percorso or not Path(percorso).is_file():
+        return jsonify({"error": "quel ritaglio non e' piu' sul disco: rilancia il modulo"}), 400
+
+    if _impronta_file(percorso) and _impronta_file(percorso) == _impronta_file(attuale):
+        # Ha scelto proprio quello: e' una conferma, non una correzione.
+        def mutate(_p: Project, value: Dict) -> Dict:
+            value["marker_confirmed"] = {
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "sha1": _impronta_file(attuale),
+            }
+            return value
+
+        _write_orientation(project_id, mutate)
+        return jsonify({"same": True, "confirmed": True})
+
+    min_score = float(
+        payload.get("min_score") or (stored.get("validation") or {}).get("min_score") or 0.55
+    )
+    nome = Path(str(voce.get("source_image") or "")).name
+    box = voce.get("source_box") or {}
+    # Sceglierlo **e'** confermarlo: il glifo con cui il modulo sta per rifare tutto e'
+    # quello che ha indicato lei, non c'e' una seconda conferma da chiedere dopo.
+    def conferma(_p: Project, value: Dict) -> Dict:
+        value["marker_confirmed"] = {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "sha1": _impronta_file(percorso),
+        }
+        return value
+
+    _write_orientation(project_id, conferma)
+    return jsonify({
+        "same": False,
+        "job_id": _start_job(_run_marker_override, project_id, nome, box, min_score,
+                             False, percorso),
+    })
 
 
 @app.post("/api/projects/<project_id>/orientation/marker_override")
