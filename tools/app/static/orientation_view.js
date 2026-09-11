@@ -1811,6 +1811,107 @@ async function createOrientationViewer(projectId, sampleSize) {
     posizioniHost.append(griglia);
   };
 
+  /* La specularita' dei quattro envelope.
+
+     I quattro orientamenti sono la stessa scena ribaltata, quindi i quattro envelope
+     devono essere l'uno lo specchio dell'altro. Se uno e' piu' corto degli altri, in quello
+     spazio il marker non e' stato trovato - e quello spazio e' dove cercarlo. E' una regola
+     che il modulo da solo non ha: lui guarda una immagine per volta e non sa che le altre
+     tre gli stanno raccontando dove guardare.
+
+     Cercando li' dentro si scopre una delle due: o il marker c'e' (e si recupera), o non
+     c'e' su nessuna immagine - e allora non e' stato perso, e' che quelle acquisizioni
+     nella cartella non ci sono. */
+  const specchioHost = el('div', {});
+  const specchioTag = el('span', { class: 'ov-fold-tag' });
+  const renderSpecchio = (mirror, esito) => {
+    specchioHost.innerHTML = '';
+    const gruppi = (mirror || {}).by_group || {};
+    if (!Object.keys(gruppi).length) {
+      specchioHost.append(el('p', { class: 'hint' },
+        (mirror || {}).reason || 'servono il rettangolo e almeno due envelope'));
+      specchioTag.textContent = '';
+      return;
+    }
+    const corti = Object.entries(gruppi).filter(([, v]) => (v.gaps || []).length);
+    specchioTag.textContent = corti.length ? `${corti.length} piu' corti` : 'si somigliano';
+    specchioTag.className = 'ov-fold-tag' + (corti.length ? ' warn' : '');
+    specchioHost.append(el('p', { class: 'hint' },
+      'i quattro envelope sono la stessa cosa ribaltata: riportati tutti nel sistema di NF '
+      + 'devono coincidere. Quello che a uno manca rispetto agli altri e\' lo spazio dove '
+      + 'cercare il suo marker mancante.'));
+    const t = el('table', { class: 'lines' });
+    t.append(el('tr', {}, el('td', { class: 'name' }, 'gruppo'),
+      el('td', { class: 'name' }, 'marker'),
+      el('td', { class: 'name' }, 'quanto gli manca'),
+      el('td', { class: 'name' }, 'dove')));
+    for (const g of Object.keys(GROUP_COLORS)) {
+      const v = gruppi[g];
+      if (!v) continue;
+      const m = v.missing_px || {};
+      const parti = Object.entries(m).filter(([, px]) => px >= 10)
+        .map(([lato, px]) => `${px} px a ${({ left: 'sinistra', right: 'destra', top: 'sopra', bottom: 'sotto' })[lato]}`);
+      t.append(el('tr', {},
+        el('td', { class: 'name', style: `color:${GROUP_COLORS[g]}` }, g),
+        el('td', { class: 'val' }, String(v.markers != null ? v.markers : '—')),
+        el('td', { class: 'val', style: parti.length ? 'color:var(--warn)' : '' },
+          parti.length ? parti.join(' · ') : 'niente: e\' lungo come gli altri'),
+        el('td', { class: 'val' }, (v.gaps || [])
+          .map((b) => `x ${b.left}..${b.right} · y ${b.top}..${b.bottom}`).join(' / ') || '—')));
+    }
+    specchioHost.append(t);
+    if (esito) {
+      const pr = esito.proposals || [];
+      specchioHost.append(el('p', { class: pr.length ? 'avviso' : 'hint' },
+        pr.length
+          ? `${pr.length} marker trovati nello spazio mancante, su ${esito.images} immagini provate.`
+          : (esito.note || 'niente trovato')));
+      for (const p of pr.slice(0, 20)) {
+        const riga = el('div', { class: 'row', style: 'margin:2px 0' },
+          el('span', { class: 'hint' },
+            `${p.name.split('/').pop()} → ${p.group} (${p.score})`
+            + (p.group_before ? ` · adesso ${p.group_before} ${p.score_before || ''}` : ' · adesso senza marker')));
+        const prendi = el('button', { class: 'ghost sq2' }, 'prendi');
+        prendi.addEventListener('click', async () => {
+          prendi.disabled = true;
+          try {
+            await api(`/projects/${projectId}/orientation/correct`,
+              { body: { name: p.name, group: p.group, box: p.box, score: p.score,
+                        note: 'trovato nello spazio che mancava all\'envelope' } });
+            toast(`${p.name.split('/').pop()} → ${p.group}`);
+            await refreshData();
+            show(); renderList();
+          } catch (errore) { toast(errore.message, true); prendi.disabled = false; }
+        });
+        riga.append(prendi);
+        specchioHost.append(riga);
+      }
+    }
+    const cerca = el('button', { class: 'ghost' }, 'Cerca i marker nello spazio che manca');
+    const stato = el('span', { class: 'hint' });
+    cerca.disabled = !corti.length;
+    cerca.addEventListener('click', async () => {
+      cerca.disabled = true;
+      try {
+        const avvio = await api(`/projects/${projectId}/orientation/gaps`, { body: {} });
+        const job = await pollJob(avvio.job_id, stato);
+        stato.textContent = '';
+        renderSpecchio(mirror, job.result);
+      } catch (errore) { toast(errore.message, true); stato.textContent = errore.message; }
+      finally { cerca.disabled = false; }
+    });
+    specchioHost.append(el('div', { class: 'row' }, cerca, stato));
+  };
+  const caricaSpecchio = async () => {
+    try {
+      renderSpecchio(await api(`/projects/${projectId}/orientation/mirror`), null);
+    } catch (errore) {
+      specchioHost.innerHTML = '';
+      specchioHost.append(el('p', { class: 'hint' }, errore.message));
+    }
+  };
+  caricaSpecchio();
+
   const fold = (titolo, tag, contenuto, aperto) => {
     const nodo = el('details', { class: 'ov-fold' });
     if (aperto) nodo.setAttribute('open', 'open');
@@ -1951,6 +2052,7 @@ async function createOrientationViewer(projectId, sampleSize) {
   root.append(el('div', { class: 'ov-folds' },
     fold('dove e\' stato trovato il marker', posizioniTag, posizioniHost),
     fold('chi fissa i bordi degli envelope', limitsTag, limitsCard),
+    fold('specularita\': quale envelope e\' piu\' corto', specchioTag, specchioHost),
     fold('correzioni manuali', corrTag, corrHost),
     fold('ultima rielaborazione in background', bgTag, bgReportHost),
     fold('ritaglio consegnato e copertura', null, consegnatoCard),

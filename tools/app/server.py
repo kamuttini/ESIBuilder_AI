@@ -4154,6 +4154,254 @@ def api_orientation_correct(project_id: str):
     )
 
 
+def _nel_sistema_di_nf(box: Dict, gruppo: str, rect: Dict) -> Dict:
+    """Il riquadro riportato nel sistema di NF, ribaltandolo attorno al rettangolo ecografico.
+
+    Non attorno al centro dell'immagine: a ribaltarsi e' l'immagine ecografica, e il marker
+    sta dentro di lei. La trasformazione e' la sua stessa inversa, quindi la stessa funzione
+    riporta indietro.
+    """
+    top, left = float(box["top"]), float(box["left"])
+    bottom, right = float(box["bottom"]), float(box["right"])
+    if gruppo in ("LR", "LRUD"):
+        left, right = rect["left"] + rect["right"] - right, rect["left"] + rect["right"] - left
+    if gruppo in ("UD", "LRUD"):
+        top, bottom = rect["top"] + rect["bottom"] - bottom, rect["top"] + rect["bottom"] - top
+    return {"top": int(round(top)), "left": int(round(left)),
+            "bottom": int(round(bottom)), "right": int(round(right))}
+
+
+# Sotto questa larghezza un buco non puo' contenere un marker: e' il gioco di qualche pixel
+# fra un envelope e l'altro, non un marker che manca.
+BUCO_MINIMO_PX = 10
+
+
+def _lato_nel_suo_sistema(lato: str, gruppo: str) -> str:
+    """Il lato visto dal gruppo: ribaltando, sinistra e destra si scambiano."""
+    if gruppo in ("LR", "LRUD"):
+        lato = {"left": "right", "right": "left"}.get(lato, lato)
+    if gruppo in ("UD", "LRUD"):
+        lato = {"top": "bottom", "bottom": "top"}.get(lato, lato)
+    return lato
+
+
+def _specularita_envelope(project: Project, value: Optional[Dict] = None) -> Dict:
+    """I quattro envelope confrontati fra loro, e lo spazio che manca a ciascuno.
+
+    I quattro orientamenti sono la stessa scena ribaltata, quindi i quattro envelope devono
+    essere l'uno lo specchio dell'altro. Se uno e' piu' corto degli altri, non e' che il
+    marker li' non ci va: e' che in quello spazio non e' ancora stato trovato. Ed e' lo
+    spazio dove cercarlo.
+
+    Su `prova del 9`: riportati tutti nel sistema di NF i quattro coprono 334..726, ma LR
+    arriva solo a 376 e UD a 377 - quarantadue pixel che a NF ci sono e a loro no, con NF
+    che ha 59 marker contro i 26 di UD.
+    """
+    stored = value if value is not None else project.step_value("orientation")
+    envelopes = stored.get("groups") or {}
+    rect = _final_rect(project)
+    if not rect or len(envelopes) < 2:
+        return {}
+    nel_nf = {g: _nel_sistema_di_nf(b, g, rect)
+              for g, b in envelopes.items()
+              if all(k in b for k in ("top", "left", "bottom", "right"))}
+    if len(nel_nf) < 2:
+        return {}
+    atteso_nf = {
+        "top": min(b["top"] for b in nel_nf.values()),
+        "left": min(b["left"] for b in nel_nf.values()),
+        "bottom": max(b["bottom"] for b in nel_nf.values()),
+        "right": max(b["right"] for b in nel_nf.values()),
+    }
+    per_gruppo: Dict[str, Dict] = {}
+    for gruppo, suo_nf in nel_nf.items():
+        manca = {
+            "left": suo_nf["left"] - atteso_nf["left"],
+            "right": atteso_nf["right"] - suo_nf["right"],
+            "top": suo_nf["top"] - atteso_nf["top"],
+            "bottom": atteso_nf["bottom"] - suo_nf["bottom"],
+        }
+        # I buchi, ancora nel sistema di NF: una striscia per lato che manca davvero.
+        buchi_nf = []
+        if manca["left"] >= BUCO_MINIMO_PX:
+            buchi_nf.append({"top": atteso_nf["top"], "bottom": atteso_nf["bottom"],
+                             "left": atteso_nf["left"], "right": suo_nf["left"],
+                             "side": "left"})
+        if manca["right"] >= BUCO_MINIMO_PX:
+            buchi_nf.append({"top": atteso_nf["top"], "bottom": atteso_nf["bottom"],
+                             "left": suo_nf["right"], "right": atteso_nf["right"],
+                             "side": "right"})
+        if manca["top"] >= BUCO_MINIMO_PX:
+            buchi_nf.append({"top": atteso_nf["top"], "bottom": suo_nf["top"],
+                             "left": atteso_nf["left"], "right": atteso_nf["right"],
+                             "side": "top"})
+        if manca["bottom"] >= BUCO_MINIMO_PX:
+            buchi_nf.append({"top": suo_nf["bottom"], "bottom": atteso_nf["bottom"],
+                             "left": atteso_nf["left"], "right": atteso_nf["right"],
+                             "side": "bottom"})
+        # I lati vanno detti nel sistema del gruppo, non in quello di NF: a LR manca a
+        # destra quello che nel sistema di NF e' a sinistra, e leggere «a sinistra» accanto
+        # a un riquadro che sta a destra fa dubitare del conto, non del proprio occhio.
+        suo = dict(manca)
+        if gruppo in ("LR", "LRUD"):
+            suo["left"], suo["right"] = manca["right"], manca["left"]
+        if gruppo in ("UD", "LRUD"):
+            suo["top"], suo["bottom"] = manca["bottom"], manca["top"]
+        per_gruppo[gruppo] = {
+            "actual": envelopes[gruppo],
+            "expected": _nel_sistema_di_nf(atteso_nf, gruppo, rect),
+            "missing_px": suo,
+            "missing_px_nf": manca,
+            "short_by": max(manca.values()),
+            "gaps_side_note": "i lati sono nel sistema di questo gruppo",
+            "markers": (envelopes[gruppo] or {}).get("markers"),
+            # I buchi riportati nel sistema del gruppo: e' li' che si cerca.
+            "gaps": [{**_nel_sistema_di_nf(b, gruppo, rect),
+                      "side": _lato_nel_suo_sistema(b["side"], gruppo)}
+                     for b in buchi_nf],
+        }
+    return {"rect": rect, "expected_nf": atteso_nf, "by_group": per_gruppo}
+
+
+def _run_cerca_nei_buchi(job_id: str, project_id: str, soglia: float) -> None:
+    """Cerca il ritaglio consegnato **solo** dentro allo spazio che manca a un envelope.
+
+    Cercare su tutto il rettangolo, su un'immagine dove il marker non si trova, vuol dire
+    trovare qualcos'altro: il rettangolo e' mezzo schermo e a soglia bassa vince sempre
+    qualcosa. Lo spazio che manca a un envelope invece e' largo quanto un marker o poco
+    piu', ed e' l'unico posto dove quel marker puo' stare - lo dice la specularita' dei
+    quattro orientamenti, non una stima.
+
+    Percio' qui la soglia si puo' abbassare: non e' «trova il massimo da qualche parte», e'
+    «guarda se in questo fazzoletto c'e' il marker».
+    """
+    try:
+        project = _project(project_id)
+        ctx = _marker_context(project)
+        stored = project.step_value("orientation")
+        specchio = _specularita_envelope(project, stored)
+        if not specchio:
+            raise ValueError("servono il rettangolo ecografico e gli envelope")
+        modello = (stored.get("folder_template") or {}).get("path") or ""
+        if not modello or not Path(modello).is_file():
+            raise ValueError("serve il ritaglio consegnato: lancia prima l'orientamento")
+        from PIL import Image  # noqa: PLC0415
+
+        with Image.open(modello) as ritaglio:
+            largo_t, alto_t = ritaglio.width, ritaglio.height
+
+        buchi = [(g, b) for g, voce in specchio["by_group"].items() for b in voce["gaps"]]
+        if not buchi:
+            _job_update(job_id, status="done", stage="fatto",
+                        result={"proposals": [], "gaps": 0,
+                                "note": "i quattro envelope si somigliano gia': non manca "
+                                        "spazio a nessuno"})
+            return
+
+        # Su quali immagini cercare: tutte quelle che non hai gia' confermato.
+        #
+        # Non solo quelle senza marker: il caso che conta di piu' e' l'immagine dove un
+        # marker **e' stato trovato**, ma altrove - su `prova del 9` NF ne ha 59 dove gli
+        # altri ne hanno 26, e quelle in piu' non sono di NF. Li' il punteggio e' alto e
+        # un filtro «sotto soglia» le lascerebbe fuori proprio tutte.
+        corrente = {}
+        for gruppo, elenco in _envelope_contributors(project, stored).items():
+            for riga in elenco:
+                corrente[riga["name"]] = {**riga, "group": gruppo}
+        confermate = set(stored.get("confirmed") or {})
+        probe_folder = project.dedup_link_dir() or ctx["folder"]
+        candidati = [
+            percorso for percorso in scan_folder(probe_folder)
+            if not re.search(MARKER_EXCLUDED, str(percorso), re.IGNORECASE)
+            and _nome_relativo(percorso, probe_folder) not in confermate
+        ]
+        if not candidati:
+            _job_update(job_id, status="done", stage="fatto",
+                        result={"proposals": [], "gaps": len(buchi),
+                                "note": "le hai confermate tutte: non c'e' niente da cercare"})
+            return
+
+        proposte: List[Dict] = []
+        for indice, (gruppo, buco) in enumerate(buchi):
+            # Il buco si allarga di un marker per lato: uno che cade a cavallo del bordo
+            # deve poterci stare dentro tutto.
+            zona = {
+                "top": max(0, buco["top"] - alto_t), "left": max(0, buco["left"] - largo_t),
+                "bottom": buco["bottom"] + alto_t, "right": buco["right"] + largo_t,
+            }
+            _job_update(job_id, stage=f"cerco nello spazio che manca a {gruppo} "
+                                      f"({indice + 1} di {len(buchi)})",
+                        done=indice, total=len(buchi))
+            esito = om.match_all(
+                images=candidati, folder=probe_folder, template_path=Path(modello),
+                rect=zona, bundle_dir=ctx["bundle"], min_score=soglia, search_margin=0,
+                exclusion_rect=ctx["exclusion"],
+            )
+            for riga in (esito.get("rows") or []):
+                if not riga.get("box") or (riga.get("score") or 0) < soglia:
+                    continue
+                prima = corrente.get(riga["name"]) or {}
+                # Se il marker di adesso e' gia' in quel gruppo non c'e' niente da
+                # proporre: e' la stessa cosa, trovata di nuovo.
+                if prima.get("group") == gruppo:
+                    continue
+                # E se quello di adesso e' piu' convincente, si lascia stare: qui si
+                # recupera cio' che manca, non si mette in discussione cio' che c'e'.
+                if prima.get("box") is not None \
+                        and float(prima.get("score") or 0) > float(riga["score"]):
+                    continue
+                proposte.append({
+                    "name": riga["name"], "group": gruppo, "box": riga["box"],
+                    "score": round(float(riga["score"]), 4),
+                    "side": buco.get("side", ""),
+                    "group_before": prima.get("group") or "",
+                    "score_before": prima.get("score"),
+                })
+        # Una immagine sola per proposta: se e' comparsa in due buchi vince il punteggio.
+        migliori: Dict[str, Dict] = {}
+        for voce in proposte:
+            vecchia = migliori.get(voce["name"])
+            if vecchia is None or voce["score"] > vecchia["score"]:
+                migliori[voce["name"]] = voce
+        elenco = sorted(migliori.values(), key=lambda v: -v["score"])
+
+        def mutate(_p: Project, value: Dict) -> Dict:
+            value["gap_proposals"] = elenco
+            return value
+
+        _write_orientation(project_id, mutate)
+        # Non trovare niente non e' un fallimento: e' una risposta. Se nello spazio che
+        # manca a un envelope, su tutte le immagini della cartella, il marker non c'e',
+        # allora non e' che non e' stato trovato - e' che quelle acquisizioni non ci sono.
+        senza = (f"cercato su {len(candidati)} immagini dentro allo spazio che manca: "
+                 f"il marker non c'e'. Quelle acquisizioni mancano dalla cartella, "
+                 f"non sono state perse dal modulo.") if not elenco else ""
+        _job_update(job_id, status="done", stage="fatto",
+                    result={"proposals": elenco, "gaps": len(buchi),
+                            "images": len(candidati), "threshold": soglia,
+                            "note": senza})
+    except Exception as error:  # noqa: BLE001
+        _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
+@app.post("/api/projects/<project_id>/orientation/gaps")
+def api_orientation_gaps(project_id: str):
+    """Cerca i marker mancanti nello spazio che manca agli envelope piu' corti."""
+    _project(project_id)
+    soglia = float(_payload().get("min_score") or 0.45)
+    return jsonify({"job_id": _start_job(_run_cerca_nei_buchi, project_id, soglia)})
+
+
+@app.get("/api/projects/<project_id>/orientation/mirror")
+def api_orientation_mirror(project_id: str):
+    """Quanto i quattro envelope si somigliano, e dove uno e' piu' corto degli altri."""
+    project = _project(project_id)
+    esito = _specularita_envelope(project)
+    if not esito:
+        return jsonify({"by_group": {}, "reason": "servono il rettangolo e almeno due envelope"})
+    return jsonify(esito)
+
+
 @app.post("/api/projects/<project_id>/orientation/confirm")
 def api_orientation_confirm(project_id: str):
     """«Questa immagine l'ho guardata e va bene»: una conferma, non una correzione.
