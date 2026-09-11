@@ -42,6 +42,19 @@ def scan_folder(folder: Path) -> List[Path]:
     return frames or images
 
 
+# Di quanto si allarga il riquadro dell'ora prima di coprirlo.
+#
+# Il riquadro arriva da un riconoscimento, e un riconoscimento sta stretto: su
+# `prova del 9` l'orologio e' largo fino a x=1511 e il riquadro si ferma a 1509. Due
+# colonne della cifra dei secondi restavano fuori dalla maschera - otto pixel - e otto
+# pixel bastano a far sembrare diversi due fotogrammi che differiscono solo per l'ora,
+# che e' esattamente cio' che questa funzione esiste per evitare.
+#
+# Allargare non costa niente: attorno all'orologio c'e' sfondo, e coprirne un pelo in piu'
+# non nasconde nient'altro. Sbagliare per difetto invece disfa tutta la passata.
+MARGINE_OROLOGIO_PX = 4
+
+
 def _masked_digest(path: Path, mask: Optional[Dict]) -> Optional[str]:
     """The image hashed with one rectangle blanked out.
 
@@ -56,9 +69,13 @@ def _masked_digest(path: Path, mask: Optional[Dict]) -> Optional[str]:
         with Image.open(path) as raw:
             image = raw.convert("RGB")
             if mask:
+                margine = MARGINE_OROLOGIO_PX
+                larghezza, altezza = image.size
                 ImageDraw.Draw(image).rectangle(
-                    [int(mask["left"]), int(mask["top"]),
-                     int(mask["right"]), int(mask["bottom"])],
+                    [max(0, int(mask["left"]) - margine),
+                     max(0, int(mask["top"]) - margine),
+                     min(larghezza - 1, int(mask["right"]) + margine),
+                     min(altezza - 1, int(mask["bottom"]) + margine)],
                     fill=(0, 0, 0),
                 )
             return f"{image.size[0]}x{image.size[1]}:" + hashlib.sha1(image.tobytes()).hexdigest()
