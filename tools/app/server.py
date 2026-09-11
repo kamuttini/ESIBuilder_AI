@@ -3910,28 +3910,32 @@ def _firma_ecografia(percorso: Path, rect: Dict, lato: int = LATO_FIRMA):
         return np.asarray(dentro.resize((lato, lato), Image.BOX), dtype=np.float32)
 
 
-def _differenza_fuori(a: Path, b: Path, rect: Dict, ora: Optional[Dict]) -> int:
-    """Quanti pixel cambiano **fuori** dall'ecografia, tolto l'orologio.
+def _impronta_interfaccia(percorso: Path, rect: Dict, ora: Optional[Dict]) -> str:
+    """L'impronta di tutto **tranne** l'ecografia e l'orologio: l'interfaccia.
 
     E' la domanda che separa «lo stesso fotogramma due volte» da «un'altra impostazione»:
-    se l'interfaccia e' diversa, per quanto simile sia l'ecografia quelle due immagini
-    raccontano due cose diverse e non sono doppioni.
+    se sul pannello cambia anche solo la depth, per quanto simile sia l'ecografia quelle
+    due immagini raccontano due cose diverse e non sono doppioni.
+
+    Un'impronta per immagine, non un confronto per coppia. Confrontare a coppie costava
+    due decodifiche a piena risoluzione per ogni coppia, quindi si poteva farlo solo sulle
+    prime - e le coppie oltre quelle passavano **senza** controllo, cioe' proprio dove
+    l'errore non si vedeva. Cosi' invece il controllo c'e' su tutte, e costa niente: due
+    immagini con la stessa interfaccia hanno la stessa impronta, punto.
     """
     from PIL import Image  # noqa: PLC0415
     import numpy as np  # noqa: PLC0415
 
-    with Image.open(a) as ia, Image.open(b) as ib:
-        xa = np.asarray(ia.convert("L"), dtype=np.int16)
-        xb = np.asarray(ib.convert("L"), dtype=np.int16)
-    if xa.shape != xb.shape:
-        return xa.size
-    d = np.abs(xa - xb) > 0
-    d[int(rect["top"]):int(rect["bottom"]) + 1, int(rect["left"]):int(rect["right"]) + 1] = False
+    with Image.open(percorso) as raw:
+        griglia = np.asarray(raw.convert("L"))
+    fuori = griglia.copy()
+    fuori[int(rect["top"]):int(rect["bottom"]) + 1,
+          int(rect["left"]):int(rect["right"]) + 1] = 0
     if ora:
         m = MARGINE_OROLOGIO_PX
-        d[max(0, int(ora["top"]) - m):int(ora["bottom"]) + 1 + m,
-          max(0, int(ora["left"]) - m):int(ora["right"]) + 1 + m] = False
-    return int(d.sum())
+        fuori[max(0, int(ora["top"]) - m):int(ora["bottom"]) + 1 + m,
+              max(0, int(ora["left"]) - m):int(ora["right"]) + 1 + m] = 0
+    return hashlib.sha1(fuori.tobytes()).hexdigest()
 
 
 def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
@@ -3950,32 +3954,36 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
         ora = (project.step_value("import") or {}).get("timestamp_box")
 
         firme = {}
+        interfacce: Dict[str, str] = {}
         for indice, nome in enumerate(nomi):
             if indice % 10 == 0:
                 _job_update(job_id, stage=f"leggo le immagini ({indice} di {len(nomi)})",
                             done=indice, total=len(nomi))
             try:
                 firme[nome] = _firma_ecografia(cartella / nome, rect)
+                interfacce[nome] = _impronta_interfaccia(cartella / nome, rect, ora)
             except Exception:  # noqa: BLE001 - un file illeggibile non e' un doppione
+                firme.pop(nome, None)
                 continue
 
-        _job_update(job_id, stage="confronto tutte le coppie", done=0, total=0)
-        vivi = list(firme)
+        # Si confrontano solo fotogrammi con la **stessa interfaccia**: stessa depth, stessi
+        # parametri, stessi pulsanti. Se il pannello cambia sono due impostazioni diverse, e
+        # per quanto si somigli l'ecografia non sono lo stesso fotogramma.
+        _job_update(job_id, stage="confronto le coppie con la stessa interfaccia",
+                    done=0, total=0)
+        per_interfaccia: Dict[str, List[str]] = {}
+        for nome, impronta in interfacce.items():
+            if nome in firme:
+                per_interfaccia.setdefault(impronta, []).append(nome)
         coppie = []
-        for i, a in enumerate(vivi):
-            for b in vivi[i + 1:]:
-                scarto = float(np.abs(firme[a] - firme[b]).mean())
-                if scarto <= soglia:
-                    coppie.append({"a": a, "b": b, "diff": round(scarto, 4)})
+        for compagni in per_interfaccia.values():
+            for i, a in enumerate(sorted(compagni)):
+                for b in sorted(compagni)[i + 1:]:
+                    scarto = float(np.abs(firme[a] - firme[b]).mean())
+                    if scarto <= soglia:
+                        coppie.append({"a": a, "b": b, "diff": round(scarto, 4),
+                                       "outside_px": 0})
         coppie.sort(key=lambda c: c["diff"])
-
-        # Solo sulle coppie candidate si paga il confronto a piena risoluzione: e' quello
-        # che dice se anche l'interfaccia e' la stessa.
-        for indice, c in enumerate(coppie[:400]):
-            if indice % 10 == 0:
-                _job_update(job_id, stage=f"controllo l'interfaccia ({indice} di {len(coppie)})",
-                            done=indice, total=len(coppie))
-            c["outside_px"] = _differenza_fuori(cartella / c["a"], cartella / c["b"], rect, ora)
 
         # Gruppi: se A somiglia a B e B a C, sono tre scatti della stessa cosa e si
         # guardano insieme - scartarne due a coppie sarebbe lo stesso lavoro fatto due volte.
@@ -3988,9 +3996,9 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
                 x = padre[x]
             return x
 
+        # Le coppie arrivano gia' filtrate per interfaccia: si confrontano solo fotogrammi
+        # che sul pannello dicono la stessa cosa, quindi qui non c'e' altro da escludere.
         for c in coppie:
-            if c.get("outside_px", 0) != 0:
-                continue
             ra, rb = radice(c["a"]), radice(c["b"])
             if ra != rb:
                 padre[rb] = ra
@@ -4002,8 +4010,7 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
             if len(membri) < 2:
                 continue
             membri = sorted(membri)
-            dentro = [c for c in coppie
-                      if c["a"] in membri and c["b"] in membri and c.get("outside_px", 0) == 0]
+            dentro = [c for c in coppie if c["a"] in membri and c["b"] in membri]
             elenco.append({
                 "keep": membri[0], "drop": membri[1:], "names": membri,
                 "max_diff": round(max((c["diff"] for c in dentro), default=0.0), 4),
