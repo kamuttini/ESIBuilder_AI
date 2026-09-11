@@ -44,12 +44,25 @@ async function createOrientationViewer(projectId, sampleSize) {
     { key: '', label: 'tutte' },
     ...Object.keys(GROUP_COLORS).map((group) => ({ key: group, label: group })),
     { key: 'REVIEW', label: 'da rivedere' },
+    { key: 'DACONF', label: 'da confermare' },
+    { key: 'CONFERMATE', label: 'confermate' },
     { key: 'NESSUNO', label: 'senza orientamento' },
     { key: 'ESCLUSE', label: 'escluse dal modulo' },
   ];
   let filter = '';
-  const matches = (name) =>
-    !filter || (filter === 'REVIEW' ? inReview(name) : groupOf(name) === filter);
+  const confermata = (name) => !!(byName.get(name) || {}).confirmed;
+  // Da confermare: ha un marker (c'e' qualcosa da guardare) e non l'hai ancora guardato.
+  const daConfermare = (name) => {
+    const row = byName.get(name) || {};
+    return !!row.box && !row.confirmed && !row.refused;
+  };
+  const matches = (name) => {
+    if (!filter) return true;
+    if (filter === 'REVIEW') return inReview(name);
+    if (filter === 'CONFERMATE') return confermata(name);
+    if (filter === 'DACONF') return daConfermare(name);
+    return groupOf(name) === filter;
+  };
 
   /* L'ordinamento per confidenza vale dentro il filtro: prima si scegle il gruppo, poi si
      guardano i suoi casi peggiori. Le immagini senza punteggio restano in fondo in ogni caso:
@@ -263,8 +276,61 @@ async function createOrientationViewer(projectId, sampleSize) {
     image.src = `/api/projects/${projectId}/image?name=${encodeURIComponent(names[index])}&w=980`;
     paint();
     paintCrop();
+    renderConferma();
     if (compareRefresh) compareRefresh();
   };
+
+  /* «Va bene»: la conferma per immagine.
+
+     Scorrendo la cartella la maggior parte delle immagini e' gia' giusta, e passare oltre
+     non lasciava traccia - al giro dopo non si sapeva piu' quali erano state guardate, e
+     soprattutto un giro successivo, lanciato per un'altra immagine, le ricalcolava tutte.
+     Segnarle come «corrette» sarebbe una bugia: il modulo non ha sbagliato. Quindi
+     conferma, che vale per quel riquadro li' e decade se lo correggi. */
+  const okButton = el('button', {}, 'Va bene, avanti');
+  const okNota = el('span', { class: 'hint' });
+  const renderConferma = () => {
+    const riga = byName.get(names[index]) || {};
+    const gia = !!riga.confirmed;
+    okButton.textContent = gia ? 'Confermata — togli la conferma' : 'Va bene, avanti';
+    okButton.className = gia ? 'ghost' : '';
+    okButton.disabled = !riga.box && !gia;
+    const restano = names.filter(daConfermare).length;
+    okNota.textContent = gia
+      ? `confermata${riga.confirmed_at ? ` il ${riga.confirmed_at.replace('T', ' alle ')}` : ''}`
+      : (riga.box ? `ne restano ${restano} da confermare` : 'qui non c\'e\' un marker da confermare');
+  };
+  okButton.addEventListener('click', async () => {
+    const target = names[index];
+    const gia = !!(byName.get(target) || {}).confirmed;
+    okButton.disabled = true;
+    try {
+      const esito = await api(`/projects/${projectId}/orientation/confirm`,
+        { body: gia ? { name: target, reset: true } : { name: target } });
+      if (!gia && (esito.skipped || []).length) {
+        toast(esito.reason || 'niente da confermare', true);
+        renderConferma();
+        return;
+      }
+      const riga = byName.get(target) || { name: target };
+      byName.set(target, { ...riga, confirmed: !gia,
+                           confirmed_at: gia ? '' : new Date().toISOString().slice(0, 19) });
+      data.confirmed = esito.count;
+      updateChips();
+      renderList();
+      if (gia) { renderConferma(); return; }
+      // Si va alla prossima da guardare, non alla prossima e basta: e' il gesto della
+      // revisione - guardo, confermo, la prossima.
+      const lista = visible();
+      const dopo = lista.slice(lista.indexOf(target) + 1).find(daConfermare)
+        || lista.find(daConfermare);
+      if (dopo && dopo !== target) { index = names.indexOf(dopo); show(); }
+      else { renderConferma(); toast('non ne restano da confermare'); }
+    } catch (errore) {
+      toast(errore.message, true);
+      renderConferma();
+    }
+  });
   const step = (delta) => {
     const list = visible();
     if (!list.length) return;
@@ -488,6 +554,11 @@ async function createOrientationViewer(projectId, sampleSize) {
           (last.crossed_count ? `, di cui ${last.crossed_count} risalite sopra soglia` : '')
         : 'nessuna: le altre erano gia\' agganciate meglio'],
       ['peggiorate', last.worsened_count ? `${last.worsened_count} immagini` : 'nessuna'],
+      // Quante non sono state rifatte perche' erano gia' confermate: e' il motivo per cui
+      // una revisione lunga non ricomincia da capo a ogni correzione.
+      ['rifatte / gia\' confermate',
+        `${last.reprocessed != null ? last.reprocessed : '—'}`
+        + (last.confirmed_kept ? ` · ${last.confirmed_kept} lasciate come le hai confermate` : '')],
       ['copertura della cartella', pct(last.coverage)],
       ['ritaglio consegnato', last.promoted
         ? `promosso ${last.promoted} (${(last.template_size || []).join('x')} px)`
@@ -1447,9 +1518,13 @@ async function createOrientationViewer(projectId, sampleSize) {
   /* I filtri sono pastiglie con il conto, e il conto si rifa' dopo ogni correzione: un
      numero fermo su "da rivedere" sarebbe una bugia. */
   const filterRow = el('div', { class: 'ov-chips' });
-  const chipCount = (key) => (!key
-    ? names.length
-    : names.filter((name) => (key === 'REVIEW' ? inReview(name) : groupOf(name) === key)).length);
+  const chipCount = (key) => {
+    if (!key) return names.length;
+    if (key === 'REVIEW') return names.filter(inReview).length;
+    if (key === 'CONFERMATE') return names.filter(confermata).length;
+    if (key === 'DACONF') return names.filter(daConfermare).length;
+    return names.filter((name) => groupOf(name) === key).length;
+  };
   const updateChips = () => {
     for (const [button, key] of filterButtons) {
       const count = chipCount(key);
@@ -1493,6 +1568,7 @@ async function createOrientationViewer(projectId, sampleSize) {
   };
 
   const fixBar = el('div', { class: 'ov-actions' },
+    okButton, okNota,
     fixButton,
     el('label', { class: 'serie', title: 'il marker viene cercato solo dentro a questo raggio dal punto che indichi' },
       el('span', {}, 'raggio'), raggioInput, el('span', {}, 'px')),

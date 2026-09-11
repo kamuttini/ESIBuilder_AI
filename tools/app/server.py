@@ -2397,6 +2397,19 @@ def api_orientation(project_id: str):
     for row in per_image:
         if row.get("name") in rifiutate:
             row["refused"] = True
+    # Le confermate: il riquadro e' quello che hai approvato tu, e i giri successivi non lo
+    # rifanno. Va detto riga per riga, o non si sa piu' cosa resta da guardare.
+    conferme = stored.get("confirmed") or {}
+    for row in per_image:
+        voce = conferme.get(row.get("name"))
+        if not voce:
+            continue
+        row["confirmed"] = True
+        row["confirmed_at"] = voce.get("at") or ""
+        if voce.get("box"):
+            row["box"] = voce["box"]
+        if voce.get("group"):
+            row["group"] = voce["group"]
     # Chi non entra negli envelope perche' da' torto a una correzione: si vede, e si puo'
     # sempre correggere anche quella immagine. Tacerlo vorrebbe dire far sparire venti
     # detection senza dire perche'.
@@ -2416,6 +2429,7 @@ def api_orientation(project_id: str):
     return jsonify(
         {
             "envelopes": envelopes,
+            "confirmed": len(conferme),
             "corrections": len(corrections),
             "corrections_detail": [
                 {"name": name, **{k: v for k, v in fixed.items() if k != "note"}}
@@ -2767,6 +2781,11 @@ def _save_correction(project_id: str, name: str, refined: Dict) -> Dict:
             "ts": datetime.now().isoformat(timespec="seconds"),
         }
         value["corrections"] = corrections
+        # Correggere un'immagine che avevi confermato vuol dire che hai cambiato idea: la
+        # conferma di prima parlava del riquadro vecchio e non vale piu'.
+        conferme = dict(value.get("confirmed") or {})
+        if conferme.pop(name, None) is not None:
+            value["confirmed"] = conferme
         # Gruppo dell'immagine ed envelope si ricalcolano ora: sono minimi e massimi su
         # dei box, costano microsecondi. Il resto lo fa la rielaborazione in background.
         rebuilt = _rebuild_orientation(project, value)
@@ -2780,6 +2799,14 @@ def _save_correction(project_id: str, name: str, refined: Dict) -> Dict:
         return value
 
     return _write_orientation(project_id, mutate)
+
+
+def _nome_relativo(percorso: Path, base: Path) -> str:
+    """Il nome con cui l'immagine e' conosciuta: relativo alla cartella di lavoro."""
+    try:
+        return str(Path(percorso).relative_to(base))
+    except ValueError:
+        return Path(percorso).name
 
 
 def _consolidate_marker(project_id: str, progress) -> Dict:
@@ -2865,6 +2892,12 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
         }
         for row in (validation.get("rows") or [])
     }
+    # La validazione misura la copertura su tutta la cartella - e' una misura, non un
+    # cambiamento - ma quello che scrive nelle righe delle confermate non deve vincere.
+    for nome, voce in (stored.get("confirmed") or {}).items():
+        if voce.get("box") and voce.get("group"):
+            after_rows[nome] = {"score": voce.get("score"), "group": voce["group"],
+                                "box": voce["box"], "template": "confermata"}
 
     # --- UN MARKER SOLO PER TUTTE LE IMMAGINI ---------------------------------
     # Alla gara dei ritagli partecipano il consegnato e quelli nati dalle correzioni: serve
@@ -2872,11 +2905,18 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
     # deve tornare a essere uno: quello promosso, cercato su tutte le immagini. Se gli
     # envelope li facessero i ritagli mescolati, descriverebbero dove stanno glifi diversi -
     # e ESI di ritagli ne usa uno.
+    # Le immagini gia' confermate restano fuori dal giro: non c'e' niente da ricalcolare
+    # su quello che hai gia' guardato, e ricalcolarlo vorrebbe dire poterlo cambiare.
+    conferme = dict(stored.get("confirmed") or {})
+    da_rifare = [p for p in useful
+                 if _nome_relativo(p, probe_folder) not in conferme]
+    saltate = len(useful) - len(da_rifare)
+
     consegnate: Dict[str, Dict] = {}
     if template_info.get("path") and Path(template_info["path"]).is_file():
-        progress("ricerco il ritaglio consegnato su tutte le immagini", 0, len(useful))
+        progress("ricerco il ritaglio consegnato su tutte le immagini", 0, len(da_rifare))
         finale = om.match_all(
-            images=useful, folder=probe_folder,
+            images=da_rifare, folder=probe_folder,
             template_path=Path(template_info["path"]), rect=ctx["rect"],
             bundle_dir=ctx["bundle"], min_score=min_score, search_margin=60,
             exclusion_rect=ctx["exclusion"],
@@ -2888,6 +2928,12 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
             for row in (finale.get("rows") or [])
             if row.get("box") and (row.get("score") or 0) >= min_score
         }
+        # Le confermate rientrano con quello che avevi confermato: fuori dal giro, ma non
+        # fuori dal risultato - se sparissero, sparirebbero anche dai loro envelope.
+        for nome, voce in conferme.items():
+            if voce.get("box") and voce.get("group"):
+                consegnate[nome] = {"score": voce.get("score"), "group": voce["group"],
+                                    "box": voce["box"]}
 
     def mutate(project: Project, value: Dict) -> Dict:
         # Una correzione arrivata mentre giravamo non era in gara: il suo punteggio resta
@@ -2941,6 +2987,10 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
     return {
         "corrections": len(corrections),
         "hints": len(hints),
+        # Quante non sono state rifatte perche' le avevi gia' confermate: e' la misura di
+        # quanto la revisione si sta accumulando invece di ricominciare ogni volta.
+        "confirmed_kept": saltate,
+        "reprocessed": len(da_rifare),
         "threshold": min_score,
         "review_before": sum(1 for r in before_rows.values() if (r.get("score") or -1) < min_score),
         "review_after": sum(1 for r in after_rows.values() if (r.get("score") or -1) < min_score),
@@ -3399,6 +3449,20 @@ def _envelope_contributors(project: Project, value: Dict) -> Dict[str, List[Dict
     # dentro tengono aperto un envelope - a volte un gruppo intero - che non esiste.
     for nome in (value.get("refused") or {}):
         per_name.pop(nome, None)
+    # Le immagini confermate restano dove le ha viste lei.
+    #
+    # Confermare non e' correggere: il modulo non aveva sbagliato, e segnarle come corrette
+    # direbbe il falso. Ma una volta guardate non devono piu' muoversi da sole: un giro
+    # successivo - fatto per un'altra immagine - le ricalcolava, e quello che era stato
+    # confermato poteva cambiare senza che nessuno lo dicesse. Il riquadro confermato e'
+    # quello, e resta quello finche' non lo corregge lei.
+    for nome, voce in (value.get("confirmed") or {}).items():
+        if voce.get("box") and voce.get("group"):
+            per_name[nome] = {
+                "name": nome, "group": voce["group"], "box": voce["box"],
+                "score": voce.get("score"), "source": "confermata da te",
+                "confirmed": True,
+            }
     correzioni = {
         nome: fix for nome, fix in (value.get("corrections") or {}).items()
         if fix.get("box") and fix.get("group")
@@ -4051,6 +4115,9 @@ def api_orientation_correct(project_id: str):
             "ts": payload.get("ts") or datetime.now().isoformat(timespec="seconds"),
         }
         value["corrections"] = corrections
+        conferme = dict(value.get("confirmed") or {})
+        if conferme.pop(name, None) is not None:
+            value["confirmed"] = conferme
         rebuilt = _rebuild_orientation(project, value)
         value = _fill_blocks(value, rebuilt["groups"])
         rows = dict(value.get("validation_rows") or {})
@@ -4074,6 +4141,66 @@ def api_orientation_correct(project_id: str):
             "background": _schedule_consolidation(project_id),
         }
     )
+
+
+@app.post("/api/projects/<project_id>/orientation/confirm")
+def api_orientation_confirm(project_id: str):
+    """«Questa immagine l'ho guardata e va bene»: una conferma, non una correzione.
+
+    E' la differenza fra «il modulo ha sbagliato quattrocento volte» e «quattrocento le ho
+    controllate io»: segnarle come corrette sarebbe una bugia, lasciarle com'erano vuol
+    dire non sapere piu', al giro dopo, quali erano gia' state guardate.
+
+    E serve a una cosa concreta: un giro successivo - lanciato per un'altra immagine -
+    ricalcolava anche queste, e quello che era stato confermato poteva cambiare senza che
+    nessuno lo dicesse. Da qui in poi il riquadro confermato e' quello, e il modulo rifa'
+    solo le immagini che non hai ancora guardato.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    nomi = [str(n).strip() for n in (payload.get("names") or []) if str(n).strip()]
+    if not nomi:
+        uno = (payload.get("name") or "").strip()
+        nomi = [uno] if uno else []
+    if not nomi:
+        return jsonify({"error": "manca l'immagine"}), 400
+
+    # Cosa si conferma: quello che e' a schermo adesso, cioe' la riga effettiva - il
+    # ritaglio consegnato, o la correzione se c'e'.
+    stored = project.step_value("orientation")
+    righe: Dict[str, Dict] = {}
+    for gruppo, elenco in _envelope_contributors(project, stored).items():
+        for riga in elenco:
+            righe[riga["name"]] = {**riga, "group": gruppo}
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        conferme = dict(value.get("confirmed") or {})
+        if payload.get("reset"):
+            for nome in nomi:
+                conferme.pop(nome, None)
+        else:
+            adesso = datetime.now().isoformat(timespec="seconds")
+            for nome in nomi:
+                riga = righe.get(nome)
+                if not riga or not riga.get("box") or not riga.get("group"):
+                    continue
+                conferme[nome] = {
+                    "group": riga["group"], "box": riga["box"],
+                    "score": riga.get("score"), "at": adesso,
+                }
+        value["confirmed"] = conferme
+        return value
+
+    valore = _write_orientation(project_id, mutate)
+    conferme = valore.get("confirmed") or {}
+    senza = [n for n in nomi if n not in conferme] if not payload.get("reset") else []
+    return jsonify({
+        "confirmed": sorted(conferme),
+        "count": len(conferme),
+        "skipped": senza,
+        "reason": ("queste immagini non hanno un marker da confermare: correggile prima"
+                   if senza else ""),
+    })
 
 
 @app.post("/api/projects/<project_id>/orientation/correction/delete")
@@ -4321,6 +4448,9 @@ def _groups_of_images(project: Project) -> Dict[str, str]:
         for name, row in (value.get(sorgente) or {}).items():
             if row.get("group"):
                 out[name] = row["group"]
+    for name, voce in (value.get("confirmed") or {}).items():
+        if voce.get("group"):
+            out[name] = voce["group"]
     for name, fixed in (value.get("corrections") or {}).items():
         if fixed.get("group"):
             out[name] = fixed["group"]
