@@ -124,6 +124,8 @@ async function openProject(projectId) {
   state.advancedStages = data.advanced_stages || { ready: true, blocked_reason: '' };
   state.splitPending = data.split_pending || null;
   state.splitOther = data.split_other || null;
+  state.staleAfterImages = data.stale_after_images || [];
+  state.imagesChangedAt = data.images_changed_at || '';
   state.rotationImages = data.rotation_images || [];
   state.fssPath = data.fss_path;
   $('#project-select').value = projectId;
@@ -244,7 +246,30 @@ function renderPanel() {
   panel.append(el('p', { class: 'hint' },
     `pagina legacy: ${step.legacy_page}${lines} · stato: ${step.status}` +
     (step.relevant ? '' : ' · non applicabile a questa sonda')));
+  avvisoImmaginiCambiate(panel, state.step);
   (PANELS[state.step] || panelGeneric)(panel, step);
+}
+
+
+/* «Questo calcolo e' di prima che togliessi delle immagini».
+
+   Escludere un'immagine non disfa i calcoli gia' fatti, e non deve: dentro ci sono le
+   conferme e le correzioni, e buttarle via perche' e' stata tolta una miniatura sarebbe un
+   danno molto piu' grande del problema. Gli envelope dell'orientamento si rifanno da soli -
+   sono minimi e massimi su riquadri gia' noti, costano microsecondi - ma le corde del
+   rettangolo, le righe della scala e le letture della depth vanno rimisurate sulle
+   immagini, e non si puo' farlo di nascosto.
+
+   Quindi si dice, nella sezione che riguarda, con la data. Rilanciare e' una sua scelta. */
+function avvisoImmaginiCambiate(panel, stepId) {
+  const indietro = state.staleAfterImages || [];
+  if (!indietro.includes(stepId)) return;
+  const quando = (state.imagesChangedAt || '').replace('T', ' alle ');
+  panel.append(el('p', { class: 'avviso' },
+    `questo calcolo e' di prima che l'elenco delle immagini cambiasse${quando ? ` (${quando})` : ''}: `
+    + 'dentro c\'e\' ancora il contributo di immagini che il progetto non ha piu\'. '
+    + 'Le tue conferme e correzioni non si toccano — rilancia il modulo quando vuoi, e '
+    + 'saranno rimisurate solo le immagini di adesso.'));
 }
 
 function field(label, value, onInput, type = 'text') {

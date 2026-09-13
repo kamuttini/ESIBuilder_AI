@@ -1459,6 +1459,10 @@ def api_project(project_id: str):
             # dire dove sono finite le immagini che qui non ci sono piu'. Senza, il conto
             # «trovate 266, tenute 115» non torna e sembra che se ne siano perse cento.
             "split_other": _altro_piano(project),
+            # Gli step che hanno misurato prima dell'ultimo cambio all'elenco delle
+            # immagini: hanno dentro il contributo di immagini che non ci sono piu'.
+            "stale_after_images": _da_rifare_dopo_le_immagini(project),
+            "images_changed_at": (project.step_value("import") or {}).get("images_changed_at") or "",
             # La selezione della rotazione mostra solo un lotto: non si trasferiscono migliaia
             # di nomi nel JSON di ogni refresh, ma si puo' comunque correggere una o piu'
             # immagini alla volta (le altre si raggiungono dalla cartella).
@@ -4177,6 +4181,7 @@ def api_duplicates_drop(project_id: str):
         value["duplicates"] = doppi
         value["duplicates_removed"] = (value.get("duplicates_removed") or 0) + tolte
         value["images_total"] = len(restano)
+        value["images_changed_at"] = datetime.now().isoformat(timespec="seconds")
         value = _riconta_piani(value, restano)
         # Le proposte che restano non devono citare immagini che non ci sono piu'.
         simile = dict(value.get("similar") or {})
@@ -4191,8 +4196,53 @@ def api_duplicates_drop(project_id: str):
         return value
 
     valore = _write_step(project_id, "import", mutate, invalidate=False)
+    _dopo_aver_cambiato_le_immagini(project_id, valore.get("images_changed_at") or "")
     return jsonify({"dropped": tolte, "left": len(restano),
-                    "groups": len((valore.get("similar") or {}).get("groups") or [])})
+                    "groups": len((valore.get("similar") or {}).get("groups") or []),
+                    "recomputed": _da_rifare_dopo_le_immagini(_project(project_id))})
+
+
+def _da_rifare_dopo_le_immagini(project: Project) -> List[str]:
+    """Gli step che hanno misurato **prima** dell'ultimo cambio all'elenco delle immagini.
+
+    Non si invalidano: dentro ci sono le conferme e le correzioni di lei, e buttarle via
+    perche' e' stata tolta una miniatura sarebbe un danno molto piu' grande del problema.
+    Si dicono, e si rilanciano quando vuole.
+    """
+    quando = str((project.step_value("import") or {}).get("images_changed_at") or "")
+    if not quando:
+        return []
+    indietro = []
+    for nome in ("rect", "orientation", "depth_scale", "scale_study"):
+        stato = project.steps.get(nome) or {}
+        if str(stato.get("status") or "") in ("", "empty"):
+            continue
+        if str(stato.get("ts") or "") < quando:
+            indietro.append(nome)
+    return indietro
+
+
+def _dopo_aver_cambiato_le_immagini(project_id: str, quando: str) -> None:
+    """Rimette a posto quello che si puo' rifare subito, e segna il resto come da rifare.
+
+    Togliere un'immagine dalla cartella non disfa i calcoli gia' fatti. Gli envelope
+    dell'orientamento si rifanno qui, perche' sono minimi e massimi su riquadri gia' noti e
+    costano microsecondi - e sono quelli che finiscono nel `.fss` come riga #17, quindi
+    lasciarli con dentro il contributo di un'immagine che non c'e' piu' vorrebbe dire
+    consegnare a ESI un rettangolo disegnato attorno a qualcosa di escluso.
+
+    Le corde del rettangolo, le righe della scala e le letture della depth no: quelle
+    vanno rimisurate sulle immagini, e non si puo' farlo di nascosto mentre lei toglie una
+    miniatura. Si segna la data, e ogni sezione che ha calcolato prima lo dice.
+    """
+    progetto = _project(project_id)
+    orientamento = progetto.step_value("orientation")
+    if orientamento.get("groups"):
+        def mutate(p: Project, value: Dict) -> Dict:
+            rifatti = _rebuild_orientation(p, value)
+            return _fill_blocks(value, rifatti["groups"])
+
+        _write_orientation(project_id, mutate)
 
 
 def _riconta_piani(value: Dict, restano: Sequence[str]) -> Dict:
@@ -4257,11 +4307,14 @@ def api_duplicates_restore(project_id: str):
         value["images_total"] = len(presenti | set(tornate))
         # Rimettendole dentro tornano anche nel conto dei piani, con l'etichetta che gia'
         # avevano: la rete su di loro aveva gia' detto la sua.
+        value["images_changed_at"] = datetime.now().isoformat(timespec="seconds")
         value = _riconta_piani(value, sorted(presenti | set(tornate)))
         return value
 
-    _write_step(project_id, "import", mutate, invalidate=False)
-    return jsonify({"restored": sorted(tornate), "left": len(presenti | set(tornate))})
+    valore = _write_step(project_id, "import", mutate, invalidate=False)
+    _dopo_aver_cambiato_le_immagini(project_id, valore.get("images_changed_at") or "")
+    return jsonify({"restored": sorted(tornate), "left": len(presenti | set(tornate)),
+                    "recomputed": _da_rifare_dopo_le_immagini(_project(project_id))})
 
 
 @app.get("/api/projects/<project_id>/images")
