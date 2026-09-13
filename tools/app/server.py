@@ -200,10 +200,16 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         project.set_step("import", imported, status="proposed", source="import")
 
         project = _project(project_id)
-        images = project.dedup_images()
+        # Le schermate proibite restano nel progetto ma non entrano nelle misure: non sono
+        # campioni buoni per il vendor o per la sonda, non hanno un rettangolo ecografico, e
+        # metterle nel campione vuol dire misurare su una schermata di menu.
+        proibite = _immagini_proibite(project)
+        images = _immagini_da_misurare(project)
         picked = sample_paths(images, sample)
         if not picked:
-            raise FileNotFoundError("nessuna immagine da analizzare")
+            raise FileNotFoundError(
+                "nessuna immagine da analizzare"
+                + (f" ({len(proibite)} sono marcate proibite)" if proibite else ""))
 
         _job_update(job_id, stage="rotazione (OSD)", total=len(picked))
         rotation = ( {
@@ -238,7 +244,7 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
                 project.source["native_size"] = [altezza, larghezza]
             project.save()
             project = _project(project_id)
-            images = project.dedup_images()
+            images = _immagini_da_misurare(project)
             picked = sample_paths(images, sample)
 
         # Terza tappa: la dedup a meno dell'orologio, sullo specchio **gia' dritto**. E'
@@ -277,7 +283,7 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
                     shutil.rmtree(specchio, ignore_errors=True)
                 project.dedup_link_dir()
                 project = _project(project_id)
-                images = project.dedup_images()
+                images = _immagini_da_misurare(project)
                 picked = sample_paths(images, sample)
 
         # E quando questo progetto e' gia' un piano (dopo lo sdoppiamento), da qui in poi
@@ -298,7 +304,7 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
                     shutil.rmtree(specchio, ignore_errors=True)
                 project.dedup_link_dir()
                 project = _project(project_id)
-                images = project.dedup_images()
+                images = _immagini_da_misurare(project)
                 picked = sample_paths(images, sample)
 
         engine = _inference_engine()
@@ -558,15 +564,22 @@ def _fotogrammi_per_depth(
     ogni depth distinta, distribuite nel gruppo per non pescarle tutte dalla stessa
     acquisizione.
     """
+    proibite = _immagini_proibite(project)
+
+    def ammessa(percorso) -> bool:
+        return _nome_relativo(Path(percorso), base) not in proibite
+
     if not letture:
         # Nessuna rilettura: si resta alle righe del modulo, com'era prima.
-        percorsi = [Path(r["image_path"]) for r in righe_modulo if r.get("image_path")]
+        righe_modulo = [r for r in righe_modulo
+                        if r.get("image_path") and ammessa(r["image_path"])]
+        percorsi = [Path(r["image_path"]) for r in righe_modulo]
         return percorsi, list(righe_modulo)
 
     per_depth: Dict[float, List[str]] = {}
     for nome, lettura in sorted(letture.items()):
         valore = lettura.get("depth_mm")
-        if valore is None or valore <= 0:
+        if valore is None or valore <= 0 or nome in proibite:
             continue
         per_depth.setdefault(float(valore), []).append(nome)
 
@@ -2718,6 +2731,32 @@ _consolidation_lock = threading.Lock()
 _step_write_lock = threading.Lock()
 
 
+def _immagini_da_misurare(project: Project) -> List[Path]:
+    """Le immagini del progetto su cui i moduli possono misurare: tutte tranne le proibite."""
+    proibite = _immagini_proibite(project)
+    tutte = project.dedup_images()
+    if not proibite:
+        return tutte
+    base = project.dedup_link_dir() or project.working_dir() or Path("")
+    return [p for p in tutte if _nome_relativo(p, base) not in proibite]
+
+
+def _immagini_proibite(project: Project) -> set:
+    """Le immagini che nessun modulo deve usare.
+
+    Sono le schermate di servizio: un menu, una lista, un avviso, la macchina in pausa.
+    Non sono doppioni e non vanno tolte dal progetto - **servono ancora**, perche' da loro
+    si ritaglia il template con cui ESI imparera' a riconoscerle e a rifiutarle (riga #15).
+    Ma non devono entrare in nessuna misura: non sono campioni buoni per il vendor o la
+    sonda, non hanno un rettangolo ecografico, non hanno marker, depth ne' righello.
+
+    Il registro sta dentro allo step dell'orientamento perche' e' li' che e' nato, quando
+    serviva solo al marker. Chi lo legge pero' e' tutta la pipeline, e passa da qui: cosi'
+    il giorno che cambia posto si cambia una riga sola.
+    """
+    return _orientation_forbidden(project.step_value("orientation"))
+
+
 def _orientation_forbidden(value: Dict) -> set:
     """Nomi esclusi a mano dallo studio dell'orientamento.
 
@@ -4340,6 +4379,8 @@ def api_project_images(project_id: str):
     return jsonify({
         "names": dentro,
         "total": len(dentro),
+        # Dentro al progetto ma fuori da ogni misura: le schermate di servizio.
+        "forbidden": sorted(_immagini_proibite(project)),
         "planes": {n: (piani.get(n) or {}).get("plane") for n in dentro if piani.get(n)},
         "out": fuori,
     })
@@ -4622,6 +4663,14 @@ def api_orientation_forbidden(project_id: str):
         # del file vengono ricostruiti immediatamente senza le immagini proibite.
         rebuilt = _rebuild_orientation(project, value)
         return _fill_blocks(value, rebuilt["groups"])
+
+    def segna_il_cambio(_p: Project, valore: Dict) -> Dict:
+        # Marcare una schermata proibita cambia l'insieme su cui i moduli misurano, esatta-
+        # mente come toglierla: gli step che hanno gia' misurato lo devono sapere.
+        valore["images_changed_at"] = datetime.now().isoformat(timespec="seconds")
+        return valore
+
+    _write_step(project_id, "import", segna_il_cambio, invalidate=False)
 
     value = _write_orientation(project_id, mutate)
     return jsonify(
@@ -6475,12 +6524,19 @@ def _depth_stage_dir(project: Project) -> Optional[Path]:
 
 
 def _depth_module_rows(project: Project) -> Tuple[List[Dict], Optional[Path]]:
-    """Le righe come le ha scritte il modulo, senza correzioni sopra."""
+    """Le righe come le ha scritte il modulo, senza correzioni sopra.
+
+    Meno quelle delle schermate proibite: il modulo scandisce una cartella e non sa che
+    alcune di quelle immagini sono un menu. Legge un numero anche li' - e quel numero
+    entrerebbe nei valori della cartella, nella scelta dell'etichetta da propagare e nella
+    scala. Non ci entra.
+    """
     stage = _depth_stage_dir(project)
     if stage is None:
         return [], None
     folder = Path(project.source.get("folder") or "")
     base = project.dedup_link_dir() or folder
+    proibite = _immagini_proibite(project)
 
     import csv as _csv
 
@@ -6504,6 +6560,8 @@ def _depth_module_rows(project: Project) -> Tuple[List[Dict], Optional[Path]]:
             if all(v is not None for v in lati):
                 box = {"top": int(lati[0]), "left": int(lati[1]),
                        "bottom": int(lati[2]), "right": int(lati[3])}
+            if nome in proibite:
+                continue
             righe.append({
                 "name": nome,
                 "status": row.get("status", ""),
@@ -7448,7 +7506,8 @@ def _un_fotogramma_per_depth(project: Project) -> List[str]:
     il lavoro - del modulo e di chi rivede - per rivedere quattro volte la stessa cosa.
     """
     scelta = _gruppo_del_righello(project)
-    return list((scelta.get("frames") or {}).values())
+    proibite = _immagini_proibite(project)
+    return [n for n in (scelta.get("frames") or {}).values() if n not in proibite]
 
 
 @app.post("/api/projects/<project_id>/scale/study/run")
@@ -7599,7 +7658,7 @@ def _depth_di_ogni_immagine(project: Project) -> Dict[str, float]:
         if lettura.get("depth_mm"):
             fuori[nome] = float(lettura["depth_mm"])
     fuori.update(_depth_confermate(project))
-    mie = _sue_immagini(project)
+    mie = _sue_immagini(project) - _immagini_proibite(project)
     return {n: v for n, v in fuori.items() if not mie or n in mie}
 
 
@@ -7941,6 +8000,9 @@ def api_depth(project_id: str):
     if stage is None:
         return jsonify({"error": "la depth non e' ancora stata calcolata", "rows": []}), 404
 
+    # Le schermate proibite non hanno una depth da leggere: non compaiono qui ne' nei conti.
+    # Restano nel progetto, e si riammettono dalla sezione della cartella.
+    proibite = _immagini_proibite(project)
     valore_step = project.step_value("depth_scale")
     # Il riquadro stretto vale per tutta la cartella: dove e' stato riletto, vince sul modulo.
     letture = dict(valore_step.get("depth_box_reads") or {})
@@ -7948,7 +8010,7 @@ def api_depth(project_id: str):
     nella_run = {r["name"] for r in righe}
     for r in righe:
         lettura = letture.get(r["name"])
-        if not lettura:
+        if not lettura or r["name"] in proibite:
             continue
         r.update({"depth_mm": lettura.get("depth_mm"), "box": lettura.get("box"),
                   "ocr_text": lettura.get("ocr_text", ""), "from_box": True})
@@ -7958,7 +8020,7 @@ def api_depth(project_id: str):
         sorgente = next((r for r in righe if r["name"] == modello.get("from")), None)
         modo_riquadro = (sorgente or {}).get("mode") or "direct_label"
     for nome, lettura in letture.items():
-        if nome in nella_run:
+        if nome in nella_run or nome in proibite:
             continue
         righe.append({
             "name": nome, "status": "box", "mode": modo_riquadro,
@@ -7973,7 +8035,7 @@ def api_depth(project_id: str):
     # lo stato che dice cosa sono: da qui si filtrano, si aprono e si scrivono.
     presenti = {r["name"] for r in righe}
     for nome in project.dedup_names():
-        if nome in presenti:
+        if nome in presenti or nome in proibite:
             continue
         righe.append({
             "name": nome, "status": "missing", "mode": "", "depth_mm": None, "score": None,
@@ -8171,7 +8233,9 @@ def _copertura_depth(project: Project, righe: Sequence[Dict]) -> Dict:
 
     Senza questa spiegazione la sezione mostra dodici immagini su trentasei e basta.
     """
-    totale = len(project.dedup_images())
+    # Le proibite non fanno parte del conto: non hanno una depth da leggere, e contarle
+    # farebbe sembrare che ne manchi una a ogni schermata di servizio messa da parte.
+    totale = len(_immagini_da_misurare(project))
     con_depth = sum(1 for r in righe if r.get("depth_mm") is not None)
     modi = [r.get("mode") for r in righe if r.get("mode")]
     prevalente = max(set(modi), key=modi.count) if modi else ""

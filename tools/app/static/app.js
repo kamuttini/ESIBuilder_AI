@@ -267,9 +267,28 @@ function avvisoImmaginiCambiate(panel, stepId) {
   const quando = (state.imagesChangedAt || '').replace('T', ' alle ');
   panel.append(el('p', { class: 'avviso' },
     `questo calcolo e' di prima che l'elenco delle immagini cambiasse${quando ? ` (${quando})` : ''}: `
-    + 'dentro c\'e\' ancora il contributo di immagini che il progetto non ha piu\'. '
-    + 'Le tue conferme e correzioni non si toccano — rilancia il modulo quando vuoi, e '
-    + 'saranno rimisurate solo le immagini di adesso.'));
+    + 'dentro c\'e\' ancora il contributo di immagini che il progetto non ha piu\', o che hai '
+    + 'marcato come proibite. Le tue conferme e correzioni non si toccano: rifacendolo si '
+    + 'rimisurano solo le immagini di adesso.'));
+  // Il rilancio sta qui, dove si scopre che serve. Ma lo premi tu: un modulo sono minuti,
+  // e marcando dieci schermate una per una partirebbero dieci giri.
+  const MODULI = { orientation: 'orientamento', depth_scale: 'depth', scale_study: 'scala' };
+  const stato = el('span', { class: 'hint' });
+  const rifai = el('button', {}, 'Rifallo adesso senza quelle immagini');
+  rifai.addEventListener('click', async () => {
+    rifai.disabled = true;
+    try {
+      const avvio = MODULI[stepId]
+        ? await api(`/projects/${state.projectId}/analyze_stages`,
+                    { body: { stages: [MODULI[stepId]] } })
+        : await api(`/projects/${state.projectId}/analyze`, { body: {} });
+      await pollJob(avvio.job_id, stato);
+      toast('rifatto sulle immagini di adesso');
+      await reload();
+    } catch (errore) { toast(errore.message, true); stato.textContent = errore.message; }
+    finally { rifai.disabled = false; }
+  });
+  panel.append(el('div', { class: 'row' }, rifai, stato));
 }
 
 function field(label, value, onInput, type = 'text') {
@@ -1204,11 +1223,15 @@ function cardTutteLeImmagini(panel) {
     card.innerHTML = '';
     if (!dati) { card.append(el('p', { class: 'hint' }, 'carico l\'elenco…')); return; }
     const nomi = dati.names || [];
+    const proibite = new Set(dati.forbidden || []);
     card.append(el('h3', {}, `immagini (${nomi.length} nel progetto)`));
     card.append(el('p', { class: 'hint' },
-      'passa sopra a una e premi «escludi» per toglierla: resta sul disco e la ritrovi '
-      + 'qui sotto fra quelle fuori, da dove puoi rimetterla dentro. Clicca una miniatura '
-      + 'per aprirla a tutto schermo; usa le frecce per scorrere le immagini.'));
+      'passa sopra a una e premi «escludi» per toglierla dal progetto: resta sul disco e la '
+      + 'ritrovi qui sotto, da dove puoi rimetterla dentro. «Proibita» invece la tiene nel '
+      + 'progetto ma la toglie da tutte le misure — vendor, sonda, rettangolo, orientamento, '
+      + 'depth e scala — e la mette da parte per la riga #15. Clicca una miniatura '
+      + 'per aprirla a tutto schermo; usa le frecce per scorrere le immagini.'
+      + (proibite.size ? ` Adesso ne hai ${proibite.size} marcate proibite.` : '')));
     const thumbs = el('div', { class: 'thumbs' });
     for (const nome of nomi.slice(0, mostrate)) {
       const anteprima = el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
@@ -1220,12 +1243,37 @@ function cardTutteLeImmagini(panel) {
         anteprima,
         el('figcaption', {}, nome.split('/').pop()
           + ((dati.planes || {})[nome] ? ` · piano ${dati.planes[nome]}` : '')));
+      // Due modi diversi di togliere un'immagine di mezzo, e non sono lo stesso.
+      //
+      // «Escludi» la toglie dal progetto: e' un fotogramma che non serve piu' a nessuno.
+      // «Proibita» la lascia dentro ma la mette fuori da tutte le misure - non e' un
+      // campione buono per il vendor o per la sonda, non ha un rettangolo ecografico,
+      // marker, depth ne' righello - e la tiene da parte perche' **servira' dopo**: da lei
+      // si ritaglia il template con cui ESI imparera' a riconoscerla e a rifiutarla.
       const b = el('button', { class: 'ghost sq2 thumb-via' }, 'escludi');
       b.addEventListener('click', async () => {
         b.disabled = true;
         try { await escludi([nome]); } catch (errore) { toast(errore.message, true); b.disabled = false; }
       });
-      fig.append(b);
+      const vietata = el('button', { class: 'ghost sq2 thumb-vietata' },
+        proibite.has(nome) ? 'riammetti' : 'proibita');
+      vietata.title = proibite.has(nome)
+        ? 'la rimette fra le immagini che i moduli possono usare'
+        : 'schermata di servizio: resta nel progetto ma esce da tutte le misure, e si '
+          + 'tiene da parte per la riga #15 (quelle che ESI deve riconoscere e rifiutare)';
+      vietata.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        vietata.disabled = true;
+        try {
+          const esito = await api(`/projects/${state.projectId}/orientation/forbidden`,
+            { body: { name: nome, ...(proibite.has(nome) ? { reset: true } : {}) } });
+          toast(proibite.has(nome) ? 'riammessa nelle misure'
+            : `messa fra le proibite (${(esito.forbidden || []).length} in tutto)`);
+          await reload();
+        } catch (errore) { toast(errore.message, true); vietata.disabled = false; }
+      });
+      if (proibite.has(nome)) fig.classList.add('proibita');
+      fig.append(b, vietata);
       thumbs.append(fig);
     }
     card.append(thumbs);

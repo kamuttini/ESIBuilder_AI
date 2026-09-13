@@ -1338,3 +1338,14 @@ img.depth-crop {
 .thumb-voce .thumb-via { position: absolute; top: 6px; right: 6px; opacity: 0; }
 .thumb-voce:hover .thumb-via { opacity: 1; }
 .thumb-voce .thumb-via:hover { color: #f85149; border-color: #f85149; }
+
+
+/* Le due vie d'uscita di un'immagine, una per lato: a destra «escludi» (via dal progetto),
+   a sinistra «proibita» (resta, ma fuori da ogni misura). Una miniatura proibita si vede
+   da lontano: se non si distinguesse, si riguarderebbe ogni volta per sapere com'e'. */
+.thumb-voce .thumb-vietata { position: absolute; top: 6px; left: 6px; opacity: 0; }
+.thumb-voce:hover .thumb-vietata { opacity: 1; }
+.thumb-voce .thumb-vietata:hover { color: #d29922; border-color: #d29922; }
+.thumb-voce.proibita { outline: 2px solid #d29922; outline-offset: -2px; }
+.thumb-voce.proibita img { opacity: .55; }
+.thumb-voce.proibita .thumb-vietata { opacity: 1; color: #d29922; border-color: #d29922; }
