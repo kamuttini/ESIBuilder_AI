@@ -17,17 +17,19 @@ async function createOrientationViewer(projectId, sampleSize) {
   const byName = new Map();
   for (const row of data.per_image || []) byName.set(row.name, row);
   const excluded = data.excluded_pattern ? new RegExp(data.excluded_pattern, 'i') : null;
-  const analysed = (data.per_image || []).length;
-  const skipped = excluded ? names.filter((name) => excluded.test(name)).length : 0;
+  const forbidden = new Set(data.forbidden || []);
+  const excludedAutomatically = (name) => !!(excluded && excluded.test(name));
+  const isForbidden = (name) => forbidden.has(name) || excludedAutomatically(name);
 
   /* I filtri: un gruppo per orientamento, uno per le analizzate senza esito, uno per le
      escluse dal modulo. Sono partizioni dell'elenco, non viste separate: lo scorrimento
      lavora sempre sulla lista filtrata. */
   const groupOf = (name) => {
+    if (isForbidden(name)) return 'ESCLUSE';
     const row = byName.get(name);
     if (row && row.box && row.group) return row.group;
     if (row) return 'NESSUNO';
-    return excluded && excluded.test(name) ? 'ESCLUSE' : 'NESSUNO';
+    return 'NESSUNO';
   };
 
   /* "da rivedere" vuol dire una cosa sola: la configurazione che stiamo per consegnare
@@ -36,6 +38,7 @@ async function createOrientationViewer(projectId, sampleSize) {
      consegnato trova a 0.99 e' sistemata, non da rivedere. */
   const threshold = Number((data.validation || {}).min_score) || 0.55;
   const inReview = (name) => {
+    if (isForbidden(name)) return false;
     const row = byName.get(name);
     if (!row) return false;
     return row.score == null || Number(row.score) < threshold;
@@ -50,9 +53,10 @@ async function createOrientationViewer(projectId, sampleSize) {
     { key: 'ESCLUSE', label: 'escluse dal modulo' },
   ];
   let filter = '';
-  const confermata = (name) => !!(byName.get(name) || {}).confirmed;
+  const confermata = (name) => !isForbidden(name) && !!(byName.get(name) || {}).confirmed;
   // Da confermare: ha un marker (c'e' qualcosa da guardare) e non l'hai ancora guardato.
   const daConfermare = (name) => {
+    if (isForbidden(name)) return false;
     const row = byName.get(name) || {};
     return !!row.box && !row.confirmed && !row.refused;
   };
@@ -68,6 +72,7 @@ async function createOrientationViewer(projectId, sampleSize) {
      guardano i suoi casi peggiori. Le immagini senza punteggio restano in fondo in ogni caso:
      non hanno una confidenza da confrontare. */
   const scoreOf = (name) => {
+    if (isForbidden(name)) return null;
     const row = byName.get(name);
     return row && row.score != null ? Number(row.score) : null;
   };
@@ -129,6 +134,10 @@ async function createOrientationViewer(projectId, sampleSize) {
     el('div', { class: 'busy-spinner' }), busyLabel);
   busyOverlay.style.display = 'none';
   stage.append(busyOverlay);
+  const forbiddenBadge = el('div', { class: 'ov-forbidden-badge' },
+    'PROIBITA · esclusa dallo studio dell\'orientamento');
+  forbiddenBadge.style.display = 'none';
+  stage.append(forbiddenBadge);
 
   const setBusy = (on, text) => {
     busyOverlay.style.display = on ? 'flex' : 'none';
@@ -163,7 +172,8 @@ async function createOrientationViewer(projectId, sampleSize) {
   /* Cosa vede la lente: il marker di questa immagine e, dietro, l'envelope del suo
      gruppo — e' il confronto che conta, perche' il marker deve starci dentro. */
   const contestoLente = () => {
-    const row = byName.get(names[index]);
+    const proibita = isForbidden(names[index]);
+    const row = proibita ? null : byName.get(names[index]);
     const gruppo = row && row.group;
     const voci = [];
     if (modificaMarker && bozzaMarker) {
@@ -191,7 +201,8 @@ async function createOrientationViewer(projectId, sampleSize) {
       focus: mira,
       caption: modificaMarker ? 'stringilo sul glifo'
         : (drawing ? 'tira il rettangolo attorno al marker vero'
-          : (row ? `score ${row.score}` : 'nessun marker')),
+          : (proibita ? 'immagine proibita: fuori dallo studio'
+            : (row ? `score ${row.score}` : 'nessun marker'))),
       // Indicare il marker dalla lente: e' quindici pixel, e sulla pagina principale
       // significa tirare un rettangolo di sette pixel e sbagliarlo.
       onDraw: (modificaMarker || drawing) ? (nuovo) => {
@@ -226,22 +237,25 @@ async function createOrientationViewer(projectId, sampleSize) {
       listBox.style.maxHeight =
         `${Math.max(160, stage.clientHeight - limitsSide.offsetHeight - 8)}px`;
     }
+    const proibita = isForbidden(names[index]);
     const row = byName.get(names[index]);
     // In modifica comanda la bozza: ridisegnare il box del modulo cancellerebbe la
     // stretta appena fatta.
-    place(markerNode, modificaMarker ? bozzaMarker : (row && row.box));
+    place(markerNode, proibita ? null : (modificaMarker ? bozzaMarker : (row && row.box)));
+    forbiddenBadge.style.display = proibita ? 'block' : 'none';
     mostraManiglie();
     if (root.isConnected) Lente.aggiornaSeAttiva(contestoLente());
     detail.innerHTML = '';
-    if (row) {
+    if (proibita) {
+      detail.append(el('span', { class: 'ov-forbidden-note' },
+        forbidden.has(names[index])
+          ? 'immagine marcata proibita da te: non contribuisce ai gruppi, agli envelope o alla copertura dell\'orientamento'
+          : 'schermata proibita automaticamente per nome: il modulo non ci cerca il marker'));
+    } else if (row) {
       detail.append(el('span', {},
         `marker in questa immagine: gruppo ${row.group} · score ${row.score} · ` +
         `template ${row.template} · ricerca ${row.scope}${row.status && row.status !== 'ok' ? ' · ' + row.status : ''}` +
         (row.corrected ? ' · CORRETTA A MANO' : '')));
-    } else if (excluded && excluded.test(names[index] || '')) {
-      detail.append(el('span', {},
-        'schermata proibita: il modulo non ci cerca il marker (esclusa per nome), ' +
-        'si vedono solo i quattro envelope'));
     } else {
       detail.append(el('span', {},
         'nessuna detection per questa immagine: si vedono solo i quattro envelope'));
@@ -277,6 +291,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     paint();
     paintCrop();
     renderConferma();
+    renderForbidden();
     if (compareRefresh) compareRefresh();
   };
 
@@ -290,6 +305,13 @@ async function createOrientationViewer(projectId, sampleSize) {
   const okButton = el('button', {}, 'Va bene, avanti');
   const okNota = el('span', { class: 'hint' });
   const renderConferma = () => {
+    if (isForbidden(names[index])) {
+      okButton.textContent = 'Fuori dallo studio';
+      okButton.className = 'ghost';
+      okButton.disabled = true;
+      okNota.textContent = 'un\'immagine proibita non va confermata';
+      return;
+    }
     const riga = byName.get(names[index]) || {};
     const gia = !!riga.confirmed;
     okButton.textContent = gia ? 'Confermata — togli la conferma' : 'Va bene, avanti';
@@ -331,6 +353,82 @@ async function createOrientationViewer(projectId, sampleSize) {
       renderConferma();
     }
   });
+
+  /* Proibita e' diverso da «non e' il marker»: nel secondo caso si butta una detection,
+     nel primo l'intera immagine non deve partecipare allo studio dell'orientamento. Resta
+     pero' nel progetto, cosi' depth e scala possono continuare a usarla. */
+  const forbiddenButton = el('button', { class: 'ghost ov-forbidden-button' },
+    'Proibisci e vai avanti');
+  const forbiddenNote = el('span', { class: 'hint' });
+  const renderForbidden = () => {
+    const name = names[index] || '';
+    const automatica = excludedAutomatically(name);
+    const manuale = forbidden.has(name);
+    forbiddenButton.disabled = !name || automatica;
+    forbiddenButton.className = 'ghost ov-forbidden-button' + (manuale ? ' active' : '');
+    forbiddenButton.textContent = automatica
+      ? 'Proibita automaticamente'
+      : manuale ? 'Riammetti nell\'orientamento' : 'Proibisci e vai avanti';
+    forbiddenButton.title = automatica
+      ? 'questa schermata e\' esclusa automaticamente in base al nome del file'
+      : manuale
+        ? 'rimette questa immagine nello studio dell\'orientamento'
+        : 'esclude questa immagine soltanto dallo studio dell\'orientamento (tasto P)';
+    forbiddenNote.textContent = `${forbidden.size} proibit${forbidden.size === 1 ? 'a' : 'e'} da te`;
+    const bloccata = isForbidden(name);
+    okButton.disabled = bloccata || (!(byName.get(name) || {}).box
+      && !(byName.get(name) || {}).confirmed);
+    fixButton.disabled = bloccata;
+    wrongButton.disabled = bloccata;
+    modificaButton.disabled = bloccata;
+  };
+  forbiddenButton.addEventListener('click', async () => {
+    const target = names[index];
+    if (!target || excludedAutomatically(target)) return;
+    const annulla = forbidden.has(target);
+    const prima = visible();
+    const posizione = prima.indexOf(target);
+    forbiddenButton.disabled = true;
+    try {
+      const esito = await api(`/projects/${projectId}/orientation/forbidden`, {
+        body: { name: target, reset: annulla },
+      });
+      forbidden.clear();
+      for (const name of esito.forbidden || []) forbidden.add(name);
+      data.forbidden = [...forbidden];
+      data.envelopes = esito.groups || {};
+      const row = byName.get(target);
+      if (row) row.forbidden = !annulla;
+      if (!annulla) {
+        setCorrecting(false);
+        setDrawing(false);
+        const dopo = [...prima.slice(posizione + 1), ...prima.slice(0, posizione)]
+          .find((name) => !isForbidden(name) && matches(name));
+        if (dopo) index = names.indexOf(dopo);
+        else {
+          filter = 'ESCLUSE';
+          index = names.indexOf(target);
+        }
+      } else if (filter === 'ESCLUSE' && !matches(target)) {
+        filter = '';
+        index = names.indexOf(target);
+      }
+      paintBackground(esito.background || { state: 'running' });
+      watchBackground();
+      applyFilter(filter);
+      renderLegend();
+      renderPosizioni();
+      loadLimits();
+      caricaSpecchio();
+      renderStatus();
+      toast(annulla
+        ? 'immagine riammessa nello studio dell\'orientamento'
+        : 'immagine proibita: tolta da gruppi, envelope e copertura');
+    } catch (errore) {
+      toast(errore.message, true);
+      renderForbidden();
+    }
+  });
   const step = (delta) => {
     const list = visible();
     if (!list.length) return;
@@ -355,7 +453,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     for (let offset = 1; offset <= names.length; offset += 1) {
       const candidate = (index + delta * offset + names.length * offset) % names.length;
       const row = byName.get(names[candidate]);
-      if (row && row.box) { index = candidate; show(); return; }
+      if (!isForbidden(names[candidate]) && row && row.box) { index = candidate; show(); return; }
     }
     toast('nessun altra immagine con marker trovato', true);
   };
@@ -490,6 +588,9 @@ async function createOrientationViewer(projectId, sampleSize) {
     data.folder_template = fresh.folder_template;
     data.marker_warning = fresh.marker_warning;
     data.marker_override = fresh.marker_override;
+    data.forbidden = fresh.forbidden || [];
+    forbidden.clear();
+    for (const name of data.forbidden) forbidden.add(name);
     byName.clear();
     for (const row of fresh.per_image || []) byName.set(row.name, row);
     show();
@@ -500,6 +601,7 @@ async function createOrientationViewer(projectId, sampleSize) {
     loadLimits();
     renderCorrections(fresh.corrections_detail || []);
     renderPosizioni();
+    renderStatus();
   };
 
   /* Cosa e' cambiato per QUESTA immagine: si legge subito dopo il click. */
@@ -1363,6 +1465,9 @@ async function createOrientationViewer(projectId, sampleSize) {
     if (event.target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName)) return;
     if (event.key === 'ArrowRight') { event.preventDefault(); step(1); }
     else if (event.key === 'ArrowLeft') { event.preventDefault(); step(-1); }
+    else if (event.key.toLowerCase() === 'p' && !forbiddenButton.disabled) {
+      event.preventDefault(); forbiddenButton.click();
+    }
   };
   window.addEventListener('keydown', onKey);
 
@@ -1376,6 +1481,11 @@ async function createOrientationViewer(projectId, sampleSize) {
 
   const paintCrop = () => {
     const row = byName.get(names[index]);
+    if (isForbidden(names[index])) {
+      cropImage.style.display = 'none';
+      cropNote.textContent = 'immagine proibita: il suo marker non partecipa allo studio';
+      return;
+    }
     if (!row || !row.box) {
       cropImage.style.display = 'none';
       cropNote.textContent = 'nessun marker in questa immagine: niente da ritagliare';
@@ -1493,12 +1603,14 @@ async function createOrientationViewer(projectId, sampleSize) {
       const row = byName.get(name);
       const item = el('div', {
         class: 'score-row' + (name === names[index] ? ' current' : '')
-          + (name === busyName ? ' busy' : ''),
+          + (name === busyName ? ' busy' : '')
+          + (isForbidden(name) ? ' forbidden' : ''),
       },
         el('span', { class: 'score-value', style: `color:${score == null ? 'var(--muted)' : score >= 0.8 ? 'var(--ok)' : score >= 0.62 ? 'var(--warn)' : 'var(--err)'}` },
           score == null ? '—' : score.toFixed(3)),
-        el('span', { class: 'score-group' }, (row && row.group) || (excluded && excluded.test(name) ? 'esclusa' : '—')),
+        el('span', { class: 'score-group' }, isForbidden(name) ? 'proibita' : (row && row.group) || '—'),
         el('span', { class: 'score-name', title: name }, name.split('/').pop()),
+        forbidden.has(name) ? el('span', { class: 'score-forbidden' }, 'da te') : null,
         row && row.corrected ? el('span', { class: 'score-fixed' }, 'corretta') : null,
         row && row.score_batch != null && row.score != null && row.score !== row.score_batch
           ? el('span', { class: 'score-delta' }, `era ${row.score_batch}`) : null,
@@ -1570,6 +1682,7 @@ async function createOrientationViewer(projectId, sampleSize) {
 
   const fixBar = el('div', { class: 'ov-actions' },
     okButton, okNota,
+    forbiddenButton, forbiddenNote,
     fixButton,
     el('label', { class: 'serie', title: 'il marker viene cercato solo dentro a questo raggio dal punto che indichi' },
       el('span', {}, 'raggio'), raggioInput, el('span', {}, 'px')),
@@ -1639,8 +1752,9 @@ async function createOrientationViewer(projectId, sampleSize) {
     const shipped = el('div', { class: 'template-card' }, shippedImage, shippedNote);
     compareRefresh = () => {
       const row = byName.get(names[index]);
-      mineImage.style.display = row && row.box ? 'block' : 'none';
-      if (row && row.box) {
+      const ammessa = !isForbidden(names[index]);
+      mineImage.style.display = ammessa && row && row.box ? 'block' : 'none';
+      if (ammessa && row && row.box) {
         mineImage.src = `/api/projects/${projectId}/orientation/crop` +
           `?name=${encodeURIComponent(names[index])}&scale=6&pad=2&t=${Date.now()}`;
       }
@@ -1733,7 +1847,7 @@ async function createOrientationViewer(projectId, sampleSize) {
   const gruppiDiPosto = () => {
     const mappa = new Map();
     for (const row of byName.values()) {
-      if (!row.box) continue;
+      if (!row.box || isForbidden(row.name)) continue;
       const chiave = `${row.group || '?'}#${chiaveDiPosto(row.box)}`;
       if (!mappa.has(chiave)) mappa.set(chiave, []);
       mappa.get(chiave).push(row);
@@ -1743,8 +1857,8 @@ async function createOrientationViewer(projectId, sampleSize) {
   const renderPosizioni = () => {
     posizioniHost.innerHTML = '';
     const gruppi = gruppiDiPosto();
-    const rifiutate = [...byName.values()].filter((r) => r.refused).length;
-    const scontente = [...byName.values()].filter((r) => r.disagrees).length;
+    const rifiutate = [...byName.values()].filter((r) => !isForbidden(r.name) && r.refused).length;
+    const scontente = [...byName.values()].filter((r) => !isForbidden(r.name) && r.disagrees).length;
     posizioniTag.textContent = `${gruppi.length} posizioni`
       + (rifiutate ? ` · ${rifiutate} rifiutate` : '')
       + (scontente ? ` · ${scontente} in disaccordo` : '');
@@ -1922,11 +2036,18 @@ async function createOrientationViewer(projectId, sampleSize) {
     return nodo;
   };
 
+  const statusSummary = el('span', { class: 'hint' });
+  const renderStatus = () => {
+    const quanteProibite = names.filter(isForbidden).length;
+    const quanteAnalizzate = names.filter((name) => byName.has(name) && !isForbidden(name)).length;
+    statusSummary.textContent = `${quanteAnalizzate} immagini nello studio` +
+      (quanteProibite ? ` · ${quanteProibite} proibite escluse` : '') +
+      (forbidden.size ? ` (${forbidden.size} marcate da te)` : '') +
+      ` · ${names.length} uniche`;
+  };
+  renderStatus();
   root.append(el('div', { class: 'ov-status' },
-    el('span', { class: 'hint' },
-      `${analysed} immagini analizzate` +
-      (skipped ? ` · ${skipped} proibite escluse` : '') +
-      ` · ${names.length} uniche`),
+    statusSummary,
     el('details', { class: 'ov-help' },
       el('summary', {}, 'come si corregge'),
       el('p', { class: 'hint' },

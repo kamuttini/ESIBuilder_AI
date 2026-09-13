@@ -244,11 +244,17 @@ pre.out {
 }
 .score-row:hover { background: var(--panel-2); }
 .score-row.current { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+.score-row.forbidden { opacity: .58; }
+.score-row.forbidden .score-group { color: var(--err); }
 .score-value { font-family: ui-monospace, Menlo, monospace; width: 48px; flex: 0 0 auto; text-align: right; }
 .score-group { width: 52px; flex: 0 0 auto; color: var(--muted); }
 .score-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .score-fixed {
   flex: 0 0 auto; color: #ff4fd8; border: 1px solid #ff4fd8; border-radius: 10px;
+  padding: 0 6px; font-size: 11px;
+}
+.score-forbidden {
+  flex: 0 0 auto; color: var(--err); border: 1px solid var(--err); border-radius: 10px;
   padding: 0 6px; font-size: 11px;
 }
 
@@ -508,6 +514,15 @@ button.ghost.sq2.on { border-color: var(--accent); color: var(--text); }
   background: rgba(79, 156, 249, 0.07);
 }
 .ov-actions .serie { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+.ov-forbidden-button { border-color: var(--err); color: var(--err); }
+.ov-forbidden-button.active { background: rgba(248, 81, 73, .14); }
+.ov-forbidden-note { color: var(--err); }
+.ov-forbidden-badge {
+  position: absolute; z-index: 4; top: 10px; left: 50%; transform: translateX(-50%);
+  max-width: calc(100% - 24px); padding: 5px 12px; border: 1px solid var(--err);
+  border-radius: 999px; background: rgba(35, 8, 8, .9); color: #ff938a;
+  font-size: 12px; font-weight: 700; letter-spacing: .02em; pointer-events: none;
+}
 
 /* La barra sopra l'immagine, uguale in ogni sezione: frecce per scorrere la cartella, nome
    dell'immagine, lente. Stessa riga, stesso ordine, stesso posto - si trovano senza

@@ -772,6 +772,7 @@ def _run_advanced_stages(
                 # servono sia per gli envelope sia per la validazione, che vengono prima della
                 # costruzione del nuovo valore dello step.
                 previous = project.step_value("orientation")
+                proibite = _orientation_forbidden(previous)
                 corrections_before = dict(previous.get("corrections") or {})
                 # --- SCOPERTA: le detection della banca costruiscono gli envelope. Conta il
                 # richiamo: se il box non contiene il marker, ESI non lo trovera' mai.
@@ -792,6 +793,7 @@ def _run_advanced_stages(
                     path for path in scan_folder(scan_folder_for_modules)
                     if not re.search(r"Thumbs\.db|Software Release|System Info|proibite",
                                      str(path), re.IGNORECASE)
+                    and _nome_relativo(path, scan_folder_for_modules) not in proibite
                 ]
                 useful_names = {
                     str(path.relative_to(scan_folder_for_modules)) for path in useful
@@ -949,22 +951,39 @@ def _run_advanced_stages(
                 # suggerimenti sopravvivono al rifacimento dello stadio.
                 orientation_value: Dict = {
                     "corrections": corrections_before,
+                    # Una schermata marcata proibita resta tale anche quando si rifanno i
+                    # tre moduli. E' una decisione sull'immagine, non sul singolo risultato
+                    # del batch, quindi non deve sparire insieme agli artefatti della run.
+                    "forbidden": dict(previous.get("forbidden") or {}),
                     # Anche le detection che hai gia' guardato e buttato: sono lavoro tuo
                     # come le correzioni, e un «Rifai l'orientamento» le rimetteva tutte in
                     # gioco - a ricominciare daccapo dallo stesso rumore.
                     "refused": dict(previous.get("refused") or {}),
                     "marker_override": override,
-                    "marker_rows_override": override_rows,
+                    "marker_rows_override": {
+                        **{
+                            name: row for name, row in (previous.get("marker_rows_override") or {}).items()
+                            if name in proibite
+                        },
+                        **override_rows,
+                    },
                     # Dove si ritrova il ritaglio consegnato: sono queste le posizioni da cui
                     # rifare gli envelope quando arriva una correzione, se no il primo
                     # ritocco li riporterebbe a quelli della banca.
-                    "marker_rows_delivered": consegnate,
+                    "marker_rows_delivered": {
+                        **{
+                            name: row for name, row in (previous.get("marker_rows_delivered") or {}).items()
+                            if name in proibite
+                        },
+                        **consegnate,
+                    },
                     # La diagnosi "questo marker non si muove" e' l'unico modo automatico di
                     # accorgersi che la banca ha scelto un elemento fisso dell'interfaccia.
                     "marker_warning": _marker_warning(
                         list(override_rows.values()) if override_rows
                         else [r for r in _marker_rows(Path(marker["output_dir"]))
-                              if str(r.get("status") or "").lower() == "ok"],
+                              if str(r.get("status") or "").lower() == "ok"
+                              and r.get("name") in useful_names],
                         groups,
                     ),
                     "hint_paths": {
@@ -986,8 +1005,16 @@ def _run_advanced_stages(
                         k: validation.get(k) for k in ("coverage", "coverage_by_group", "images", "min_score")
                     },
                     "validation_rows": {
-                        row["name"]: {"score": row["score"], "group": row["group"], "box": row["box"]}
-                        for row in (validation.get("rows") or [])
+                        **{
+                            name: row for name, row in (previous.get("validation_rows") or {}).items()
+                            if name in proibite
+                        },
+                        **{
+                            row["name"]: {
+                                "score": row["score"], "group": row["group"], "box": row["box"]
+                            }
+                            for row in (validation.get("rows") or [])
+                        },
                     },
                 }
                 if found:
@@ -2446,6 +2473,10 @@ def api_orientation(project_id: str):
             row["box"] = voce["box"]
         if voce.get("group"):
             row["group"] = voce["group"]
+    proibite = _orientation_forbidden(stored)
+    for row in per_image:
+        if row.get("name") in proibite:
+            row["forbidden"] = True
     # Chi non entra negli envelope perche' da' torto a una correzione: si vede, e si puo'
     # sempre correggere anche quella immagine. Tacerlo vorrebbe dire far sparire venti
     # detection senza dire perche'.
@@ -2455,7 +2486,8 @@ def api_orientation(project_id: str):
     }
     scontente = 0
     for row in per_image:
-        if (row.get("box") and not row.get("refused") and not row.get("corrected")
+        if (row.get("box") and not row.get("forbidden")
+                and not row.get("refused") and not row.get("corrected")
                 and row.get("name") not in contributori):
             row["disagrees"] = True
             scontente += 1
@@ -2474,6 +2506,11 @@ def api_orientation(project_id: str):
                 )
             ],
             "excluded_pattern": marker_excluded,
+            "forbidden": sorted(proibite),
+            "forbidden_detail": [
+                {"name": name, **(meta if isinstance(meta, dict) else {})}
+                for name, meta in sorted((stored.get("forbidden") or {}).items())
+            ] if isinstance(stored.get("forbidden") or {}, dict) else [],
             "refused": sorted(rifiutate),
             "disagreeing": scontente,
             # Il ritaglio della cartella e' quello che finira' in DB_echo: e' il protagonista.
@@ -2677,6 +2714,18 @@ _consolidation_lock = threading.Lock()
 _step_write_lock = threading.Lock()
 
 
+def _orientation_forbidden(value: Dict) -> set:
+    """Nomi esclusi a mano dallo studio dell'orientamento.
+
+    Lo stato e' un dizionario per conservare quando e' stata presa la decisione, ma il
+    resto della pipeline ha bisogno soltanto dell'insieme dei nomi. Accettiamo anche una
+    lista per non rendere fragili eventuali progetti scritti da versioni intermedie.
+    """
+    raw = value.get("forbidden") or {}
+    nomi = raw.keys() if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+    return {str(nome).strip() for nome in nomi if str(nome).strip()}
+
+
 def _marker_context(project: Project) -> Dict:
     """Cio' che serve a ogni operazione sul marker: run, cartella, rect, vendor, banca."""
     stage = _marker_stage_dir(project)
@@ -2782,6 +2831,13 @@ def _fill_blocks(value: Dict, groups: Dict) -> Dict:
         value["blocks"] = blocks
         value["filled_groups"] = filled
         value["filled_from"] = donor if filled else ""
+    else:
+        # Se tutte le detection vengono rifiutate o tutte le immagini sono proibite, non
+        # devono sopravvivere i quattro blocchi del giro precedente: sarebbero orientamento
+        # senza piu' nessuna immagine che lo sostiene.
+        value.pop("blocks", None)
+        value.pop("filled_groups", None)
+        value.pop("filled_from", None)
     return value
 
 
@@ -2850,13 +2906,21 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
     project = _project(project_id)
     ctx = _marker_context(project)
     stored = dict(project.step_value("orientation"))
-    corrections = dict(stored.get("corrections") or {})
+    proibite = _orientation_forbidden(stored)
+    corrections = {
+        name: fixed for name, fixed in (stored.get("corrections") or {}).items()
+        if name not in proibite
+    }
     min_score = float((stored.get("validation") or {}).get("min_score") or 0.55)
-    before_rows = dict(stored.get("validation_rows") or {})
+    before_rows = {
+        name: row for name, row in (stored.get("validation_rows") or {}).items()
+        if name not in proibite
+    }
     probe_folder = project.dedup_link_dir() or ctx["folder"]
     useful = [
         path for path in scan_folder(probe_folder)
         if not re.search(MARKER_EXCLUDED, str(path), re.IGNORECASE)
+        and _nome_relativo(path, probe_folder) not in proibite
     ]
 
     progress("ritaglio i marker corretti", 0, 0)
@@ -2931,7 +2995,7 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
     # La validazione misura la copertura su tutta la cartella - e' una misura, non un
     # cambiamento - ma quello che scrive nelle righe delle confermate non deve vincere.
     for nome, voce in (stored.get("confirmed") or {}).items():
-        if voce.get("box") and voce.get("group"):
+        if nome not in proibite and voce.get("box") and voce.get("group"):
             after_rows[nome] = {"score": voce.get("score"), "group": voce["group"],
                                 "box": voce["box"], "template": "confermata"}
 
@@ -2943,7 +3007,10 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
     # e ESI di ritagli ne usa uno.
     # Le immagini gia' confermate restano fuori dal giro: non c'e' niente da ricalcolare
     # su quello che hai gia' guardato, e ricalcolarlo vorrebbe dire poterlo cambiare.
-    conferme = dict(stored.get("confirmed") or {})
+    conferme = {
+        nome: voce for nome, voce in (stored.get("confirmed") or {}).items()
+        if nome not in proibite
+    }
     da_rifare = [p for p in useful
                  if _nome_relativo(p, probe_folder) not in conferme]
     saltate = len(useful) - len(da_rifare)
@@ -2974,20 +3041,33 @@ def _consolidate_marker(project_id: str, progress) -> Dict:
     def mutate(project: Project, value: Dict) -> Dict:
         # Una correzione arrivata mentre giravamo non era in gara: il suo punteggio resta
         # quello del click, altrimenti la riga sembrerebbe peggiorata fino al giro dopo.
-        rows = dict(after_rows)
+        proibite_adesso = _orientation_forbidden(value)
+        rows = {name: row for name, row in after_rows.items() if name not in proibite_adesso}
+        # La misura precedente delle proibite resta sotto al divieto: non conta, ma rende
+        # la riammissione immediata invece di lasciare l'immagine senza risultato fino al
+        # passaggio successivo su tutta la cartella.
+        for name in proibite_adesso:
+            precedente = (value.get("validation_rows") or {}).get(name)
+            if precedente:
+                rows[name] = precedente
         for name, fixed in (value.get("corrections") or {}).items():
-            if name not in corrections:
+            if name not in corrections and name not in proibite_adesso:
                 rows[name] = {
                     "score": fixed.get("score"), "group": fixed.get("group"),
                     "box": fixed.get("box"), "template": "correzione",
                 }
-        if consegnate:
-            value = dict(value)
-            value["marker_rows_delivered"] = consegnate
+        value = dict(value)
+        consegnate_vive = {
+            name: row for name, row in consegnate.items() if name not in proibite_adesso
+        }
+        for name in proibite_adesso:
+            precedente = (value.get("marker_rows_delivered") or {}).get(name)
+            if precedente:
+                consegnate_vive[name] = precedente
+        value["marker_rows_delivered"] = consegnate_vive
         # Gli envelope si rifanno con le posizioni nuove del ritaglio consegnato, non con
         # quelle del giro precedente.
-        groups_finali = (_rebuild_orientation(project, value)["groups"] if consegnate
-                         else groups)
+        groups_finali = _rebuild_orientation(project, value)["groups"]
         merged = _fill_blocks(dict(value), groups_finali)
         merged.update(
             {
@@ -3209,10 +3289,12 @@ def _run_marker_override(
         project = _project(project_id)
         ctx = _marker_context(project)
         stored = dict(project.step_value("orientation"))
+        proibite = _orientation_forbidden(stored)
         probe_folder = project.dedup_link_dir() or ctx["folder"]
         useful = [
             path for path in scan_folder(probe_folder)
             if not re.search(MARKER_EXCLUDED, str(path), re.IGNORECASE)
+            and _nome_relativo(path, probe_folder) not in proibite
         ]
 
         destinazione = project.root / "templates" / "marker_override.png"
@@ -3509,6 +3591,11 @@ def _envelope_contributors(project: Project, value: Dict) -> Dict[str, List[Dict
             "score": fixed.get("score"), "source": "correzione", "corrected": True,
         }
     per_name = _detection_in_disaccordo(per_name, correzioni)
+    # Proibita vince su tutto, anche su una vecchia correzione o conferma. Conserviamo il
+    # lavoro sotto la decisione per poterlo ripristinare se l'utente la rimette nello
+    # studio, ma finche' e' proibita non puo' allargare un envelope ne' creare un gruppo.
+    for nome in _orientation_forbidden(value):
+        per_name.pop(nome, None)
     # Solo le immagini che questo progetto ha: gli artefatti del marker sono di quando e'
     # girato, e dopo uno sdoppiamento contengono ancora quelle dell'altro piano.
     mie = _sue_immagini(project)
@@ -4445,6 +4532,59 @@ def api_orientation_reprocess(project_id: str):
     return jsonify(_schedule_consolidation(project_id))
 
 
+@app.post("/api/projects/<project_id>/orientation/forbidden")
+def api_orientation_forbidden(project_id: str):
+    """Esclude o riammette immagini nello studio dell'orientamento, non nel progetto.
+
+    L'immagine resta disponibile a depth e scala e non viene cancellata dallo specchio di
+    lavoro. Per l'orientamento, invece, scompare subito dai contributori degli envelope e
+    dai gruppi; la validazione della cartella si riallinea in background sulle sole immagini
+    ancora ammesse.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    nomi = [str(n).strip() for n in (payload.get("names") or []) if str(n).strip()]
+    if not nomi:
+        uno = str(payload.get("name") or "").strip()
+        nomi = [uno] if uno else []
+    if not nomi:
+        return jsonify({"error": "manca l'immagine"}), 400
+
+    presenti = set(project.dedup_names())
+    sconosciute = [nome for nome in nomi if nome not in presenti]
+    if sconosciute:
+        return jsonify({"error": f"immagine non presente nel progetto: {sconosciute[0]}"}), 400
+    annulla = bool(payload.get("reset"))
+
+    def mutate(project: Project, value: Dict) -> Dict:
+        proibite = dict(value.get("forbidden") or {})
+        adesso = datetime.now().isoformat(timespec="seconds")
+        for nome in nomi:
+            if annulla:
+                proibite.pop(nome, None)
+            else:
+                proibite[nome] = {"at": adesso, "source": "user"}
+        value["forbidden"] = proibite
+        # La decisione ha effetto prima del passaggio lento: i quattro envelope e i blocchi
+        # del file vengono ricostruiti immediatamente senza le immagini proibite.
+        rebuilt = _rebuild_orientation(project, value)
+        return _fill_blocks(value, rebuilt["groups"])
+
+    value = _write_orientation(project_id, mutate)
+    return jsonify(
+        {
+            "saved": True,
+            "forbidden": sorted(_orientation_forbidden(value)),
+            "groups": {
+                group: {k: box.get(k) for k in ("top", "left", "bottom", "right", "markers")}
+                for group, box in (value.get("groups") or {}).items()
+            },
+            "missing_groups": value.get("missing_groups") or [],
+            "background": _schedule_consolidation(project_id),
+        }
+    )
+
+
 @app.post("/api/projects/<project_id>/orientation/refuse")
 def api_orientation_refuse(project_id: str):
     """«Questo non e' il marker»: la detection si butta, l'immagine resta senza.
@@ -4710,10 +4850,12 @@ def _run_cerca_nei_buchi(job_id: str, project_id: str, soglia: float) -> None:
             for riga in elenco:
                 corrente[riga["name"]] = {**riga, "group": gruppo}
         confermate = set(stored.get("confirmed") or {})
+        proibite = _orientation_forbidden(stored)
         probe_folder = project.dedup_link_dir() or ctx["folder"]
         candidati = [
             percorso for percorso in scan_folder(probe_folder)
             if not re.search(MARKER_EXCLUDED, str(percorso), re.IGNORECASE)
+            and _nome_relativo(percorso, probe_folder) not in proibite
             and _nome_relativo(percorso, probe_folder) not in confermate
         ]
         if not candidati:
@@ -5114,7 +5256,8 @@ def _groups_of_images(project: Project) -> Dict[str, str]:
     for name, fixed in (value.get("corrections") or {}).items():
         if fixed.get("group"):
             out[name] = fixed["group"]
-    return {n: g for n, g in out.items() if not mie or n in mie}
+    proibite = _orientation_forbidden(value)
+    return {n: g for n, g in out.items() if (not mie or n in mie) and n not in proibite}
 
 
 def _mirror_rect(rect: Dict[str, int], group: str, width: int, height: int) -> Dict[str, int]:
