@@ -4397,6 +4397,10 @@ def api_project_images(project_id: str):
 
 NEEDLE_ACCEPT_ABOVE = 0.60
 NEEDLE_REJECT_BELOW = 0.25
+# Sotto questa soglia si guardano tutti i fotogrammi: il campionamento serve a non far
+# aspettare su cartelle enormi, ma se il materiale e' una manciata di immagini saltarne
+# una significa non trovarlo.
+NEEDLE_SCAN_ALL_UNDER = 400
 
 
 def _needle_policy() -> Dict[str, float]:
@@ -4431,17 +4435,24 @@ def _run_needle_scan(job_id: str, project_id: str, per_folder: int) -> None:
             raise ValueError("importa prima una cartella")
         base = project.working_dir()
 
-        # Una sottocartella per volta, campionata: i fotogrammi di una stessa
-        # sottocartella sono quasi identici fra loro, e dieci bastano per la media.
+        # La risposta e' per immagine: il materiale di calibrazione puo' essere una manciata
+        # di fotogrammi dentro una cartella di centinaia, e una media li annegherebbe. Le
+        # sottocartelle servono solo a raggruppare il risultato quando ci sono.
         gruppi: Dict[str, List[str]] = {}
         for name in names:
             gruppi.setdefault(str(Path(name).parent), []).append(name)
-
-        scelti: List[str] = []
-        for cartella, elenco in gruppi.items():
+        for elenco in gruppi.values():
             elenco.sort()
-            passo = max(1, len(elenco) // per_folder) if per_folder else 1
-            scelti.extend(elenco[::passo][:per_folder] if per_folder else elenco)
+
+        if len(names) <= NEEDLE_SCAN_ALL_UNDER:
+            scelti = sorted(names)
+            campionato = False
+        else:
+            scelti = []
+            for elenco in gruppi.values():
+                passo = max(1, len(elenco) // per_folder)
+                scelti.extend(elenco[::passo][:per_folder])
+            campionato = True
 
         _job_update(job_id, stage="materiale di calibrazione aghi", total=len(scelti))
         engine = _inference_engine()
@@ -4454,30 +4465,52 @@ def _run_needle_scan(job_id: str, project_id: str, per_folder: int) -> None:
 
         punteggi = esito["scores"]
         banda = _needle_policy()
+
+        def verdetto(valore: float) -> str:
+            if valore >= banda["accept_above"]:
+                return "calibrazione"
+            return "no" if valore < banda["reject_below"] else "dubbio"
+
+        immagini = sorted(
+            ({"name": name, "score": round(punteggi[str(base / name)], 4),
+              "verdict": verdetto(punteggi[str(base / name)])}
+             for name in scelti if str(base / name) in punteggi),
+            key=lambda voce: -voce["score"],
+        )
+
         cartelle = []
         for cartella, elenco in sorted(gruppi.items()):
-            valori = [(name, punteggi[str(base / name)]) for name in elenco
-                      if str(base / name) in punteggi]
+            valori = [v for v in immagini if str(Path(v["name"]).parent) == cartella]
             if not valori:
                 continue
-            media = sum(v for _, v in valori) / len(valori)
-            verdetto = ("calibrazione" if media >= banda["accept_above"]
-                        else "no" if media < banda["reject_below"] else "dubbio")
-            valori.sort(key=lambda coppia: -coppia[1])
+            media = sum(v["score"] for v in valori) / len(valori)
+            proposte = [v for v in valori if v["verdict"] != "no"]
             cartelle.append({
-                "folder": "." if cartella == "." else cartella,
+                "folder": cartella,
                 "mean_score": round(media, 4),
-                "verdict": verdetto,
+                "best_score": valori[0]["score"],
+                # La cartella e' interessante se contiene almeno una immagine proposta,
+                # non se lo e' la sua media.
+                "verdict": verdetto(valori[0]["score"]),
+                "proposed": len(proposte),
                 "scanned": len(valori),
                 "total": len(elenco),
-                "images": [{"name": n, "score": round(v, 4)} for n, v in valori[:8]],
+                "images": proposte[:12] or valori[:4],
             })
-        cartelle.sort(key=lambda voce: -voce["mean_score"])
+        cartelle.sort(key=lambda voce: -voce["best_score"])
 
         risultato = {
             "folders": cartelle,
+            "images": immagini[:60],
+            "counts": {
+                "scanned": len(immagini),
+                "images_total": len(names),
+                "accepted": sum(1 for v in immagini if v["verdict"] == "calibrazione"),
+                "review": sum(1 for v in immagini if v["verdict"] == "dubbio"),
+                "subfolders": len(gruppi),
+            },
+            "sampled": campionato,
             "policy": banda,
-            "scanned_images": len(punteggi),
             "at": datetime.now().isoformat(timespec="seconds"),
         }
 

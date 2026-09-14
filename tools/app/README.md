@@ -47,18 +47,23 @@ tratto escono angolo e distanza dal centro. Per questo le acquisizioni sono fatt
 serve vedere l'ago nitido. Qui si risponde solo alla domanda *dove sono*, non *quale usare per
 quale angolo*: quella e' la scelta dello step delle linee guida.
 
-Esempio su un progetto con tre sottocartelle (30 fotogrammi campionati, pochi secondi):
+La risposta e' **per fotogramma**: il materiale puo' essere una manciata di immagini dentro una
+cartella di centinaia, e una media di cartella le annegherebbe. Le sottocartelle servono solo a
+raggruppare il risultato quando ci sono; in una cartella piatta si mostrano direttamente i
+fotogrammi proposti. Sotto le 400 immagini si guardano tutte, sopra si campiona per sottocartella.
+
+Esempio su un progetto di 146 fotogrammi in tre sottocartelle:
 
 ```
-calibrazione   0.978   10/12 img   VERIFICA AGHI
-no             0.035   10/10 img   PROIBITE
-no             0.018   10/124 img  DEPTH
+146 fotogrammi esaminati su 146 · 12 proposti
+  VERIFICA AGHI    12 su 12 esaminati    punteggio migliore 0.994
+  DEPTH             0 su 124
+  PROIBITE          0 su 10
 ```
 
-Il verdetto e' la media dei punteggi della sottocartella, non quello di un singolo fotogramma,
-quindi usa la banda di `folder_policy.json` accanto al checkpoint (accetta >= 0.60, rifiuta
-< 0.25) e non la soglia per-immagine del `metrics.json`, che mira al 98% di precision su un
-fotogramma solo. Misurata a precision 0.94 / recall 0.94 per cartella sul test.
+Le soglie vengono da `folder_policy.json` accanto al checkpoint (proposto >= 0.60, scartato
+< 0.25, in mezzo «da verificare») e non dalla soglia del `metrics.json`, che mira al 98% di
+precision e lascerebbe quasi tutto in dubbio.
 
 Il ritaglio usa `_needle_tensor`, non `_crop_tensor`: quest'ultimo schiaccia il ritaglio in un
 quadrato, e schiacciare cambia l'inclinazione degli aghi, che e' il segno da riconoscere.

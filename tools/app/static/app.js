@@ -601,36 +601,62 @@ function panelImport(panel) {
   const aghi = el('details', { class: 'ov-fold' },
     el('summary', {}, 'Materiale per le linee guida'));
   aghi.append(el('p', { class: 'hint' },
-    'cerca nelle sottocartelle del progetto i fotogrammi con l\'ago in acqua, quelli che '
-    + 'servono a ricalcare le linee della guida. Dice dove sono, non quale usare per quale angolo.'));
+    'cerca fra i fotogrammi del progetto quelli con l\'ago ripreso in acqua, che servono a '
+    + 'ricalcare le linee della guida. Dice quali sono, non quale usare per quale angolo.'));
   const statoAghi = el('span', { class: 'hint' });
   const elencoAghi = el('div', {});
 
   const disegnaAghi = (dati) => {
     elencoAghi.replaceChildren();
     if (!dati) return;
-    const trovate = (dati.folders || []).filter((f) => f.verdict !== 'no');
-    if (!trovate.length) {
+    const conto = dati.counts || {};
+    const proposte = (dati.images || []).filter((i) => i.verdict !== 'no');
+
+    elencoAghi.append(el('p', { class: 'hint' },
+      `${conto.scanned} fotogrammi esaminati su ${conto.images_total}`
+      + (dati.sampled ? ' (campionati)' : '')
+      + ` · ${conto.accepted} proposti`
+      + (conto.review ? `, ${conto.review} da verificare` : '')));
+
+    if (!proposte.length) {
       elencoAghi.append(el('p', { class: 'hint' },
-        `nessun materiale di calibrazione in ${(dati.folders || []).length} sottocartelle`));
+        'nessun fotogramma con l\'ago in acqua. Se questa cartella usa la guida a griglia '
+        + '(il reticolo disegnato sopra la sonda) il riconoscimento non la copre ancora.'));
       return;
     }
-    for (const cartella of trovate) {
-      const riga = el('div', { class: 'card', style: 'margin:6px 0' });
-      riga.append(el('div', { class: 'kv' },
-        el('span', {}, cartella.folder === '.' ? '(radice della cartella)' : cartella.folder),
-        el('span', {}, `${cartella.verdict === 'dubbio' ? 'da verificare' : 'calibrazione aghi'}`
-          + ` · ${cartella.mean_score.toFixed(2)} · ${cartella.scanned}/${cartella.total} img`)));
-      const strip = el('div', { class: 'row', style: 'flex-wrap:wrap;gap:4px' });
-      for (const immagine of cartella.images || []) {
-        strip.append(el('img', {
-          loading: 'lazy', alt: '', title: `${immagine.name} — ${immagine.score.toFixed(3)}`,
-          style: 'width:96px;max-height:64px;object-fit:contain;background:#000',
-          src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(immagine.name)}&w=140`,
+
+    // Le sottocartelle sono solo un raggruppamento: quando la cartella e' piatta si
+    // mostrano direttamente i fotogrammi, che e' la risposta vera.
+    const perCartella = (dati.folders || []).filter((f) => f.proposed > 0);
+    const raggruppa = perCartella.length > 1;
+
+    const striscia = (immagini) => {
+      const strip = el('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' });
+      for (const immagine of immagini) {
+        const box = el('div', { style: 'text-align:center' });
+        box.append(el('img', {
+          loading: 'lazy', alt: '', title: immagine.name,
+          style: 'width:104px;max-height:70px;object-fit:contain;background:#000;display:block',
+          src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(immagine.name)}&w=150`,
         }));
+        box.append(el('div', { class: 'hint', style: 'font-size:11px' },
+          `${immagine.score.toFixed(2)}${immagine.verdict === 'dubbio' ? ' ?' : ''}`));
+        strip.append(box);
       }
-      riga.append(strip);
-      elencoAghi.append(riga);
+      return strip;
+    };
+
+    if (raggruppa) {
+      for (const cartella of perCartella) {
+        const riga = el('div', { class: 'card', style: 'margin:6px 0' });
+        riga.append(el('div', { class: 'kv' },
+          el('span', {}, cartella.folder === '.' ? '(radice della cartella)' : cartella.folder),
+          el('span', {}, `${cartella.proposed} su ${cartella.scanned} esaminati`)));
+        riga.append(striscia(cartella.images));
+        elencoAghi.append(riga);
+      }
+    } else {
+      elencoAghi.append(striscia(proposte.slice(0, 24)));
     }
     if (dati.at) elencoAghi.append(el('p', { class: 'hint' }, `analisi del ${dati.at}`));
   };
