@@ -4386,6 +4386,124 @@ def api_project_images(project_id: str):
     })
 
 
+# --------------------------------------------------------------------- aghi
+# Il materiale per la sessione «Linee guida» (PAGE_CALIBRATION, righe #22-#23): i
+# fotogrammi con l'ago ripreso in acqua, quelli che nel vecchio ESIBuilder l'operatore
+# ricalca per ricavare angolo e distanza dal centro di ogni linea della guida.
+#
+# Si risponde qui, nell'import, perche' e' qui che si guarda cosa contiene la cartella:
+# quando si arrivera' allo step delle linee guida si sapra' gia' dove sta il materiale,
+# invece di ricercarlo fra centinaia di sottocartelle.
+
+NEEDLE_ACCEPT_ABOVE = 0.60
+NEEDLE_REJECT_BELOW = 0.25
+
+
+def _needle_policy() -> Dict[str, float]:
+    """Banda di decisione per cartella, dal file accanto al checkpoint.
+
+    Non e' la soglia per-immagine del `metrics.json`: quella mira al 98% di precision su
+    un fotogramma solo e porta la soglia a 0.996, mentre qui il verdetto e' la media su
+    piu' fotogrammi della stessa sottocartella. I default valgono solo se il file manca.
+    """
+    try:
+        checkpoint = Path(ModelPaths.from_active_pipeline(_models_dir()).needle or "")
+        policy = checkpoint.parent / "folder_policy.json"
+        if policy.is_file():
+            data = json.loads(policy.read_text(encoding="utf-8"))
+            return {"accept_above": float(data["accept_above"]),
+                    "reject_below": float(data["reject_below"])}
+    except Exception:
+        pass
+    return {"accept_above": NEEDLE_ACCEPT_ABOVE, "reject_below": NEEDLE_REJECT_BELOW}
+
+
+def _run_needle_scan(job_id: str, project_id: str, per_folder: int) -> None:
+    try:
+        project = _project(project_id)
+        rect = ((project.step_value("rect") or {}).get("rect_echo")
+                or (project.step_value("import") or {}).get("rect_echo"))
+        if not rect:
+            raise ValueError("serve prima il rettangolo ecografico")
+
+        names = project.dedup_names()
+        if not names:
+            raise ValueError("importa prima una cartella")
+        base = project.working_dir()
+
+        # Una sottocartella per volta, campionata: i fotogrammi di una stessa
+        # sottocartella sono quasi identici fra loro, e dieci bastano per la media.
+        gruppi: Dict[str, List[str]] = {}
+        for name in names:
+            gruppi.setdefault(str(Path(name).parent), []).append(name)
+
+        scelti: List[str] = []
+        for cartella, elenco in gruppi.items():
+            elenco.sort()
+            passo = max(1, len(elenco) // per_folder) if per_folder else 1
+            scelti.extend(elenco[::passo][:per_folder] if per_folder else elenco)
+
+        _job_update(job_id, stage="materiale di calibrazione aghi", total=len(scelti))
+        engine = _inference_engine()
+        esito = engine.predict_needle(
+            [base / name for name in scelti], rect,
+            progress=lambda done, total: _job_update(job_id, done=done, total=total),
+        )
+        if not esito.get("available"):
+            raise FileNotFoundError("nessun modello aghi addestrato in artifacts/91_needle_models")
+
+        punteggi = esito["scores"]
+        banda = _needle_policy()
+        cartelle = []
+        for cartella, elenco in sorted(gruppi.items()):
+            valori = [(name, punteggi[str(base / name)]) for name in elenco
+                      if str(base / name) in punteggi]
+            if not valori:
+                continue
+            media = sum(v for _, v in valori) / len(valori)
+            verdetto = ("calibrazione" if media >= banda["accept_above"]
+                        else "no" if media < banda["reject_below"] else "dubbio")
+            valori.sort(key=lambda coppia: -coppia[1])
+            cartelle.append({
+                "folder": "." if cartella == "." else cartella,
+                "mean_score": round(media, 4),
+                "verdict": verdetto,
+                "scanned": len(valori),
+                "total": len(elenco),
+                "images": [{"name": n, "score": round(v, 4)} for n, v in valori[:8]],
+            })
+        cartelle.sort(key=lambda voce: -voce["mean_score"])
+
+        risultato = {
+            "folders": cartelle,
+            "policy": banda,
+            "scanned_images": len(punteggi),
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+        def mutate(_p: Project, value: Dict) -> Dict:
+            value["needle_scan"] = risultato
+            return value
+
+        _write_step(project_id, "import", mutate, invalidate=False)
+        _job_update(job_id, status="done", stage="fatto", result=risultato)
+    except Exception as errore:  # mostrato nella UI, mai sollevato dentro Flask
+        _job_update(job_id, status="error", stage=str(errore), error=str(errore))
+
+
+@app.post("/api/projects/<project_id>/import/needle")
+def api_import_needle(project_id: str):
+    """Cerca nelle sottocartelle del progetto il materiale per le linee guida."""
+    project = _project(project_id)
+    if not project.dedup_names():
+        return jsonify({"error": "importa prima una cartella"}), 400
+    if not ModelPaths.from_active_pipeline(_models_dir()).needle or not Path(
+            ModelPaths.from_active_pipeline(_models_dir()).needle).is_file():
+        return jsonify({"error": "nessun modello aghi addestrato disponibile"}), 400
+    per_folder = int(_payload().get("per_folder") or 10)
+    return jsonify({"job_id": _start_job(_run_needle_scan, project_id, per_folder)})
+
+
 @app.post("/api/projects/<project_id>/duplicates/unkeep")
 def api_duplicates_unkeep(project_id: str):
     """Disfa un «le tengo tutte»: quel gruppo torna a farsi guardare alla ricerca dopo."""

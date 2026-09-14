@@ -58,6 +58,7 @@ class ModelPaths:
     probe: Optional[Path] = None
     lt: Optional[Path] = None
     su_giu: Optional[Path] = None
+    needle: Optional[Path] = None
     line13_by_vendor: Dict[str, Path] = field(default_factory=dict)
 
     @classmethod
@@ -75,6 +76,12 @@ class ModelPaths:
             su_giu=(
                 Path(root).parents[1]
                 / "20_datasets/us_orientation_binary_20260320/rect_pipeline/model_su_giu_rect/best_model.pt"
+            ),
+            # Il classificatore del materiale di calibrazione aghi sta fuori dalla pipeline
+            # attiva: e' un blocco a se', e se manca l'app funziona come prima.
+            needle=(
+                Path(root).parents[1]
+                / "91_needle_models/resnet18_256_cpu/best_model.pt"
             ),
             line13_by_vendor=_load_line13_map(Path(root) / "maps" / "vendor_line13_template_map.json"),
         )
@@ -103,6 +110,8 @@ class Engine:
         self._lt_classes: List[str] = []
         self._su_giu = None
         self._su_giu_classes: List[str] = []
+        self._needle = None
+        self._needle_size = 0
         self._line13: Dict[str, tuple] = {}
 
     # -- setup -------------------------------------------------------------
@@ -477,6 +486,119 @@ class Engine:
         }
 
     # -- #13 template ecografo ---------------------------------------------
+    # -- aghi --------------------------------------------------------------
+    def _load_needle(self):
+        """Il classificatore del materiale per la sessione di calibrazione della guida aghi.
+
+        Riconosce i fotogrammi che servono a `WdgPageCalibration` del vecchio ESIBuilder:
+        l'ago ripreso in acqua, quello che l'operatore ricalca per ricavare angolo e
+        distanza dal centro. Opzionale come sonda e L/T: senza checkpoint l'app non
+        mostra la scheda e tutto il resto funziona uguale.
+        """
+        if self._needle is not None:
+            return self._needle
+        torch = self._setup()
+        path = self.paths.needle
+        if not path or not Path(path).is_file():
+            return None
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        self._needle_size = int(checkpoint.get("image_size") or 256)
+        arch = str(checkpoint.get("arch") or "resnet18")
+
+        from torchvision import models as tv
+
+        if arch == "resnet18":
+            model = tv.resnet18(weights=None)
+            model.fc = torch.nn.Sequential(torch.nn.Dropout(0.0),
+                                           torch.nn.Linear(model.fc.in_features, 1))
+        elif arch == "resnet50":
+            model = tv.resnet50(weights=None)
+            model.fc = torch.nn.Sequential(torch.nn.Dropout(0.0),
+                                           torch.nn.Linear(model.fc.in_features, 1))
+        elif arch == "efficientnet_b0":
+            model = tv.efficientnet_b0(weights=None)
+            model.classifier = torch.nn.Sequential(
+                torch.nn.Dropout(0.0), torch.nn.Linear(model.classifier[1].in_features, 1))
+        elif arch == "convnext_tiny":
+            model = tv.convnext_tiny(weights=None)
+            model.classifier[2] = torch.nn.Linear(model.classifier[2].in_features, 1)
+        else:
+            return None
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval().to(self._device)
+        self._needle = model
+        return model
+
+    def needle_available(self) -> bool:
+        return bool(self.paths.needle and Path(self.paths.needle).is_file())
+
+    def _needle_tensor(self, path: Path, rect: Dict[str, int], size: int, margin_pct: float):
+        """Ritaglio del rettangolo, lato lungo a `size`, riempito di nero fino al quadrato.
+
+        Non usa `_crop_tensor`: quello schiaccia il ritaglio in un quadrato, e schiacciare
+        cambia l'inclinazione degli aghi, che e' esattamente il segno da riconoscere. Il
+        modello e' stato addestrato con questo riempimento, e la preparazione a inferenza
+        deve essere la stessa.
+        """
+        self._setup()
+        from PIL import Image
+        from torchvision.transforms import functional as TF
+
+        with Image.open(path) as raw:
+            image = raw.convert("RGB")
+            width, height = image.size
+            left = max(0, min(int(rect["left"]), width - 1))
+            top = max(0, min(int(rect["top"]), height - 1))
+            right = max(left + 1, min(int(rect["right"]), width))
+            bottom = max(top + 1, min(int(rect["bottom"]), height))
+            mx = (right - left) * margin_pct / 100.0
+            my = (bottom - top) * margin_pct / 100.0
+            crop = image.crop((
+                int(max(0, round(left - mx))), int(max(0, round(top - my))),
+                int(min(width, round(right + mx))), int(min(height, round(bottom + my))),
+            ))
+            crop.thumbnail((size, size), Image.LANCZOS)
+            canvas = Image.new("RGB", (size, size), (0, 0, 0))
+            canvas.paste(crop, ((size - crop.width) // 2, (size - crop.height) // 2))
+        return TF.normalize(TF.to_tensor(canvas), IMAGENET_MEAN, IMAGENET_STD)
+
+    def predict_needle(
+        self,
+        paths: Sequence[Path],
+        rect: Dict[str, int],
+        batch: int = 8,
+        margin_pct: float = 2.0,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> Dict:
+        """Punteggio per fotogramma: e' materiale per la calibrazione della guida aghi?"""
+        torch = self._setup()
+        model = self._load_needle()
+        if model is None:
+            return {"available": False, "scores": {}}
+
+        size = self._needle_size or 256
+        scores: Dict[str, float] = {}
+        done = 0
+        for start in range(0, len(paths), batch):
+            chunk = list(paths[start : start + batch])
+            tensors, names = [], []
+            for path in chunk:
+                try:
+                    tensors.append(self._needle_tensor(path, rect, size, margin_pct))
+                except Exception:
+                    continue
+                names.append(path)
+            if tensors:
+                with torch.no_grad():
+                    logits = model(torch.stack(tensors).to(self._device)).squeeze(1).float()
+                    probabilities = torch.sigmoid(logits).cpu().tolist()
+                for path, score in zip(names, probabilities):
+                    scores[str(path)] = float(score)
+            done += len(chunk)
+            if progress:
+                progress(done, len(paths))
+        return {"available": True, "scores": scores, "model": str(self.paths.needle)}
+
     def _load_line13(self, vendor: str):
         if vendor in self._line13:
             return self._line13[vendor]

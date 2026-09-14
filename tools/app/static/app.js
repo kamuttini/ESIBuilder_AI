@@ -589,6 +589,71 @@ function panelImport(panel) {
   }
   panel.append(rotazione);
 
+  /* Il materiale per lo step «Linee guida».
+
+     Nel vecchio ESIBuilder la calibrazione della guida aghi chiede una immagine per ogni
+     angolo del kit, e la richiede da capo per ogni profondita' e per ogni flip: l'operatore
+     ricalca l'ago che vede nel fotogramma. Quei fotogrammi sono le acquisizioni fatte in
+     acqua, dove l'ago si vede nitido, e stanno sparsi in sottocartelle con nomi diversi da
+     una cartella all'altra. Qui si dice soltanto dove sono; quale immagine usare per quale
+     angolo resta una scelta dello step delle linee guida. */
+  const scan = value.needle_scan;
+  const aghi = el('details', { class: 'ov-fold' },
+    el('summary', {}, 'Materiale per le linee guida'));
+  aghi.append(el('p', { class: 'hint' },
+    'cerca nelle sottocartelle del progetto i fotogrammi con l\'ago in acqua, quelli che '
+    + 'servono a ricalcare le linee della guida. Dice dove sono, non quale usare per quale angolo.'));
+  const statoAghi = el('span', { class: 'hint' });
+  const elencoAghi = el('div', {});
+
+  const disegnaAghi = (dati) => {
+    elencoAghi.replaceChildren();
+    if (!dati) return;
+    const trovate = (dati.folders || []).filter((f) => f.verdict !== 'no');
+    if (!trovate.length) {
+      elencoAghi.append(el('p', { class: 'hint' },
+        `nessun materiale di calibrazione in ${(dati.folders || []).length} sottocartelle`));
+      return;
+    }
+    for (const cartella of trovate) {
+      const riga = el('div', { class: 'card', style: 'margin:6px 0' });
+      riga.append(el('div', { class: 'kv' },
+        el('span', {}, cartella.folder === '.' ? '(radice della cartella)' : cartella.folder),
+        el('span', {}, `${cartella.verdict === 'dubbio' ? 'da verificare' : 'calibrazione aghi'}`
+          + ` · ${cartella.mean_score.toFixed(2)} · ${cartella.scanned}/${cartella.total} img`)));
+      const strip = el('div', { class: 'row', style: 'flex-wrap:wrap;gap:4px' });
+      for (const immagine of cartella.images || []) {
+        strip.append(el('img', {
+          loading: 'lazy', alt: '', title: `${immagine.name} — ${immagine.score.toFixed(3)}`,
+          style: 'width:96px;max-height:64px;object-fit:contain;background:#000',
+          src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(immagine.name)}&w=140`,
+        }));
+      }
+      riga.append(strip);
+      elencoAghi.append(riga);
+    }
+    if (dati.at) elencoAghi.append(el('p', { class: 'hint' }, `analisi del ${dati.at}`));
+  };
+
+  const cercaAghi = el('button', {}, scan ? 'Rianalizza' : 'Cerca il materiale');
+  cercaAghi.addEventListener('click', async () => {
+    cercaAghi.disabled = true;
+    try {
+      const { job_id } = await api(`/projects/${state.projectId}/import/needle`, { body: {} });
+      const esito = await pollJob(job_id, statoAghi);
+      disegnaAghi(esito.result);
+      statoAghi.textContent = '';
+      toast('materiale per le linee guida analizzato');
+    } catch (errore) {
+      toast(errore.message, true);
+      statoAghi.textContent = errore.message;
+    } finally { cercaAghi.disabled = false; }
+  });
+  aghi.append(el('div', { class: 'row' }, cercaAghi, statoAghi), elencoAghi);
+  disegnaAghi(scan);
+  panel.append(aghi);
+
+
   /* L'area dell'orologio.
 
      Due fotogrammi della stessa scena presi a un secondo di distanza differiscono in ogni

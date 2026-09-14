@@ -27,12 +27,52 @@ Poi apri `http://127.0.0.1:8800/`. I progetti finiscono in `artifacts/80_app_pro
 | `stages.py` | marker di orientamento, depth e scala come sottoprocessi con `pipeline_context.json`, piu' i parser dalle righe del modulo al valore dello step |
 | `probe_shape.py` | misura geometrica lineare/convex — **non agganciata**, i numeri misurati sono nel docstring |
 | `server.py` | API Flask + servizio della UI |
+| — | il materiale per le linee guida si cerca dall'import: `POST /api/projects/<id>/import/needle` |
 | `static/` | wizard (vanilla JS, nessuna build) |
 | `static/box_editor.js` | editor dei box: trascinamento, maniglie, slider, schermo intero con scorrimento delle immagini |
 | `static/orientation_view.js` | visualizzatore orientamento: i 4 envelope, il marker per immagine, il ritaglio, filtri per gruppo, correzione con click |
 | `marker_refine.py` | dal click approssimativo alla posizione precisa (match del bundle in una finestra) + verifica del gruppo + ricalcolo degli envelope |
 | `orientation_marker.py` | il marker della cartella: innesco dalla banca, taglio del ritaglio, scelta per copertura, validazione dentro gli envelope |
 | `selftest_roundtrip.py` | controllo: rigenera un `.fss` legacy e verifica che sia identico |
+
+## Materiale per le linee guida (dallo step Import e analisi)
+
+Nel pannello dell'import, la piega **Materiale per le linee guida** cerca nelle sottocartelle
+del progetto i fotogrammi che servono allo step `guides` (`PAGE_CALIBRATION`, righe #22-#23).
+
+Nel vecchio ESIBuilder quella sessione (`WdgPageCalibration`) chiede **una immagine per ogni
+angolo** del kit — si rifiuta di proseguire se il numero non torna — e la richiede da capo per
+ogni profondita' e per ogni flip. L'operatore ricalca l'ago che vede nel fotogramma, e da quel
+tratto escono angolo e distanza dal centro. Per questo le acquisizioni sono fatte in acqua:
+serve vedere l'ago nitido. Qui si risponde solo alla domanda *dove sono*, non *quale usare per
+quale angolo*: quella e' la scelta dello step delle linee guida.
+
+Esempio su un progetto con tre sottocartelle (30 fotogrammi campionati, pochi secondi):
+
+```
+calibrazione   0.978   10/12 img   VERIFICA AGHI
+no             0.035   10/10 img   PROIBITE
+no             0.018   10/124 img  DEPTH
+```
+
+Il verdetto e' la media dei punteggi della sottocartella, non quello di un singolo fotogramma,
+quindi usa la banda di `folder_policy.json` accanto al checkpoint (accetta >= 0.60, rifiuta
+< 0.25) e non la soglia per-immagine del `metrics.json`, che mira al 98% di precision su un
+fotogramma solo. Misurata a precision 0.94 / recall 0.94 per cartella sul test.
+
+Il ritaglio usa `_needle_tensor`, non `_crop_tensor`: quest'ultimo schiaccia il ritaglio in un
+quadrato, e schiacciare cambia l'inclinazione degli aghi, che e' il segno da riconoscere.
+
+Il risultato si salva in `needle_scan` dentro lo step `import` **senza invalidare** nulla a
+valle: e' una informazione in piu' sulla cartella, non un dato geometrico.
+
+Il checkpoint sta in `artifacts/91_needle_models/`, fuori dalla pipeline attiva: se manca, la
+piega mostra l'errore e il resto dell'app funziona come prima. Il blocco che lo addestra e'
+`tools/needle/` (preparazione dataset, ritagli, training, valutazione, report HTML).
+
+**Limite noto:** il modello copre la sessione *a linee* (ago in acqua) e manca quella *a
+griglia* (`WdgPageGridCalibration`, cartelle `GUIDA AGHI` / `GUIDA BIOPSIA`), che classifica
+come negativa.
 
 ## Controllo del writer
 
