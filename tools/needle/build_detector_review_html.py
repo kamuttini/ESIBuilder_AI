@@ -27,11 +27,15 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from detect_needle_line import detect_in_frame  # noqa: E402
+from detect_needle_line import candidates_in_frame  # noqa: E402
 from guides_geometry import read_setup  # noqa: E402
 from needle_frames import NeedleScorer, all_frames  # noqa: E402
 
 CALIB_DIR = re.compile(r"agh|guid|biops", re.IGNORECASE)
+# BGR, as OpenCV wants them. One colour and one letter per needle, because several are
+# usually visible and a verdict on "the detection" is meaningless when there are four.
+SEGMENT_COLOURS = [(0, 0, 255), (0, 220, 255), (0, 255, 120), (255, 180, 0), (255, 120, 255)]
+SEGMENT_LETTERS = "abcde"
 SKIP_DIRS = {"$RECYCLE.BIN", "System Volume Information"}
 
 
@@ -78,6 +82,26 @@ def _frames_by_folder(acquisition: Path, size: Tuple[int, int], limit: int) -> L
     return found
 
 
+def _voti_html(number: int, n_segments: int) -> str:
+    """One row of buttons per needle: with several drawn, a single verdict says nothing."""
+    if n_segments == 0:
+        return ('<div class="vote"><button onclick="vota(\'%d\',\'manca\')">'
+                'c\'era un ago</button></div>' % number)
+    rows = []
+    for order in range(n_segments):
+        letter = SEGMENT_LETTERS[order % len(SEGMENT_LETTERS)]
+        key = f"{number}{letter}"
+        rows.append(
+            f'<div class="vote"><span class="seg">{letter}</span>'
+            f'<button onclick="vota(\'{key}\',\'ok\')">sull\'ago</button>'
+            f'<button onclick="vota(\'{key}\',\'no\')">sbagliato</button>'
+            f'<button class="ghost" onclick="vota(\'{key}\',\'\')">&times;</button></div>'
+        )
+    rows.append(f'<div class="vote"><button class="ghost wide" '
+                f'onclick="vota(\'{number}m\',\'manca\')">ne manca uno</button></div>')
+    return "".join(rows)
+
+
 def encode(image: np.ndarray, width: int) -> str:
     scale = width / float(image.shape[1])
     if scale < 1:
@@ -98,6 +122,9 @@ def main() -> int:
     parser.add_argument("--max-configs", type=int, default=14)
     parser.add_argument("--frames-per-config", type=int, default=3)
     parser.add_argument("--width", type=int, default=520)
+    parser.add_argument("--per-frame", type=int, default=4,
+                        help="Needles drawn per frame. Several are usually visible, and the "
+                             "brightest is not necessarily the one being calibrated.")
     parser.add_argument("--model", type=Path, default=None,
                         help="Needle classifier used to confirm the frames. Without it, folder "
                              "names decide alone and non-calibration frames get through.")
@@ -129,21 +156,31 @@ def main() -> int:
             if gray is None or (gray.shape[1], gray.shape[0]) != size:
                 continue
             total += 1
-            detection = detect_in_frame(gray, rect)
+            detections = candidates_in_frame(gray, rect, top_k=args.per_frame)
             canvas = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            if detection is not None:
-                found += 1
+            for order, detection in enumerate(detections):
+                colour = SEGMENT_COLOURS[order % len(SEGMENT_COLOURS)]
                 cv2.line(canvas,
                          (int(detection.p1[0]), int(detection.p1[1])),
-                         (int(detection.p2[0]), int(detection.p2[1])), (0, 0, 255), 2)
+                         (int(detection.p2[0]), int(detection.p2[1])), colour, 2)
+                cv2.putText(canvas, SEGMENT_LETTERS[order % len(SEGMENT_LETTERS)],
+                            (int(detection.p2[0]) + 6, int(detection.p2[1]) + 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2, cv2.LINE_AA)
+            if detections:
+                found += 1
             crop = canvas[rect[1]:rect[3], rect[0]:rect[2]]
             uri = encode(crop, args.width)
-            if detection is None:
+            if not detections:
                 caption = '<span class="no">nessuna rilevazione</span>'
             else:
-                caption = (f'angolo <b>{detection.angle_deg:.2f}&deg;</b> &middot; '
-                           f'lunghezza {detection.length:.0f} px &middot; '
-                           f'contrasto {detection.contrast:.0f}')
+                parts = []
+                for order, detection in enumerate(detections):
+                    letter = SEGMENT_LETTERS[order % len(SEGMENT_LETTERS)]
+                    rgb = SEGMENT_COLOURS[order % len(SEGMENT_COLOURS)]
+                    parts.append(
+                        f'<span class="seg" style="color:rgb({rgb[2]},{rgb[1]},{rgb[0]})">'
+                        f'{letter}</span> {detection.angle_deg:.1f}&deg;')
+                caption = " &nbsp; ".join(parts)
             number = len(cards) + 1
             cards.append(
                 f'<figure id="c{number}" data-n="{number}">'
@@ -179,7 +216,9 @@ def main() -> int:
  .head {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }}
  .num {{ font-weight: 700; color: #8fb6ff; }}
  .mark {{ font-size: 12px; }}
- .vote {{ display: flex; gap: 6px; margin-top: 8px; }}
+ .vote {{ display: flex; gap: 6px; margin-top: 6px; align-items: center; }}
+ .seg {{ font-weight: 700; width: 14px; display: inline-block; }}
+ .vote .wide {{ flex: 1; }}
  .vote button {{ flex: 1; padding: 5px 4px; font-size: 12px; border-radius: 5px; cursor: pointer;
                  border: 1px solid #3a3a3a; background: #262626; color: #e8e8e8; }}
  .vote button:hover {{ background: #333; }}
@@ -198,8 +237,10 @@ RECT_ECHO. Quello che conta non &egrave; quante ne trova, ma se ognuna sta <b>su
 &egrave; lo strumento di misura di tutta la catena delle linee guida, e se sbaglia di qualche grado
 sbagliano tutti i numeri a valle senza che nessuno se ne accorga.</p>
 <div id="barra">
-  <b>Come segnalarmele:</b> premi <i>sull'ago</i> o <i>sbagliato</i> su ogni riquadro (oppure
-  scrivimi solo i numeri). Il riepilogo qui sotto si aggiorna da solo: copialo e incollamelo.
+  <b>Come segnalarmele:</b> ogni ago disegnato ha la sua lettera
+  (<b>a</b>, <b>b</b>, <b>c</b>&hellip;) e la sua riga di bottoni, quindi un riquadro pu&ograve;
+  avere <i>7a</i> giusto e <i>7b</i> sbagliato. Se il programma ha perso un ago che si vede,
+  premi <i>ne manca uno</i>. Il riepilogo qui sotto si aggiorna da solo: copialo e incollamelo.
   <span id="conta" class="path"></span>
   <textarea id="esito" readonly></textarea>
 </div>
@@ -218,17 +259,25 @@ function vota(n, valore) {{
 function disegna() {{
   document.querySelectorAll('figure[data-n]').forEach((fig) => {{
     const n = fig.dataset.n;
-    fig.classList.toggle('ok', voti[n] === 'ok');
-    fig.classList.toggle('no', voti[n] === 'no');
+    const suoi = Object.keys(voti).filter((k) => parseInt(k, 10) === parseInt(n, 10));
+    const buoni = suoi.filter((k) => voti[k] === 'ok').length;
+    const cattivi = suoi.filter((k) => voti[k] === 'no').length;
+    fig.classList.toggle('ok', buoni > 0 && cattivi === 0);
+    fig.classList.toggle('no', cattivi > 0 && buoni === 0);
     const m = document.getElementById('m' + n);
-    if (m) m.textContent = voti[n] === 'ok' ? 'sull\u2019ago' : voti[n] === 'no' ? 'sbagliato' : '';
+    if (m) m.textContent = suoi.length ? `${{buoni}} ok / ${{cattivi}} no` : '';
   }});
-  const ok = Object.keys(voti).filter((k) => voti[k] === 'ok').map(Number).sort((a, b) => a - b);
-  const no = Object.keys(voti).filter((k) => voti[k] === 'no').map(Number).sort((a, b) => a - b);
+  const ordina = (a, b) => (parseInt(a, 10) - parseInt(b, 10)) || a.localeCompare(b);
+  const ok = Object.keys(voti).filter((k) => voti[k] === 'ok').sort(ordina);
+  const no = Object.keys(voti).filter((k) => voti[k] === 'no').sort(ordina);
+  const manca = Object.keys(voti).filter((k) => voti[k] === 'manca').sort(ordina);
+  const visti = new Set(Object.keys(voti).map((k) => parseInt(k, 10))).size;
   document.getElementById('conta').textContent =
-    ` \u2014 ${{ok.length}} sull\u2019ago, ${{no.length}} sbagliate, ${{TOTALE - ok.length - no.length}} da guardare`;
+    ` \u2014 ${{ok.length}} segmenti sull\u2019ago, ${{no.length}} sbagliati, ` +
+    `${{TOTALE - visti}} fotogrammi da guardare`;
   document.getElementById('esito').value =
-    `sull'ago: ${{ok.join(', ') || '-'}}\nsbagliate: ${{no.join(', ') || '-'}}`;
+    `sull'ago: ${{ok.join(', ') || '-'}}\nsbagliate: ${{no.join(', ') || '-'}}` +
+    (manca.length ? `\nne manca uno: ${{manca.join(', ')}}` : '');
 }}
 const TOTALE = document.querySelectorAll('figure[data-n]').length;
 disegna();
