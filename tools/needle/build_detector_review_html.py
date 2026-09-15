@@ -97,7 +97,10 @@ def _voti_html(number: int, n_segments: int) -> str:
         return ('<div class="vote"><button onclick="vota(\'%d\',\'manca\')">'
                 'c\'era un ago</button>'
                 '<button class="ghost" onclick="cancellaLinea(%d)">cancella</button></div>'
-                '<div class="disegnate" id="d%d"></div>' % (number, number, number))
+                '<div class="vote"><button class="ghost wide" id="b%dxx" '
+                'onclick="vota(\'%dx\',\'escludi\')">non e\' sonda in acqua</button></div>'
+                '<div class="disegnate" id="d%d"></div>'
+                % (number, number, number, number, number))
     rows = []
     for order in range(n_segments):
         letter = SEGMENT_LETTERS[order % len(SEGMENT_LETTERS)]
@@ -108,9 +111,23 @@ def _voti_html(number: int, n_segments: int) -> str:
             f'<button onclick="vota(\'{key}\',\'no\')">sbagliato</button>'
             f'<button class="ghost" onclick="vota(\'{key}\',\'\')">&times;</button></div>'
         )
+    # Quali segmenti sono in realta' lo stesso ago spezzato: lo dice l'occhio, e serve a
+    # tarare l'unione automatica invece di indovinarne le tolleranze.
+    if n_segments >= 2:
+        coppie = []
+        for i in range(n_segments):
+            for j in range(i + 1, n_segments):
+                a, b = SEGMENT_LETTERS[i], SEGMENT_LETTERS[j]
+                coppie.append(
+                    f'<button id="b{number}{a}{b}eq" class="ghost" '
+                    f'onclick="vota(\'{number}{a}{b}\',\'stesso\')">{a}={b}</button>')
+        rows.append(f'<div class="vote"><span class="seg">=</span>{"".join(coppie)}</div>')
     rows.append(f'<div class="vote"><button class="ghost wide" '
                 f'onclick="vota(\'{number}m\',\'manca\')">ne manca uno</button>'
                 f'<button class="ghost" onclick="cancellaLinea({number})">cancella</button></div>'
+                f'<div class="vote"><button class="ghost wide" id="b{number}xx" '
+                f'onclick="vota(\'{number}x\',\'escludi\')">non e\' sonda in acqua</button>'
+                f'</div>'
                 f'<div class="disegnate" id="d{number}"></div>')
     return "".join(rows)
 
@@ -278,6 +295,11 @@ def main() -> int:
  .vote .ghost {{ flex: 0 0 62px; color: #999; }}
  figure.ok {{ outline: 2px solid #35c88a; }}
  figure.no {{ outline: 2px solid #ff2d20; }}
+ figure.escluso {{ outline: 2px dashed #8a8a8a; opacity: .45; }}
+ figure.escluso .canvas::after {{ content: "esclusa \\2014 non e\\2019 sonda in acqua";
+   position: absolute; inset: auto 0 0 0; background: rgba(0,0,0,.72); color: #ddd;
+   font-size: 12px; padding: 4px 6px; text-align: center; }}
+ .vote button.attivo.grigio {{ background: #444; border-color: #888; color: #eee; }}
  #barra {{ position: sticky; top: 0; z-index: 5; background: #191919; border: 1px solid #333;
            border-radius: 8px; padding: 10px 14px; margin-top: 16px; }}
  #json {{ width: 100%; min-height: 120px; margin-top: 8px; background: #101010; color: #ddd;
@@ -301,7 +323,11 @@ sbagliano tutti i numeri a valle senza che nessuno se ne accorga.</p>
   sbagliato. Ogni ago ha la sua lettera
   (<b>a</b>, <b>b</b>, <b>c</b>&hellip;) e la sua riga di bottoni, quindi un riquadro pu&ograve;
   avere <i>7a</i> giusto e <i>7b</i> sbagliato. Se il programma ha perso un ago che si vede,
-  premi <i>ne manca uno</i>. Il riepilogo qui sotto si aggiorna da solo: copialo e incollamelo.
+  premi <i>ne manca uno</i>. Se il
+  fotogramma non &egrave; proprio materiale di calibrazione &mdash; niente sonda in acqua &mdash;
+  premi <b>a=b</b> se due segmenti sono in realt&agrave; lo stesso ago spezzato, e
+  <b>non &egrave; sonda in acqua</b>: il riquadro si spegne e finisce nell'esportazione
+  come da escludere, cos&igrave; correggo la selezione e non solo il rilevatore. Il riepilogo qui sotto si aggiorna da solo: copialo e incollamelo.
   <br><b>Per indicarmi l'ago giusto:</b> trascina sull'immagine da un capo all'altro dell'ago.
   Puoi tracciarne pi&ugrave; di uno; <i>cancella</i> toglie l'ultimo di quel riquadro. Sono queste
   le annotazioni che servono ad addestrare il rilevatore: dicono dov'&egrave; l'ago, non solo che
@@ -327,7 +353,10 @@ function vota(n, valore) {{
 function disegna() {{
   document.querySelectorAll('figure[data-n]').forEach((fig) => {{
     const n = fig.dataset.n;
-    const suoi = Object.keys(voti).filter((k) => parseInt(k, 10) === parseInt(n, 10));
+    const escluso = voti[n + 'x'] === 'escludi';
+    fig.classList.toggle('escluso', escluso);
+    const suoi = Object.keys(voti).filter((k) => parseInt(k, 10) === parseInt(n, 10)
+                                                 && !k.endsWith('x'));
     const buoni = suoi.filter((k) => voti[k] === 'ok').length;
     const cattivi = suoi.filter((k) => voti[k] === 'no').length;
     fig.classList.toggle('ok', buoni > 0 && cattivi === 0);
@@ -339,9 +368,22 @@ function disegna() {{
   const ok = Object.keys(voti).filter((k) => voti[k] === 'ok').sort(ordina);
   const no = Object.keys(voti).filter((k) => voti[k] === 'no').sort(ordina);
   const manca = Object.keys(voti).filter((k) => voti[k] === 'manca').sort(ordina);
+  const esclusi = Object.keys(voti).filter((k) => voti[k] === 'escludi')
+    .map((k) => k.slice(0, -1)).sort(ordina);
+  const stessi = Object.keys(voti).filter((k) => voti[k] === 'stesso').sort(ordina);
   document.querySelectorAll('.vote button[id^="b"]').forEach((b) => {{
     const key = b.id.slice(1, -2);
     const tipo = b.id.slice(-2);
+    if (tipo === 'eq') {{
+      const chiave = b.id.slice(1, -2);
+      b.classList.toggle('attivo', voti[chiave] === 'stesso');
+      return;
+    }}
+    if (tipo === 'xx') {{
+      b.classList.toggle('attivo', voti[key + 'x'] === 'escludi');
+      b.classList.toggle('grigio', true);
+      return;
+    }}
     b.classList.toggle('attivo', voti[key] === tipo);
     b.classList.toggle('rosso', tipo === 'no');
   }});
@@ -469,6 +511,7 @@ function annotazioni() {{
     if (!linee[n] || !linee[n].length) return;
     const [l, t] = fig.dataset.rect.split(',').map(Number);
     const [cw, ch] = fig.dataset.crop.split(',').map(Number);
+    if (voti[n + 'x'] === 'escludi') return;   // esclusa: non deve finire fra le annotazioni
     out.push({{
       n: Number(n), frame: fig.dataset.frame, config: fig.dataset.config,
       rect: fig.dataset.rect.split(',').map(Number),
@@ -487,11 +530,16 @@ function aggiornaEsito() {{
   const ok = Object.keys(voti).filter((k) => voti[k] === 'ok').sort(ordina);
   const no = Object.keys(voti).filter((k) => voti[k] === 'no').sort(ordina);
   const manca = Object.keys(voti).filter((k) => voti[k] === 'manca').sort(ordina);
+  const esclusi = Object.keys(voti).filter((k) => voti[k] === 'escludi')
+    .map((k) => k.slice(0, -1)).sort(ordina);
+  const stessi = Object.keys(voti).filter((k) => voti[k] === 'stesso').sort(ordina);
   const ann = annotazioni();
   const quanti = ann.reduce((s, a) => s + a.lines.length, 0);
   document.getElementById('esito').value =
     `sull'ago: ${{ok.join(', ') || '-'}}\nsbagliate: ${{no.join(', ') || '-'}}` +
     (manca.length ? `\nne manca uno: ${{manca.join(', ')}}` : '') +
+    (esclusi.length ? `\nda escludere (non sonda in acqua): ${{esclusi.join(', ')}}` : '') +
+    (stessi.length ? `\nstesso ago: ${{stessi.join(', ')}}` : '') +
     (quanti ? `\naghi tracciati a mano: ${{quanti}} su ${{ann.length}} fotogrammi (usa il bottone per il file)` : '');
 }}
 
@@ -499,8 +547,30 @@ function aggiornaEsito() {{
 // l'attributo download e navigano sul blob, lasciando la pagina bianca e nessun file. Quindi
 // si prova a scaricare, ma il testo viene comunque messo in chiaro e negli appunti: le
 // annotazioni non devono poter sparire per un dettaglio del browser.
+function esclusi() {{
+  const out = [];
+  document.querySelectorAll('figure[data-n]').forEach((fig) => {{
+    const n = fig.dataset.n;
+    if (voti[n + 'x'] === 'escludi') {{
+      out.push({{n: Number(n), frame: fig.dataset.frame, config: fig.dataset.config,
+                motivo: "non e' sonda in acqua"}});
+    }}
+  }});
+  return out;
+}}
+
+function stessoAgo() {{
+  return Object.keys(voti).filter((k) => voti[k] === 'stesso').map((k) => {{
+    const m = k.match(/^(\\d+)([a-e])([a-e])$/);
+    return m ? {{n: Number(m[1]), segmenti: [m[2], m[3]]}} : null;
+  }}).filter(Boolean);
+}}
+
 function testoAnnotazioni() {{
-  return JSON.stringify({{annotazioni: annotazioni()}}, null, 1);
+  // le escluse viaggiano insieme: dicono quali fotogrammi la selezione non avrebbe
+  // dovuto proporre, che serve a correggere la selezione, non solo il rilevatore
+  return JSON.stringify({{annotazioni: annotazioni(), escluse: esclusi(),
+                          stesso_ago: stessoAgo()}}, null, 1);
 }}
 
 document.getElementById('scarica').addEventListener('click', async () => {{
