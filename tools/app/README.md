@@ -79,6 +79,47 @@ piega mostra l'errore e il resto dell'app funziona come prima. Il blocco che lo 
 griglia* (`WdgPageGridCalibration`, cartelle `GUIDA AGHI` / `GUIDA BIOPSIA`), che classifica
 come negativa.
 
+## Linee guida: #22 e #23 proposti dagli aghi (step `guides`)
+
+Nello step **Linee guida** il bottone *Misura gli aghi* fa l'intera catena: prende i fotogrammi
+di calibrazione che la ricerca dell'import ha gia' trovato, misura l'ago in ognuno, e converte
+la misura nella coppia legacy — angolo (`#23`) e distanza dal top del RECT_ECHO al punto in cui
+la prima linea incrocia la verticale centrale (`#22`).
+
+Serve che siano gia' fatti: il **rettangolo**, i **pixel ratio** dello step depth e scala, e la
+**ricerca del materiale** nello step Import e analisi. Se manca qualcosa il messaggio lo dice.
+
+Le misure vengono raggruppate per angolo: ogni gruppo e' una famiglia di linee guida, cioe' una
+voce di `#23`. *Porta la proposta nel valore* precompila l'editor nella forma che il writer si
+aspetta.
+
+### Quanto fidarsi
+
+Misurato su 181 aghi tracciati a mano da Camilla, su fotogrammi di 40 acquisizioni diverse:
+
+| | entro 1° | entro 3° |
+|---|---|---|
+| prima scelta del rilevatore | 23% | 36% |
+| con le regole geometriche | **30%** | **47%** |
+
+Quindi **e' una proposta da confermare, non un risultato**. Circa un terzo delle volte l'angolo
+e' gia' giusto entro la tolleranza di 1° chiesta da ESI; in circa metà dei casi ci si arriva
+correggendo poco. Le famiglie viste in un solo fotogramma stanno separate, sotto *incerte*:
+con questa precisione una misura sola e' tanto probabile che sia un errore quanto un ago.
+
+La colonna delle depth va **controllata una per una**: senza sapere a che profondita' e' stato
+preso ogni fotogramma, la stessa distanza viene ripetuta su tutte. E' un punto di partenza.
+
+### Cosa e' verificato e cosa no
+
+La geometria e' verificata due volte: andata e ritorno sul formato legacy (12.860 combinazioni,
+errore mediano 0.03°) e contro gli aghi tracciati a mano, che cadono a **0.94° di mediana**
+dall'angolo legacy quando l'accoppiamento configurazione-acquisizione e' corretto. Il budget di
+1° e' quindi raggiungibile: quello che manca e' la precisione del rilevatore, non la matematica.
+
+Il blocco che misura vive in `tools/needle/`; `propose_guide_lines.py` fa la stessa cosa da riga
+di comando su una cartella qualunque.
+
 ## Controllo del writer
 
 ```bash
