@@ -28,7 +28,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from detect_needle_line import candidates_in_frame  # noqa: E402
+from detect_needle import detect as detect_needles  # noqa: E402
+from refine_needles import refine  # noqa: E402
 from guides_geometry import read_setup  # noqa: E402
 from needle_frames import NeedleScorer, all_frames, frames_of_probe  # noqa: E402
 
@@ -134,7 +135,9 @@ def main() -> int:
     parser.add_argument("--max-configs", type=int, default=14)
     parser.add_argument("--frames-per-config", type=int, default=3)
     parser.add_argument("--width", type=int, default=520)
-    parser.add_argument("--per-frame", type=int, default=4,
+    parser.add_argument("--grezzo", action="store_true",
+                        help="Show the raw candidates instead of the refined needles.")
+    parser.add_argument("--per-frame", type=int, default=2,
                         help="Needles drawn per frame. Several are usually visible, and the "
                              "brightest is not necessarily the one being calibrated.")
     parser.add_argument("--model", type=Path, default=None,
@@ -168,7 +171,11 @@ def main() -> int:
             if gray is None or (gray.shape[1], gray.shape[0]) != size:
                 continue
             total += 1
-            detections = candidates_in_frame(gray, rect, top_k=args.per_frame)
+            raw = detect_needles(gray, rect, top_k=max(4, args.per_frame))
+            # what the pipeline actually proposes: merged pieces, at most two, parallel,
+            # bright enough and with ridges -- not the raw candidate list
+            detections = (refine(raw, gray, max_needles=args.per_frame)
+                          if not args.grezzo else raw)
             # The needles are NOT burned into the image: they go into the SVG overlay, so a
             # verdict can restyle the one it refers to. Baked in, "b is wrong" left the frame
             # looking exactly as before and the reviewer could not see what she had marked.
