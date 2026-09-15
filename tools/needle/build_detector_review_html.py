@@ -233,11 +233,12 @@ def main() -> int:
  .overlay line.mia {{ stroke: #35ff9b; stroke-width: 3; stroke-linecap: round; }}
  .overlay line.tmp {{ stroke: #9bffd0; stroke-dasharray: 5 4; stroke-width: 2.5; }}
  .overlay line.det {{ stroke: #ffb020; stroke-width: 2.5; }}
- .overlay line.det.ok {{ stroke: #35c8ff; stroke-width: 4; }}
- .overlay line.det.no {{ stroke: #f2564d; stroke-width: 2; stroke-dasharray: 6 5; opacity: .7; }}
+ .overlay line.det.ok {{ stroke: #2ee6a8; stroke-width: 4; }}
+ .overlay line.det.no {{ stroke: #ff2d20; stroke-width: 4; }}
  .overlay text {{ font: 700 15px system-ui; paint-order: stroke; stroke: #000; stroke-width: 3px; }}
- .vote button.attivo {{ background: #35507a; border-color: #4d7ab8; color: #fff; }}
- .vote button.attivo.rosso {{ background: #6b2a26; border-color: #a04a44; }}
+ .overlay text.segno {{ font: 900 30px system-ui; stroke-width: 5px; }}
+ .vote button.attivo {{ background: #1c6b50; border-color: #2ee6a8; color: #eafff6; }}
+ .vote button.attivo.rosso {{ background: #7a1c14; border-color: #ff2d20; color: #ffecea; }}
  .disegnate {{ color: #35ff9b; font-size: 12px; margin-top: 4px; }}
  #scarica {{ margin-top: 8px; padding: 6px 12px; border-radius: 6px; cursor: pointer;
              border: 1px solid #3a3a3a; background: #263; color: #eaffea; }}
@@ -246,7 +247,7 @@ def main() -> int:
  .vote button:hover {{ background: #333; }}
  .vote .ghost {{ flex: 0 0 62px; color: #999; }}
  figure.ok {{ outline: 2px solid #35c88a; }}
- figure.no {{ outline: 2px solid #f2564d; }}
+ figure.no {{ outline: 2px solid #ff2d20; }}
  #barra {{ position: sticky; top: 0; z-index: 5; background: #191919; border: 1px solid #333;
            border-radius: 8px; padding: 10px 14px; margin-top: 16px; }}
  #esito {{ width: 100%; min-height: 62px; margin-top: 8px; background: #101010; color: #ddd;
@@ -260,9 +261,9 @@ RECT_ECHO. Quello che conta non &egrave; quante ne trova, ma se ognuna sta <b>su
 sbagliano tutti i numeri a valle senza che nessuno se ne accorga.</p>
 <div id="barra">
   <b>Come segnalarmele:</b> ogni ago trovato dal programma &egrave;
-  <span style="color:#ffb020">arancione</span>; quando lo marchi diventa
-  <span style="color:#35c8ff">azzurro e spesso</span> se &egrave; giusto,
-  <span style="color:#f2564d">rosso tratteggiato e smorto</span> se &egrave; sbagliato. Cos&igrave;
+  <span style="color:#ffb020">arancione</span>; quando lo marchi gli compare sopra
+  un segno: <span style="color:#2ee6a8">&#10003; verde</span> se &egrave; giusto,
+  <span style="color:#ff2d20">&#10005; rosso</span> se &egrave; sbagliato. Cos&igrave;
   vedi a colpo d'occhio cosa hai segnato, anche quando in un fotogramma uno solo &egrave;
   sbagliato. Ogni ago ha la sua lettera
   (<b>a</b>, <b>b</b>, <b>c</b>&hellip;) e la sua riga di bottoni, quindi un riquadro pu&ograve;
@@ -333,7 +334,7 @@ function cancellaLinea(n) {{
 }}
 
 const LETTERE = 'abcde';
-const COLORI = {{det: '#ffb020', ok: '#35c8ff', no: '#f2564d'}};
+const COLORI = {{det: '#ffb020', ok: '#2ee6a8', no: '#ff2d20'}};
 
 function disegnaLinee() {{
   document.querySelectorAll('figure[data-n]').forEach((fig) => {{
@@ -356,9 +357,22 @@ function disegnaLinee() {{
       t.setAttribute('x', (d.x2 * 100) + '%');
       t.setAttribute('y', (d.y2 * 100) + '%');
       t.setAttribute('fill', COLORI[stato] || COLORI.det);
-      t.setAttribute('opacity', stato === 'no' ? '.7' : '1');
       t.textContent = lettera;
       svg.appendChild(t);
+      // Il segno sopra l'ago: una croce o una spunta, grande, al centro del segmento.
+      // Colore e spessore da soli non bastavano -- si vedeva che qualcosa era cambiato
+      // ma non *cosa* si era deciso.
+      if (stato) {{
+        const segno = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        segno.setAttribute('class', 'segno');
+        segno.setAttribute('x', ((d.x1 + d.x2) / 2 * 100) + '%');
+        segno.setAttribute('y', ((d.y1 + d.y2) / 2 * 100) + '%');
+        segno.setAttribute('text-anchor', 'middle');
+        segno.setAttribute('dominant-baseline', 'central');
+        segno.setAttribute('fill', COLORI[stato]);
+        segno.textContent = stato === 'no' ? '\u2715' : '\u2713';
+        svg.appendChild(segno);
+      }}
     }});
     for (const l of (linee[n] || [])) {{
       const el = document.createElementNS('http://www.w3.org/2000/svg', 'line');
