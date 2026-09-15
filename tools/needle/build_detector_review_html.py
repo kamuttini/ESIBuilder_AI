@@ -250,6 +250,9 @@ def main() -> int:
  figure.no {{ outline: 2px solid #ff2d20; }}
  #barra {{ position: sticky; top: 0; z-index: 5; background: #191919; border: 1px solid #333;
            border-radius: 8px; padding: 10px 14px; margin-top: 16px; }}
+ #json {{ width: 100%; min-height: 120px; margin-top: 8px; background: #101010; color: #ddd;
+          border: 1px solid #3a6; border-radius: 6px; padding: 8px;
+          font-family: ui-monospace, monospace; font-size: 11px; }}
  #esito {{ width: 100%; min-height: 62px; margin-top: 8px; background: #101010; color: #ddd;
            border: 1px solid #333; border-radius: 6px; padding: 8px; font-family: ui-monospace, monospace;
            font-size: 12px; }}
@@ -276,6 +279,8 @@ sbagliano tutti i numeri a valle senza che nessuno se ne accorga.</p>
   <span id="conta" class="path"></span>
   <textarea id="esito" readonly></textarea>
   <button id="scarica">Scarica le annotazioni (JSON)</button>
+  <span id="esitoScarica" class="path"></span>
+  <textarea id="json" readonly style="display:none"></textarea>
 </div>
 <div class="grid">{"".join(cards)}</div>
 <script>
@@ -460,14 +465,41 @@ function aggiornaEsito() {{
     (quanti ? `\naghi tracciati a mano: ${{quanti}} su ${{ann.length}} fotogrammi (usa il bottone per il file)` : '');
 }}
 
-document.getElementById('scarica').addEventListener('click', () => {{
-  const blob = new Blob([JSON.stringify({{annotazioni: annotazioni()}}, null, 1)],
-                        {{type: 'application/json'}});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'aghi_annotati.json';
-  a.click();
-  URL.revokeObjectURL(a.href);
+// Scaricare da una pagina aperta con file:// non e' affidabile: certi browser ignorano
+// l'attributo download e navigano sul blob, lasciando la pagina bianca e nessun file. Quindi
+// si prova a scaricare, ma il testo viene comunque messo in chiaro e negli appunti: le
+// annotazioni non devono poter sparire per un dettaglio del browser.
+function testoAnnotazioni() {{
+  return JSON.stringify({{annotazioni: annotazioni()}}, null, 1);
+}}
+
+document.getElementById('scarica').addEventListener('click', async () => {{
+  const testo = testoAnnotazioni();
+  const area = document.getElementById('json');
+  area.style.display = 'block';
+  area.value = testo;
+  area.select();
+  let copiato = false;
+  try {{
+    await navigator.clipboard.writeText(testo);
+    copiato = true;
+  }} catch (e) {{
+    try {{ copiato = document.execCommand('copy'); }} catch (e2) {{ copiato = false; }}
+  }}
+  try {{
+    const blob = new Blob([testo], {{type: 'application/json'}});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'aghi_annotati.json';
+    a.style.display = 'none';
+    document.body.appendChild(a);      // certi browser non scaricano un anchor fuori dal DOM
+    a.click();
+    setTimeout(() => {{ document.body.removeChild(a); URL.revokeObjectURL(url); }}, 4000);
+  }} catch (e) {{ /* resta il testo qui sotto */ }}
+  document.getElementById('esitoScarica').textContent = copiato
+    ? 'copiato negli appunti — e il testo e\u2019 qui sotto, se il file non e\u2019 arrivato'
+    : 'se il file non e\u2019 arrivato, copia il testo qui sotto';
 }});
 
 const TOTALE = document.querySelectorAll('figure[data-n]').length;
