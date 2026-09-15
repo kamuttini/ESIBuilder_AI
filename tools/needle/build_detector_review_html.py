@@ -16,6 +16,7 @@ import argparse
 import base64
 import csv
 import html
+import hashlib
 import io
 import json
 import os
@@ -190,6 +191,7 @@ def main() -> int:
         print(f"una per acquisizione: {len(rows)} acquisizioni distinte")
 
     cards: List[str] = []
+    frame_paths: List[str] = []
     found = total = 0
     for row in rows[: args.max_configs]:
         setup = read_setup(Path(row["setup_file"]))
@@ -229,6 +231,7 @@ def main() -> int:
                         f'{letter}</span> {detection.angle_deg:.1f}&deg;')
                 caption = " &nbsp; ".join(parts)
             number = len(cards) + 1
+            frame_paths.append(str(frame))
             crop_w, crop_h = rect[2] - rect[0], rect[3] - rect[1]
             drawn = json.dumps([
                 {"x1": (d.p1[0] - rect[0]) / crop_w, "y1": (d.p1[1] - rect[1]) / crop_h,
@@ -252,6 +255,9 @@ def main() -> int:
                 f'<span class="path">{html.escape(row["config"][:52])}</span><br>'
                 f'<span class="path">{html.escape(frame.name)}</span></figcaption></figure>'
             )
+
+    gallery_id = hashlib.sha1(
+        "|".join(sorted(frame_paths)).encode("utf-8")).hexdigest()[:12]
 
     document = f"""<!doctype html>
 <html lang="it"><meta charset="utf-8">
@@ -287,6 +293,8 @@ def main() -> int:
  .vote button.attivo {{ background: #1c6b50; border-color: #2ee6a8; color: #eafff6; }}
  .vote button.attivo.rosso {{ background: #7a1c14; border-color: #ff2d20; color: #ffecea; }}
  .disegnate {{ color: #35ff9b; font-size: 12px; margin-top: 4px; }}
+ #azzera {{ margin-top: 8px; margin-left: 6px; padding: 6px 12px; border-radius: 6px;
+            cursor: pointer; border: 1px solid #5a3a3a; background: #2a1a1a; color: #e8cfcf; }}
  #scarica {{ margin-top: 8px; padding: 6px 12px; border-radius: 6px; cursor: pointer;
              border: 1px solid #3a3a3a; background: #263; color: #eaffea; }}
  .vote button {{ flex: 1; padding: 5px 4px; font-size: 12px; border-radius: 5px; cursor: pointer;
@@ -335,12 +343,18 @@ sbagliano tutti i numeri a valle senza che nessuno se ne accorga.</p>
   <span id="conta" class="path"></span>
   <textarea id="esito" readonly></textarea>
   <button id="scarica">Scarica le annotazioni (JSON)</button>
+  <button id="azzera">Azzera tutto</button>
   <span id="esitoScarica" class="path"></span>
   <textarea id="json" readonly style="display:none"></textarea>
 </div>
 <div class="grid">{"".join(cards)}</div>
 <script>
-const CHIAVE = 'rilevatore_ago_voti';
+// La chiave porta l'identita' della galleria, calcolata sui fotogrammi che contiene. Senza,
+// aprendo una galleria nuova il browser rimetteva addosso i voti della precedente: sono
+// indicizzati per numero di riquadro, e il riquadro 3 di una galleria non e' il riquadro 3
+// dell'altra. Apparivano come correzioni a caso su immagini mai viste.
+const GALLERIA = '{gallery_id}';
+const CHIAVE = 'rilevatore_ago_voti_' + GALLERIA;
 let voti = {{}};
 try {{ voti = JSON.parse(localStorage.getItem(CHIAVE) || '{{}}'); }} catch (e) {{ voti = {{}}; }}
 
@@ -394,7 +408,7 @@ function disegna() {{
     `${{TOTALE - visti}} fotogrammi da guardare`;
   aggiornaEsito();
 }}
-const CHIAVE_LINEE = 'rilevatore_ago_linee';
+const CHIAVE_LINEE = 'rilevatore_ago_linee_' + GALLERIA;
 let linee = {{}};
 try {{ linee = JSON.parse(localStorage.getItem(CHIAVE_LINEE) || '{{}}'); }} catch (e) {{ linee = {{}}; }}
 
@@ -572,6 +586,13 @@ function testoAnnotazioni() {{
   return JSON.stringify({{annotazioni: annotazioni(), escluse: esclusi(),
                           stesso_ago: stessoAgo()}}, null, 1);
 }}
+
+document.getElementById('azzera').addEventListener('click', () => {{
+  if (!confirm('Cancello tutti i voti e gli aghi tracciati di questa galleria?')) return;
+  voti = {{}}; linee = {{}};
+  try {{ localStorage.removeItem(CHIAVE); localStorage.removeItem(CHIAVE_LINEE); }} catch (e) {{}}
+  disegna(); salvaLinee();
+}});
 
 document.getElementById('scarica').addEventListener('click', async () => {{
   const testo = testoAnnotazioni();
