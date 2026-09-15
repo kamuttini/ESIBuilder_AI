@@ -86,7 +86,9 @@ def _voti_html(number: int, n_segments: int) -> str:
     """One row of buttons per needle: with several drawn, a single verdict says nothing."""
     if n_segments == 0:
         return ('<div class="vote"><button onclick="vota(\'%d\',\'manca\')">'
-                'c\'era un ago</button></div>' % number)
+                'c\'era un ago</button>'
+                '<button class="ghost" onclick="cancellaLinea(%d)">cancella</button></div>'
+                '<div class="disegnate" id="d%d"></div>' % (number, number, number))
     rows = []
     for order in range(n_segments):
         letter = SEGMENT_LETTERS[order % len(SEGMENT_LETTERS)]
@@ -98,7 +100,9 @@ def _voti_html(number: int, n_segments: int) -> str:
             f'<button class="ghost" onclick="vota(\'{key}\',\'\')">&times;</button></div>'
         )
     rows.append(f'<div class="vote"><button class="ghost wide" '
-                f'onclick="vota(\'{number}m\',\'manca\')">ne manca uno</button></div>')
+                f'onclick="vota(\'{number}m\',\'manca\')">ne manca uno</button>'
+                f'<button class="ghost" onclick="cancellaLinea({number})">cancella</button></div>'
+                f'<div class="disegnate" id="d{number}"></div>')
     return "".join(rows)
 
 
@@ -182,16 +186,18 @@ def main() -> int:
                         f'{letter}</span> {detection.angle_deg:.1f}&deg;')
                 caption = " &nbsp; ".join(parts)
             number = len(cards) + 1
+            crop_w, crop_h = rect[2] - rect[0], rect[3] - rect[1]
             cards.append(
-                f'<figure id="c{number}" data-n="{number}">'
+                f'<figure id="c{number}" data-n="{number}" '
+                f'data-frame="{html.escape(str(frame))}" '
+                f'data-config="{html.escape(row["config"])}" '
+                f'data-rect="{rect[0]},{rect[1]},{rect[2]},{rect[3]}" '
+                f'data-crop="{crop_w},{crop_h}">'
                 f'<div class="head"><span class="num">{number}</span>'
                 f'<span class="mark" id="m{number}"></span></div>'
-                f'<img loading="lazy" src="{uri}" alt="">'
-                f'<div class="vote">'
-                f'<button onclick="vota({number},\'ok\')">sull\'ago</button>'
-                f'<button onclick="vota({number},\'no\')">sbagliato</button>'
-                f'<button class="ghost" onclick="vota({number},\'\')">annulla</button>'
-                f'</div>'
+                f'<div class="canvas"><img loading="lazy" src="{uri}" alt="">'
+                f'<svg class="overlay" id="s{number}"></svg></div>'
+                + _voti_html(number, len(detections)) +
                 f'<figcaption>{caption}<br>'
                 f'<span class="path">{html.escape(row["config"][:52])}</span><br>'
                 f'<span class="path">{html.escape(frame.name)}</span></figcaption></figure>'
@@ -219,6 +225,13 @@ def main() -> int:
  .vote {{ display: flex; gap: 6px; margin-top: 6px; align-items: center; }}
  .seg {{ font-weight: 700; width: 14px; display: inline-block; }}
  .vote .wide {{ flex: 1; }}
+ .canvas {{ position: relative; line-height: 0; touch-action: none; cursor: crosshair; }}
+ .overlay {{ position: absolute; inset: 0; width: 100%; height: 100%; }}
+ .overlay line {{ stroke: #35ff9b; stroke-width: 2.5; }}
+ .overlay line.tmp {{ stroke: #9bffd0; stroke-dasharray: 5 4; }}
+ .disegnate {{ color: #35ff9b; font-size: 12px; margin-top: 4px; }}
+ #scarica {{ margin-top: 8px; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+             border: 1px solid #3a3a3a; background: #263; color: #eaffea; }}
  .vote button {{ flex: 1; padding: 5px 4px; font-size: 12px; border-radius: 5px; cursor: pointer;
                  border: 1px solid #3a3a3a; background: #262626; color: #e8e8e8; }}
  .vote button:hover {{ background: #333; }}
@@ -241,8 +254,13 @@ sbagliano tutti i numeri a valle senza che nessuno se ne accorga.</p>
   (<b>a</b>, <b>b</b>, <b>c</b>&hellip;) e la sua riga di bottoni, quindi un riquadro pu&ograve;
   avere <i>7a</i> giusto e <i>7b</i> sbagliato. Se il programma ha perso un ago che si vede,
   premi <i>ne manca uno</i>. Il riepilogo qui sotto si aggiorna da solo: copialo e incollamelo.
+  <br><b>Per indicarmi l'ago giusto:</b> trascina sull'immagine da un capo all'altro dell'ago.
+  Puoi tracciarne pi&ugrave; di uno; <i>cancella</i> toglie l'ultimo di quel riquadro. Sono queste
+  le annotazioni che servono ad addestrare il rilevatore: dicono dov'&egrave; l'ago, non solo che
+  la rilevazione era sbagliata.
   <span id="conta" class="path"></span>
   <textarea id="esito" readonly></textarea>
+  <button id="scarica">Scarica le annotazioni (JSON)</button>
 </div>
 <div class="grid">{"".join(cards)}</div>
 <script>
@@ -275,12 +293,128 @@ function disegna() {{
   document.getElementById('conta').textContent =
     ` \u2014 ${{ok.length}} segmenti sull\u2019ago, ${{no.length}} sbagliati, ` +
     `${{TOTALE - visti}} fotogrammi da guardare`;
+  aggiornaEsito();
+}}
+const CHIAVE_LINEE = 'rilevatore_ago_linee';
+let linee = {{}};
+try {{ linee = JSON.parse(localStorage.getItem(CHIAVE_LINEE) || '{{}}'); }} catch (e) {{ linee = {{}}; }}
+
+function salvaLinee() {{
+  try {{ localStorage.setItem(CHIAVE_LINEE, JSON.stringify(linee)); }} catch (e) {{}}
+  disegnaLinee();
+  aggiornaEsito();
+}}
+
+function cancellaLinea(n) {{
+  if (linee[n] && linee[n].length) linee[n].pop();
+  if (linee[n] && !linee[n].length) delete linee[n];
+  salvaLinee();
+}}
+
+function disegnaLinee() {{
+  document.querySelectorAll('figure[data-n]').forEach((fig) => {{
+    const n = fig.dataset.n;
+    const svg = document.getElementById('s' + n);
+    if (!svg) return;
+    svg.innerHTML = '';
+    for (const l of (linee[n] || [])) {{
+      const el = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      el.setAttribute('x1', l[0] * 100 + '%'); el.setAttribute('y1', l[1] * 100 + '%');
+      el.setAttribute('x2', l[2] * 100 + '%'); el.setAttribute('y2', l[3] * 100 + '%');
+      svg.appendChild(el);
+    }}
+    const d = document.getElementById('d' + n);
+    if (d) d.textContent = (linee[n] || []).length ? `${{linee[n].length}} ago/aghi tracciati` : '';
+  }});
+}}
+
+// trascinamento sull'immagine: due capi dell'ago, in coordinate relative al ritaglio
+document.querySelectorAll('figure[data-n] .canvas').forEach((box) => {{
+  const fig = box.closest('figure');
+  const n = fig.dataset.n;
+  const svg = box.querySelector('svg');
+  let start = null;
+  const rel = (ev) => {{
+    const r = box.getBoundingClientRect();
+    return [Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)),
+            Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height))];
+  }};
+  box.addEventListener('pointerdown', (ev) => {{
+    start = rel(ev); box.setPointerCapture(ev.pointerId); ev.preventDefault();
+  }});
+  box.addEventListener('pointermove', (ev) => {{
+    if (!start) return;
+    const p = rel(ev);
+    let tmp = svg.querySelector('line.tmp');
+    if (!tmp) {{
+      tmp = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      tmp.setAttribute('class', 'tmp'); svg.appendChild(tmp);
+    }}
+    tmp.setAttribute('x1', start[0] * 100 + '%'); tmp.setAttribute('y1', start[1] * 100 + '%');
+    tmp.setAttribute('x2', p[0] * 100 + '%'); tmp.setAttribute('y2', p[1] * 100 + '%');
+  }});
+  box.addEventListener('pointerup', (ev) => {{
+    if (!start) return;
+    const p = rel(ev);
+    const dx = (p[0] - start[0]), dy = (p[1] - start[1]);
+    // un clic per sbaglio non e' un ago
+    if (Math.hypot(dx, dy) > 0.05) {{
+      if (!linee[n]) linee[n] = [];
+      linee[n].push([start[0], start[1], p[0], p[1]]);
+      salvaLinee();
+    }} else {{
+      disegnaLinee();
+    }}
+    start = null;
+  }});
+}});
+
+function annotazioni() {{
+  const out = [];
+  document.querySelectorAll('figure[data-n]').forEach((fig) => {{
+    const n = fig.dataset.n;
+    if (!linee[n] || !linee[n].length) return;
+    const [l, t] = fig.dataset.rect.split(',').map(Number);
+    const [cw, ch] = fig.dataset.crop.split(',').map(Number);
+    out.push({{
+      n: Number(n), frame: fig.dataset.frame, config: fig.dataset.config,
+      rect: fig.dataset.rect.split(',').map(Number),
+      // capi dell'ago in pixel del fotogramma intero, come li vuole la geometria
+      lines: linee[n].map((v) => [
+        Math.round(l + v[0] * cw), Math.round(t + v[1] * ch),
+        Math.round(l + v[2] * cw), Math.round(t + v[3] * ch),
+      ]),
+    }});
+  }});
+  return out;
+}}
+
+function aggiornaEsito() {{
+  const ordina = (a, b) => (parseInt(a, 10) - parseInt(b, 10)) || a.localeCompare(b);
+  const ok = Object.keys(voti).filter((k) => voti[k] === 'ok').sort(ordina);
+  const no = Object.keys(voti).filter((k) => voti[k] === 'no').sort(ordina);
+  const manca = Object.keys(voti).filter((k) => voti[k] === 'manca').sort(ordina);
+  const ann = annotazioni();
+  const quanti = ann.reduce((s, a) => s + a.lines.length, 0);
   document.getElementById('esito').value =
     `sull'ago: ${{ok.join(', ') || '-'}}\nsbagliate: ${{no.join(', ') || '-'}}` +
-    (manca.length ? `\nne manca uno: ${{manca.join(', ')}}` : '');
+    (manca.length ? `\nne manca uno: ${{manca.join(', ')}}` : '') +
+    (quanti ? `\naghi tracciati a mano: ${{quanti}} su ${{ann.length}} fotogrammi (usa il bottone per il file)` : '');
 }}
+
+document.getElementById('scarica').addEventListener('click', () => {{
+  const blob = new Blob([JSON.stringify({{annotazioni: annotazioni()}}, null, 1)],
+                        {{type: 'application/json'}});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'aghi_annotati.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}});
+
 const TOTALE = document.querySelectorAll('figure[data-n]').length;
 disegna();
+disegnaLinee();
 </script>
 </html>
 """
