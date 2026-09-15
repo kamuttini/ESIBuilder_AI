@@ -192,7 +192,7 @@ def _inclination(angle_deg: float) -> float:
 def refine(candidates, gray: np.ndarray, rect: Optional[Tuple[int, int, int, int]] = None,
            max_needles: int = 2, parallel_tol: float = 8.0, min_brightness: float = 30.0,
            min_ridge: float = 2.0, min_inclination: float = 8.0,
-           max_start_depth: float = 0.55) -> List[Refined]:
+           max_start_depth: float = 0.55, min_vertical_span: float = 0.0) -> List[Refined]:
     """Apply the rules, best first.
 
     Two of them come from Camilla noticing that the detector prefers the wrong mark when
@@ -203,6 +203,21 @@ def refine(candidates, gray: np.ndarray, rect: Optional[Tuple[int, int, int, int
       inclination from horizontal   needles 34.9 deg, errors 16.3, separation 1.07
       nearly flat (under 8 deg)     0 of 104 needles, 27 of 74 errors
       starting below mid-depth      3 of 104 needles, 28 of 74 errors
+
+    A third candidate rule is available and OFF by default, and the reason is instructive. A
+    needle crosses a third of the rectangle's height while an error crosses eight percent; under
+    15% sit 17 of 181 needles against 81 of 150 errors, which as a single feature is the best
+    trade of the lot. End to end on frames never used for tuning it makes things worse -- median
+    error 3.48 degrees becomes 9.74 -- because when the detector has only found a short piece of
+    the true needle, the cut removes it and the fallback picks something else entirely. A feature
+    that separates well is not the same as a filter that helps, and only the end-to-end number
+    can tell them apart.
+
+    A fourth pattern is deliberately NOT a rule. 81% of needles descend to the right, against
+    47% of errors, but the 19% that go left are not mistakes: they come from five specific
+    acquisitions, presumably mounted or flipped the other way. Direction is a property of the
+    acquisition, not of needles, so it belongs in a consistency check within a folder rather
+    than in a filter that would throw away every needle of those five.
 
     So a flat candidate is discarded outright, and one that begins in the lower half is too --
     the first costs no needle at all, the second costs three in a hundred and removes more than
@@ -219,6 +234,11 @@ def refine(candidates, gray: np.ndarray, rect: Optional[Tuple[int, int, int, int
         alti = [n for n in merged
                 if (min(n.p1[1], n.p2[1]) - top) / height <= max_start_depth]
         merged = alti or merged
+    if rect is not None and min_vertical_span > 0:
+        height = max(1, rect[3] - rect[1])
+        lunghi = [n for n in merged
+                  if abs(n.p2[1] - n.p1[1]) / height >= min_vertical_span]
+        merged = lunghi or merged
     scored = []
     for needle in merged:
         brightness = line_brightness(gray, needle.p1, needle.p2)
