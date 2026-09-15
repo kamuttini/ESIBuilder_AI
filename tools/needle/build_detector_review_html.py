@@ -152,7 +152,9 @@ def main() -> int:
     parser.add_argument("--probe-types", type=str, default="1,2")
     parser.add_argument("--max-configs", type=int, default=14)
     parser.add_argument("--frames-per-config", type=int, default=3)
-    parser.add_argument("--width", type=int, default=520)
+    parser.add_argument("--width", type=int, default=900,
+                        help="Encoded width. The cards shrink it with CSS; full screen uses it "
+                             "whole, which is where a needle is actually judged.")
     parser.add_argument("--min-confidence", type=str, default="alta",
                         help='Pairing confidence to keep ("alta", "media", or "" for all).')
     parser.add_argument("--una-per-acquisizione", action="store_true",
@@ -275,7 +277,26 @@ def main() -> int:
  figcaption {{ font-size: 12px; color: #cfcfcf; margin-top: 7px; }}
  .path {{ color: #777; font-size: 11px; word-break: break-all; }}
  .no {{ color: #ffab6b; }}
- .head {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }}
+ .head {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;
+          gap: 8px; }}
+ .lente {{ background: none; border: 1px solid #3a3a3a; border-radius: 5px; color: #cfcfcf;
+           cursor: pointer; font-size: 14px; padding: 1px 8px; }}
+ .lente:hover {{ background: #2c2c2c; }}
+ #pieno {{ position: fixed; inset: 0; z-index: 50; background: #0b0b0b; display: flex;
+           flex-direction: column; }}
+ #pieno[hidden] {{ display: none; }}
+ #pienoTesta, #pienoPie {{ padding: 8px 14px; display: flex; gap: 10px; align-items: center;
+                           flex-wrap: wrap; background: #161616; }}
+ #pienoTesta {{ border-bottom: 1px solid #2a2a2a; }}
+ #pienoPie {{ border-top: 1px solid #2a2a2a; }}
+ #pienoCanvas {{ flex: 1; position: relative; display: flex; align-items: center;
+                 justify-content: center; overflow: hidden; touch-action: none;
+                 cursor: crosshair; background: #000; }}
+ #pienoCanvas img {{ max-width: 100%; max-height: 100%; object-fit: contain; display: block; }}
+ #pienoCanvas svg {{ position: absolute; }}
+ #pienoPie button, #pienoTesta button {{ padding: 6px 12px; border-radius: 6px; cursor: pointer;
+   border: 1px solid #3a3a3a; background: #262626; color: #e8e8e8; }}
+ #pienoNome {{ color: #8f8f8f; font-size: 12px; }}
  .num {{ font-weight: 700; color: #8fb6ff; }}
  .mark {{ font-size: 12px; }}
  .vote {{ display: flex; gap: 6px; margin-top: 6px; align-items: center; }}
@@ -346,6 +367,22 @@ sbagliano tutti i numeri a valle senza che nessuno se ne accorga.</p>
   <button id="azzera">Azzera tutto</button>
   <span id="esitoScarica" class="path"></span>
   <textarea id="json" readonly style="display:none"></textarea>
+</div>
+<div id="pieno" hidden>
+  <div id="pienoTesta">
+    <b id="pienoNum"></b>
+    <span id="pienoNome"></span>
+    <span style="flex:1"></span>
+    <button onclick="chiudiPieno()">chiudi (Esc)</button>
+  </div>
+  <div id="pienoCanvas"><img id="pienoImg" alt=""><svg id="pienoSvg"></svg></div>
+  <div id="pienoPie">
+    <button onclick="vaiPieno(-1)">&#8592; precedente</button>
+    <button onclick="vaiPieno(1)">successivo &#8594;</button>
+    <span id="pienoVoti" style="display:flex;gap:8px;flex-wrap:wrap"></span>
+    <span style="flex:1"></span>
+    <button onclick="cancellaLinea(pienoN); disegnaLinee();">cancella ultimo ago</button>
+  </div>
 </div>
 <div class="grid">{"".join(cards)}</div>
 <script>
@@ -475,24 +512,64 @@ function disegnaLinee() {{
     const d = document.getElementById('d' + n);
     if (d) d.textContent = (linee[n] || []).length ? `${{linee[n].length}} ago/aghi tracciati` : '';
   }});
+
+  // e lo stesso contenuto sullo schermo intero, se e' aperto
+  const svgPieno = document.getElementById('pienoSvg');
+  if (pienoN && svgPieno && !document.getElementById('pieno').hidden) {{
+    const fig = document.querySelector(`figure[data-n="${{pienoN}}"]`);
+    svgPieno.innerHTML = '';
+    if (fig) {{
+      let det = [];
+      try {{ det = JSON.parse(fig.dataset.det || '[]'); }} catch (e) {{ det = []; }}
+      det.forEach((d, i) => {{
+        const lettera = LETTERE[i] || '?';
+        const stato = voti[pienoN + lettera] || '';
+        const el = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        el.setAttribute('class', 'det ' + stato);
+        el.setAttribute('x1', d.x1 * 100 + '%'); el.setAttribute('y1', d.y1 * 100 + '%');
+        el.setAttribute('x2', d.x2 * 100 + '%'); el.setAttribute('y2', d.y2 * 100 + '%');
+        svgPieno.appendChild(el);
+        if (stato) {{
+          const segno = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          segno.setAttribute('class', 'segno');
+          segno.setAttribute('x', ((d.x1 + d.x2) / 2 * 100) + '%');
+          segno.setAttribute('y', ((d.y1 + d.y2) / 2 * 100) + '%');
+          segno.setAttribute('text-anchor', 'middle');
+          segno.setAttribute('dominant-baseline', 'central');
+          segno.setAttribute('fill', COLORI[stato]);
+          segno.textContent = stato === 'no' ? '\u2715' : '\u2713';
+          svgPieno.appendChild(segno);
+        }}
+      }});
+      for (const l of (linee[pienoN] || [])) {{
+        const el = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        el.setAttribute('class', 'mia');
+        el.setAttribute('x1', l[0] * 100 + '%'); el.setAttribute('y1', l[1] * 100 + '%');
+        el.setAttribute('x2', l[2] * 100 + '%'); el.setAttribute('y2', l[3] * 100 + '%');
+        svgPieno.appendChild(el);
+      }}
+    }}
+  }}
 }}
 
-// trascinamento sull'immagine: due capi dell'ago, in coordinate relative al ritaglio
-document.querySelectorAll('figure[data-n] .canvas').forEach((box) => {{
-  const fig = box.closest('figure');
-  const n = fig.dataset.n;
-  const svg = box.querySelector('svg');
+// Trascinamento: due capi dell'ago, in coordinate relative al ritaglio. La stessa funzione
+// serve la scheda e lo schermo intero, cosi' un ago tracciato in grande e' identico a uno
+// tracciato in piccolo -- e sullo schermo intero si vede davvero quello che si sta segnando.
+function abilitaTracciamento(box, numeroDi, svgDi) {{
   let start = null;
   const rel = (ev) => {{
-    const r = box.getBoundingClientRect();
+    const r = (svgDi() || box).getBoundingClientRect();
     return [Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)),
             Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height))];
   }};
   box.addEventListener('pointerdown', (ev) => {{
+    if (ev.target.tagName === 'BUTTON') return;
     start = rel(ev); box.setPointerCapture(ev.pointerId); ev.preventDefault();
   }});
   box.addEventListener('pointermove', (ev) => {{
     if (!start) return;
+    const svg = svgDi();
+    if (!svg) return;
     const p = rel(ev);
     let tmp = svg.querySelector('line.tmp');
     if (!tmp) {{
@@ -505,9 +582,8 @@ document.querySelectorAll('figure[data-n] .canvas').forEach((box) => {{
   box.addEventListener('pointerup', (ev) => {{
     if (!start) return;
     const p = rel(ev);
-    const dx = (p[0] - start[0]), dy = (p[1] - start[1]);
-    // un clic per sbaglio non e' un ago
-    if (Math.hypot(dx, dy) > 0.05) {{
+    const n = numeroDi();
+    if (Math.hypot(p[0] - start[0], p[1] - start[1]) > 0.02 && n) {{
       if (!linee[n]) linee[n] = [];
       linee[n].push([start[0], start[1], p[0], p[1]]);
       salvaLinee();
@@ -516,7 +592,86 @@ document.querySelectorAll('figure[data-n] .canvas').forEach((box) => {{
     }}
     start = null;
   }});
+}}
+
+document.querySelectorAll('figure[data-n] .canvas').forEach((box) => {{
+  const n = box.closest('figure').dataset.n;
+  abilitaTracciamento(box, () => n, () => document.getElementById('s' + n));
 }});
+
+// ---------------------------------------------------------------- schermo intero
+let pienoN = null;
+
+function apriPieno(n) {{
+  const fig = document.querySelector(`figure[data-n="${{n}}"]`);
+  if (!fig) return;
+  pienoN = String(n);
+  document.getElementById('pienoImg').src = fig.querySelector('img').src;
+  document.getElementById('pienoNum').textContent = '#' + n;
+  document.getElementById('pienoNome').textContent =
+    (fig.dataset.config || '') + '  ·  ' + (fig.dataset.frame || '').split('/').pop();
+  const voti_ = document.getElementById('pienoVoti');
+  voti_.innerHTML = '';
+  const det = JSON.parse(fig.dataset.det || '[]');
+  det.forEach((d, i) => {{
+    const lettera = LETTERE[i] || '?';
+    const chiave = n + lettera;
+    const gruppo = document.createElement('span');
+    gruppo.style.cssText = 'display:flex;gap:4px;align-items:center';
+    gruppo.innerHTML = `<b style="color:${{COLORI[voti[chiave]] || COLORI.det}}">${{lettera}}</b>`;
+    for (const [etichetta, valore] of [['ago', 'ok'], ['no', 'no'], ['×', '']]) {{
+      const b = document.createElement('button');
+      b.textContent = etichetta;
+      if (voti[chiave] === valore && valore) b.style.borderColor = COLORI[valore];
+      b.onclick = () => {{ vota(chiave, valore); apriPieno(n); }};
+      gruppo.appendChild(b);
+    }}
+    voti_.appendChild(gruppo);
+  }});
+  const escl = document.createElement('button');
+  escl.textContent = voti[n + 'x'] === 'escludi' ? 'esclusa ✓' : 'non e\u2019 sonda in acqua';
+  escl.onclick = () => {{ vota(n + 'x', voti[n + 'x'] === 'escludi' ? '' : 'escludi'); apriPieno(n); }};
+  voti_.appendChild(escl);
+
+  document.getElementById('pieno').hidden = false;
+  setTimeout(adattaSvgPieno, 60);
+}}
+
+function adattaSvgPieno() {{
+  // l'SVG deve stare esattamente sopra l'immagine, che e' centrata e ridimensionata
+  const img = document.getElementById('pienoImg');
+  const svg = document.getElementById('pienoSvg');
+  const box = document.getElementById('pienoCanvas').getBoundingClientRect();
+  const r = img.getBoundingClientRect();
+  svg.style.left = (r.left - box.left) + 'px';
+  svg.style.top = (r.top - box.top) + 'px';
+  svg.style.width = r.width + 'px';
+  svg.style.height = r.height + 'px';
+  disegnaLinee();
+}}
+
+function chiudiPieno() {{ document.getElementById('pieno').hidden = true; pienoN = null; }}
+
+function vaiPieno(passo) {{
+  const numeri = [...document.querySelectorAll('figure[data-n]')].map((f) => f.dataset.n);
+  const i = numeri.indexOf(String(pienoN));
+  if (i < 0) return;
+  const j = Math.min(numeri.length - 1, Math.max(0, i + passo));
+  apriPieno(numeri[j]);
+}}
+
+document.addEventListener('keydown', (ev) => {{
+  if (document.getElementById('pieno').hidden) return;
+  if (ev.key === 'Escape') chiudiPieno();
+  if (ev.key === 'ArrowLeft') vaiPieno(-1);
+  if (ev.key === 'ArrowRight') vaiPieno(1);
+}});
+window.addEventListener('resize', () => {{
+  if (!document.getElementById('pieno').hidden) adattaSvgPieno();
+}});
+document.getElementById('pienoImg').addEventListener('load', adattaSvgPieno);
+abilitaTracciamento(document.getElementById('pienoCanvas'), () => pienoN,
+                    () => document.getElementById('pienoSvg'));
 
 function annotazioni() {{
   const out = [];

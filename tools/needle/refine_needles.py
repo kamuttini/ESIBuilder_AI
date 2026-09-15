@@ -183,13 +183,42 @@ def reverberation_score(gray: np.ndarray, p1, p2, step: int = 7, repeats: int = 
     return best
 
 
-def refine(candidates, gray: np.ndarray, max_needles: int = 2,
-           parallel_tol: float = 8.0, min_brightness: float = 30.0,
-           min_ridge: float = 2.0) -> List[Refined]:
-    """Apply the four rules, best first."""
+def _inclination(angle_deg: float) -> float:
+    """Degrees away from horizontal, ignoring direction."""
+    a = abs(angle_deg) % 180.0
+    return min(a, 180.0 - a)
+
+
+def refine(candidates, gray: np.ndarray, rect: Optional[Tuple[int, int, int, int]] = None,
+           max_needles: int = 2, parallel_tol: float = 8.0, min_brightness: float = 30.0,
+           min_ridge: float = 2.0, min_inclination: float = 8.0,
+           max_start_depth: float = 0.55) -> List[Refined]:
+    """Apply the rules, best first.
+
+    Two of them come from Camilla noticing that the detector prefers the wrong mark when
+    several are present, and that the wrong ones are the flat ones low in the image while a
+    needle enters from the top at a clear angle. Measured on 104 traced needles against 74 of
+    the detector's own errors, that is not an impression:
+
+      inclination from horizontal   needles 34.9 deg, errors 16.3, separation 1.07
+      nearly flat (under 8 deg)     0 of 104 needles, 27 of 74 errors
+      starting below mid-depth      3 of 104 needles, 28 of 74 errors
+
+    So a flat candidate is discarded outright, and one that begins in the lower half is too --
+    the first costs no needle at all, the second costs three in a hundred and removes more than
+    a third of the errors.
+    """
     if not candidates:
         return []
     merged = merge_collinear(candidates)
+    if min_inclination > 0:
+        dritti = [n for n in merged if _inclination(n.angle_deg) >= min_inclination]
+        merged = dritti or merged
+    if rect is not None and max_start_depth < 1.0:
+        top, height = rect[1], max(1, rect[3] - rect[1])
+        alti = [n for n in merged
+                if (min(n.p1[1], n.p2[1]) - top) / height <= max_start_depth]
+        merged = alti or merged
     scored = []
     for needle in merged:
         brightness = line_brightness(gray, needle.p1, needle.p2)
