@@ -61,13 +61,23 @@ def _extent(points: Sequence[Tuple[float, float]], angle_deg: float):
     return projected[0][1], projected[-1][1]
 
 
-def merge_collinear(candidates, angle_tol: float = 6.0, offset_tol: float = 14.0,
-                    gap_tol: float = 60.0) -> List[Refined]:
+def merge_collinear(candidates, angle_tol: float = 6.0, offset_tol: float = 24.0,
+                    gap_tol: float = 180.0) -> List[Refined]:
     """Rule 3: pieces of one needle become one segment.
 
     Two candidates merge when they point the same way, sit on the same line, and their ends are
     close enough that the space between them is a break in the detection rather than a gap
     between two different needles.
+
+    The tolerances are measured, not chosen. On the six pairs Camilla marked as one needle cut
+    in two, the angles differ by at most 4.4 degrees, the perpendicular offset reaches 19.5
+    pixels and the gap along the line reaches 162 -- against my originals of 6, 14 and 60, so
+    two of the three were too tight to merge what she says belongs together.
+
+    The perpendicular offset stays the strict one on purpose. Two real needles in a frame are
+    parallel and near each other, so a generous gap along the line is safe -- far apart on the
+    same line means one needle with a hole in the detection -- while a generous offset would
+    start merging the two needles into one.
     """
     groups: List[List] = []
     for cand in sorted(candidates, key=lambda c: -getattr(c, "confidence", 0.0)):

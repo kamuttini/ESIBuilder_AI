@@ -34,7 +34,11 @@ from refine_needles import refine  # noqa: E402
 from guides_geometry import read_setup  # noqa: E402
 from needle_frames import NeedleScorer, all_frames, frames_of_probe  # noqa: E402
 
-CALIB_DIR = re.compile(r"agh|guid|biops", re.IGNORECASE)
+# Linear and convex probes calibrate on needles in water, which live in AGHI folders. BIOPSIA
+# and GUIDA folders hold the dotted biopsy-line frames, and those belong to biplane probes:
+# Camilla excluded three of them by hand, all BK3000 BIOPSIA, from a linear gallery.
+CALIB_DIR = re.compile(r"agh", re.IGNORECASE)
+CALIB_DIR_BIPLANA = re.compile(r"agh|guid|biops", re.IGNORECASE)
 # BGR, as OpenCV wants them. One colour and one letter per needle, because several are
 # usually visible and a verdict on "the detection" is meaningless when there are four.
 SEGMENT_COLOURS = [(0, 0, 255), (0, 220, 255), (0, 255, 120), (255, 180, 0), (255, 120, 255)]
@@ -176,6 +180,9 @@ def main() -> int:
         print("attenzione: nessun classificatore, i fotogrammi li scelgono solo i nomi delle cartelle")
 
     wanted = {int(v) for v in args.probe_types.split(",") if v.strip().isdigit()}
+    global CALIB_DIR
+    if wanted and wanted <= {3, 4, 5}:
+        CALIB_DIR = CALIB_DIR_BIPLANA
     rows = [
         r for r in csv.DictReader(args.pairs.open(encoding="utf-8"))
         if (not args.min_confidence or r["confidence"] == args.min_confidence)
