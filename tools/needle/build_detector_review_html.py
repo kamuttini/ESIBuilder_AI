@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""Show what the needle detector found, frame by frame, so a human can judge it.
+
+The detector is the measuring instrument for the whole guides chain: if it sits a few degrees
+off the needle, every number downstream is off with it, and no later stage can notice. So the
+point of this page is not the count of detections but whether each red segment lies on the
+needle -- which only someone who knows what a needle looks like can say.
+
+Frames come from the calibration folders of the acquisitions paired with the legacy
+configurations, at the resolution the configuration declares, cropped to RECT_ECHO.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import csv
+import html
+import io
+import os
+import re
+import sys
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from detect_needle_line import detect_in_frame  # noqa: E402
+from guides_geometry import read_setup  # noqa: E402
+
+CALIB_DIR = re.compile(r"agh|guid|biops", re.IGNORECASE)
+SKIP_DIRS = {"$RECYCLE.BIN", "System Volume Information"}
+
+
+def frames_of(acquisition: Path, size: Tuple[int, int], limit: int) -> List[Path]:
+    found: List[Path] = []
+    for dirpath, dirnames, filenames in os.walk(acquisition):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        rel = os.path.relpath(dirpath, acquisition)
+        if not any(CALIB_DIR.search(part) for part in rel.split(os.sep)):
+            continue
+        names = sorted(n for n in filenames if Path(n).suffix.lower() == ".png")
+        step = max(1, len(names) // max(1, limit))
+        for name in names[::step][: limit * 2]:
+            found.append(Path(dirpath) / name)
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def encode(image: np.ndarray, width: int) -> str:
+    scale = width / float(image.shape[1])
+    if scale < 1:
+        image = cv2.resize(image, (width, max(1, int(image.shape[0] * scale))))
+    ok, buffer = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    if not ok:
+        return ""
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.tobytes()).decode("ascii")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("--pairs", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--probe-types", type=str, default="1,2")
+    parser.add_argument("--max-configs", type=int, default=14)
+    parser.add_argument("--frames-per-config", type=int, default=3)
+    parser.add_argument("--width", type=int, default=520)
+    args = parser.parse_args()
+
+    wanted = {int(v) for v in args.probe_types.split(",") if v.strip().isdigit()}
+    rows = [
+        r for r in csv.DictReader(args.pairs.open(encoding="utf-8"))
+        if r["confidence"] == "alta" and (not wanted or int(r["probe_type"]) in wanted)
+    ]
+
+    cards: List[str] = []
+    found = total = 0
+    for row in rows[: args.max_configs]:
+        setup = read_setup(Path(row["setup_file"]))
+        if setup is None or not setup.consistent():
+            continue
+        size = tuple(setup.video_size)
+        rect = (setup.rect_echo.left, setup.rect_echo.top,
+                setup.rect_echo.right, setup.rect_echo.bottom)
+
+        for frame in frames_of(Path(row["acquisition"]), size, args.frames_per_config):
+            gray = cv2.imread(str(frame), cv2.IMREAD_GRAYSCALE)
+            if gray is None or (gray.shape[1], gray.shape[0]) != size:
+                continue
+            total += 1
+            detection = detect_in_frame(gray, rect)
+            canvas = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            if detection is not None:
+                found += 1
+                cv2.line(canvas,
+                         (int(detection.p1[0]), int(detection.p1[1])),
+                         (int(detection.p2[0]), int(detection.p2[1])), (0, 0, 255), 2)
+            crop = canvas[rect[1]:rect[3], rect[0]:rect[2]]
+            uri = encode(crop, args.width)
+            if detection is None:
+                caption = '<span class="no">nessuna rilevazione</span>'
+            else:
+                caption = (f'angolo <b>{detection.angle_deg:.2f}&deg;</b> &middot; '
+                           f'lunghezza {detection.length:.0f} px &middot; '
+                           f'contrasto {detection.contrast:.0f}')
+            number = len(cards) + 1
+            cards.append(
+                f'<figure id="c{number}" data-n="{number}">'
+                f'<div class="head"><span class="num">{number}</span>'
+                f'<span class="mark" id="m{number}"></span></div>'
+                f'<img loading="lazy" src="{uri}" alt="">'
+                f'<div class="vote">'
+                f'<button onclick="vota({number},\'ok\')">sull\'ago</button>'
+                f'<button onclick="vota({number},\'no\')">sbagliato</button>'
+                f'<button class="ghost" onclick="vota({number},\'\')">annulla</button>'
+                f'</div>'
+                f'<figcaption>{caption}<br>'
+                f'<span class="path">{html.escape(row["config"][:52])}</span><br>'
+                f'<span class="path">{html.escape(frame.name)}</span></figcaption></figure>'
+            )
+
+    document = f"""<!doctype html>
+<html lang="it"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rilevatore ago &mdash; verifica</title>
+<style>
+ body {{ font: 14px/1.6 -apple-system, system-ui, sans-serif; margin: 0 auto; padding: 24px;
+        max-width: 1250px; background: #111; color: #eaeaea; }}
+ h1 {{ font-size: 21px; margin-bottom: 2px; }}
+ .intro {{ color: #b0b0b0; max-width: 76ch; }}
+ .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px;
+          margin-top: 20px; }}
+ figure {{ margin: 0; background: #1b1b1b; border-radius: 8px; padding: 9px; }}
+ img {{ width: 100%; display: block; border-radius: 4px; background: #000; }}
+ figcaption {{ font-size: 12px; color: #cfcfcf; margin-top: 7px; }}
+ .path {{ color: #777; font-size: 11px; word-break: break-all; }}
+ .no {{ color: #ffab6b; }}
+ .head {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }}
+ .num {{ font-weight: 700; color: #8fb6ff; }}
+ .mark {{ font-size: 12px; }}
+ .vote {{ display: flex; gap: 6px; margin-top: 8px; }}
+ .vote button {{ flex: 1; padding: 5px 4px; font-size: 12px; border-radius: 5px; cursor: pointer;
+                 border: 1px solid #3a3a3a; background: #262626; color: #e8e8e8; }}
+ .vote button:hover {{ background: #333; }}
+ .vote .ghost {{ flex: 0 0 62px; color: #999; }}
+ figure.ok {{ outline: 2px solid #35c88a; }}
+ figure.no {{ outline: 2px solid #f2564d; }}
+ #barra {{ position: sticky; top: 0; z-index: 5; background: #191919; border: 1px solid #333;
+           border-radius: 8px; padding: 10px 14px; margin-top: 16px; }}
+ #esito {{ width: 100%; min-height: 62px; margin-top: 8px; background: #101010; color: #ddd;
+           border: 1px solid #333; border-radius: 6px; padding: 8px; font-family: ui-monospace, monospace;
+           font-size: 12px; }}
+</style>
+<h1>Rilevatore dell'ago &mdash; {found} rilevazioni su {total} fotogrammi</h1>
+<p class="intro">Il segmento rosso &egrave; quello che il programma ha preso per l'ago, dentro il
+RECT_ECHO. Quello che conta non &egrave; quante ne trova, ma se ognuna sta <b>sull'ago</b>: questo
+&egrave; lo strumento di misura di tutta la catena delle linee guida, e se sbaglia di qualche grado
+sbagliano tutti i numeri a valle senza che nessuno se ne accorga.</p>
+<div id="barra">
+  <b>Come segnalarmele:</b> premi <i>sull'ago</i> o <i>sbagliato</i> su ogni riquadro (oppure
+  scrivimi solo i numeri). Il riepilogo qui sotto si aggiorna da solo: copialo e incollamelo.
+  <span id="conta" class="path"></span>
+  <textarea id="esito" readonly></textarea>
+</div>
+<div class="grid">{"".join(cards)}</div>
+<script>
+const CHIAVE = 'rilevatore_ago_voti';
+let voti = {{}};
+try {{ voti = JSON.parse(localStorage.getItem(CHIAVE) || '{{}}'); }} catch (e) {{ voti = {{}}; }}
+
+function vota(n, valore) {{
+  if (valore) voti[n] = valore; else delete voti[n];
+  try {{ localStorage.setItem(CHIAVE, JSON.stringify(voti)); }} catch (e) {{}}
+  disegna();
+}}
+
+function disegna() {{
+  document.querySelectorAll('figure[data-n]').forEach((fig) => {{
+    const n = fig.dataset.n;
+    fig.classList.toggle('ok', voti[n] === 'ok');
+    fig.classList.toggle('no', voti[n] === 'no');
+    const m = document.getElementById('m' + n);
+    if (m) m.textContent = voti[n] === 'ok' ? 'sull\u2019ago' : voti[n] === 'no' ? 'sbagliato' : '';
+  }});
+  const ok = Object.keys(voti).filter((k) => voti[k] === 'ok').map(Number).sort((a, b) => a - b);
+  const no = Object.keys(voti).filter((k) => voti[k] === 'no').map(Number).sort((a, b) => a - b);
+  document.getElementById('conta').textContent =
+    ` \u2014 ${{ok.length}} sull\u2019ago, ${{no.length}} sbagliate, ${{TOTALE - ok.length - no.length}} da guardare`;
+  document.getElementById('esito').value =
+    `sull'ago: ${{ok.join(', ') || '-'}}\nsbagliate: ${{no.join(', ') || '-'}}`;
+}}
+const TOTALE = document.querySelectorAll('figure[data-n]').length;
+disegna();
+</script>
+</html>
+"""
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(document, encoding="utf-8")
+    print(f"{found}/{total} rilevazioni  ->  {args.output} "
+          f"({args.output.stat().st_size/1048576:.1f} MB)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
