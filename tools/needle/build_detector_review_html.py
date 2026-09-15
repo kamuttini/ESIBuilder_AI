@@ -135,6 +135,12 @@ def main() -> int:
     parser.add_argument("--max-configs", type=int, default=14)
     parser.add_argument("--frames-per-config", type=int, default=3)
     parser.add_argument("--width", type=int, default=520)
+    parser.add_argument("--min-confidence", type=str, default="alta",
+                        help='Pairing confidence to keep ("alta", "media", or "" for all).')
+    parser.add_argument("--una-per-acquisizione", action="store_true",
+                        help="One frame per acquisition, for annotation. Diversity of scenes is "
+                             "what a detector needs: five needles on thirty frames of four "
+                             "configurations taught the ranker to memorise them.")
     parser.add_argument("--grezzo", action="store_true",
                         help="Show the raw candidates instead of the refined needles.")
     parser.add_argument("--per-frame", type=int, default=2,
@@ -152,8 +158,19 @@ def main() -> int:
     wanted = {int(v) for v in args.probe_types.split(",") if v.strip().isdigit()}
     rows = [
         r for r in csv.DictReader(args.pairs.open(encoding="utf-8"))
-        if r["confidence"] == "alta" and (not wanted or int(r["probe_type"]) in wanted)
+        if (not args.min_confidence or r["confidence"] == args.min_confidence)
+        and (not wanted or int(r["probe_type"]) in wanted)
     ]
+    if args.una_per_acquisizione:
+        # several configurations share one acquisition; keep the one whose declared resolution
+        # is best supported, so each acquisition contributes once and with its best evidence
+        migliori: Dict[str, dict] = {}
+        for row in rows:
+            key = row["acquisition"]
+            if key not in migliori or float(row["size_match_pct"]) > float(migliori[key]["size_match_pct"]):
+                migliori[key] = row
+        rows = sorted(migliori.values(), key=lambda r: r["config"])
+        print(f"una per acquisizione: {len(rows)} acquisizioni distinte")
 
     cards: List[str] = []
     found = total = 0
