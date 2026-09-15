@@ -213,6 +213,7 @@ const PANELS = {
   orientation: panelModuleStage,
   depth_scale: panelModuleStage,
   scale_study: panelModuleStage,
+  guides: panelGuides,
   generate: panelGenerate,
 };
 
@@ -3876,6 +3877,96 @@ function valoreDiModulo(panel, step) {
 }
 
 /* --- step generico: editor del valore --- */
+/* Lo step «Linee guida»: #22 e #23.
+
+   Nel vecchio ESIBuilder l'operatore caricava una immagine per ogni angolo del kit e ricalcava
+   l'ago che vedeva; da quel tratto uscivano angolo e distanza dal centro. Qui l'ago lo misura il
+   programma, ma la precisione di oggi non regge una conferma cieca: su dati etichettati a mano
+   circa un terzo delle proposte cade entro un grado e circa meta' entro tre. Per questo ogni
+   famiglia arriva con quanti fotogrammi l'hanno prodotta e quanto erano d'accordo, e il valore
+   si scrive solo quando lo confermi. */
+function panelGuides(panel, step) {
+  const stored = (state.project.steps[step.id] || {}).value || {};
+  const proposta = stored.proposal;
+  // dichiarata qui e non piu' in basso: il bottone della proposta la usa in una chiusura, e
+  // in questo repo una TDZ sulla stessa forma ha gia' rotto il visore una volta
+  const area = el('textarea', {});
+  area.value = JSON.stringify(
+    Object.fromEntries(Object.entries(stored).filter(([k]) => k !== 'proposal')), null, 1);
+
+  panel.append(el('p', { class: 'hint' },
+    'l\'angolo di ogni famiglia di linee (#23) e la distanza dal top del rettangolo al punto in cui '
+    + 'la prima linea incrocia la verticale centrale (#22), misurati sugli aghi dei fotogrammi di '
+    + 'calibrazione. La proposta va confermata: oggi circa un terzo cade entro un grado.'));
+
+  const stato = el('span', { class: 'hint' });
+  const bottone = el('button', {}, proposta ? 'Rimisura' : 'Misura gli aghi');
+  bottone.addEventListener('click', async () => {
+    bottone.disabled = true;
+    try {
+      const { job_id } = await api(`/projects/${state.projectId}/guides/propose`, { body: {} });
+      await pollJob(job_id, stato);
+      toast('aghi misurati');
+      await reload();
+    } catch (errore) {
+      toast(errore.message, true);
+      stato.textContent = errore.message;
+    } finally { bottone.disabled = false; }
+  });
+  panel.append(el('div', { class: 'row' }, bottone, stato));
+
+  if (proposta && ((proposta.proposte || []).length || (proposta.incerte || []).length)) {
+    panel.append(el('h3', {}, 'proposta'));
+    const card = el('div', { class: 'card' });
+    card.append(el('div', { class: 'kv' },
+      el('span', {}, 'fotogrammi misurati'),
+      el('span', {}, `${proposta.misure} su ${proposta.fotogrammi}`)));
+    for (const [i, p] of (proposta.proposte).entries()) {
+      card.append(el('div', { class: 'kv' },
+        el('span', {}, `famiglia ${i + 1} — #23 angolo`),
+        el('span', {}, `${p.angolo.toFixed(2)}°  ·  #22 ${p.distanza.toFixed(2)} mm  ·  `
+          + `${p.fotogrammi} fotogrammi, dispersione ${p.dispersione}° — ${p.verdetto}`)));
+    }
+    panel.append(card);
+    if ((proposta.incerte || []).length) {
+      const meno = el('details', { class: 'ov-fold' },
+        el('summary', {}, `viste in un solo fotogramma (${proposta.incerte.length})`));
+      meno.append(el('p', { class: 'hint' },
+        'una misura sola oggi e\' tanto probabile che sia un errore quanto un ago: stanno qui '
+        + 'per non sporcare la proposta, non perche\' siano da buttare.'));
+      for (const p of proposta.incerte) {
+        meno.append(el('div', { class: 'kv' },
+          el('span', {}, `${p.angolo.toFixed(2)}°`),
+          el('span', {}, `#22 ${p.distanza.toFixed(2)} mm`)));
+      }
+      panel.append(meno);
+    }
+    panel.append(el('p', { class: 'hint' }, proposta.avvertenza || ''));
+
+    const usa = el('button', {}, 'Porta la proposta nel valore');
+    usa.addEventListener('click', () => {
+      const angles = proposta.proposte.map((p) => p.angolo);
+      // #22 vuole un gruppo per depth, ognuno con un valore per angolo. Senza la depth di
+      // ciascun fotogramma la stessa distanza vale per tutte: e' un punto di partenza da
+      // correggere depth per depth, non una misura per depth.
+      const depths = (proposta.depths || []).length ? proposta.depths : [null];
+      const centre = depths.map(() => proposta.proposte.map((p) => p.distanza));
+      area.value = JSON.stringify({ angles, centre_distance: centre }, null, 1);
+      toast('valore precompilato: controllalo depth per depth prima di salvare');
+    });
+    panel.append(el('div', { class: 'row' }, usa));
+  }
+
+  panel.append(el('h3', {}, 'valore'));
+  panel.append(el('pre', { class: 'out' }, VALUE_HINTS[step.id] || '{}'));
+  panel.append(area);
+  panel.append(saveRow(step.id, () => {
+    const valore = JSON.parse(area.value || '{}');
+    if (proposta) valore.proposal = proposta;   // la prova resta accanto al valore
+    return valore;
+  }));
+}
+
 function panelGeneric(panel, step) {
   const stored = (state.project.steps[step.id] || {}).value || {};
   const area = el('textarea', {});

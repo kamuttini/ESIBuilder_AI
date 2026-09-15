@@ -4537,6 +4537,128 @@ def api_import_needle(project_id: str):
     return jsonify({"job_id": _start_job(_run_needle_scan, project_id, per_folder)})
 
 
+# ------------------------------------------------------------------ linee guida
+# Lo step `guides` chiede #22 e #23: l'angolo di ogni famiglia di linee e, per ogni depth, la
+# distanza fra il top del RECT_ECHO e il punto in cui la prima linea incrocia la verticale
+# centrale. Nel vecchio ESIBuilder l'operatore ricalcava l'ago; qui l'ago si misura da solo e
+# la proposta arriva con le prove, perche' la precisione di oggi non regge una conferma cieca.
+
+def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
+    try:
+        sys.path.insert(0, str(REPO_ROOT / "tools" / "needle"))
+        from propose_guide_lines import measure  # noqa: PLC0415
+
+        project = _project(project_id)
+        rect = ((project.step_value("rect") or {}).get("rect_echo")
+                or (project.step_value("import") or {}).get("rect_echo"))
+        if not rect:
+            raise ValueError("serve prima il rettangolo ecografico")
+        scala = project.step_value("depth_scale") or {}
+        depths = list(scala.get("depths") or [])
+        ratio_y = list(scala.get("pixel_ratio_y") or [])
+        ratio_x = list(scala.get("pixel_ratio_x") or []) or ratio_y
+        if not ratio_y:
+            raise ValueError("servono i pixel ratio dallo step depth e scala")
+
+        # i fotogrammi di calibrazione li ha gia' trovati lo scan dell'import
+        scan = (project.step_value("import") or {}).get("needle_scan") or {}
+        cartelle = [c for c in (scan.get("folders") or []) if c.get("verdict") != "no"]
+        if not cartelle:
+            raise ValueError("nessun materiale di calibrazione: lancia prima la ricerca "
+                             "nello step Import e analisi")
+
+        base = project.working_dir()
+        nomi = set(project.dedup_names())
+        candidati: List[str] = []
+        for cartella in cartelle:
+            prefisso = "" if cartella["folder"] == "." else cartella["folder"] + os.sep
+            dentro = sorted(n for n in nomi if n.startswith(prefisso))
+            passo = max(1, len(dentro) // per_folder)
+            candidati.extend(dentro[::passo][:per_folder])
+
+        _job_update(job_id, stage="misura degli aghi", total=len(candidati))
+        box = (int(rect["left"]), int(rect["top"]), int(rect["right"]), int(rect["bottom"]))
+        # la depth del fotogramma non e' nota: si usa il ratio mediano, e la proposta dice quale
+        riferimento = sorted(ratio_y)[len(ratio_y) // 2]
+        misure = []
+        for done, nome in enumerate(candidati, 1):
+            trovato = measure(base / nome, box, ratio_x[len(ratio_x) // 2] if ratio_x else riferimento,
+                              riferimento)
+            if trovato:
+                trovato["image"] = nome
+                misure.append(trovato)
+            if done % 5 == 0:
+                _job_update(job_id, done=done)
+        if not misure:
+            raise ValueError("nessun ago rilevato nei fotogrammi di calibrazione")
+
+        # un gruppo per famiglia di linee guida: e' una voce di #23
+        gruppi: List[List[Dict]] = []
+        for m in sorted(misure, key=lambda m: m["angle"]):
+            for gruppo in gruppi:
+                mediana = sorted(g["angle"] for g in gruppo)[len(gruppo) // 2]
+                if abs(m["angle"] - mediana) <= 4.0:
+                    gruppo.append(m)
+                    break
+            else:
+                gruppi.append([m])
+        gruppi.sort(key=lambda g: -len(g))
+
+        proposte = []
+        for gruppo in gruppi:
+            angoli = sorted(g["angle"] for g in gruppo)
+            distanze = sorted(g["distance"] for g in gruppo)
+            spread = angoli[-1] - angoli[0]
+            proposte.append({
+                "angolo": round(angoli[len(angoli) // 2], 3),
+                "distanza": round(distanze[len(distanze) // 2], 3),
+                "fotogrammi": len(gruppo),
+                "dispersione": round(spread, 2),
+                "verdetto": ("concorde" if len(gruppo) >= 3 and spread <= 2.0
+                             else "da verificare" if len(gruppo) >= 2 else "un solo fotogramma"),
+                "immagini": [g["image"] for g in gruppo[:6]],
+            })
+
+        # Le famiglie con un solo fotogramma non sono proposte: con la precisione di oggi una
+        # misura sola e' tanto probabile che sia un errore quanto un ago, e metterle sullo stesso
+        # piano di quelle confermate da tre fotogrammi renderebbe l'elenco inutilizzabile --
+        # dodici fotogrammi producevano nove "famiglie", cioe' nessuna informazione.
+        solide = [p for p in proposte if p["fotogrammi"] >= 2]
+        incerte = [p for p in proposte if p["fotogrammi"] < 2]
+
+        risultato = {
+            "proposte": solide,
+            "incerte": incerte,
+            "depths": depths,
+            "misure": len(misure),
+            "fotogrammi": len(candidati),
+            "ratio_y_usato": riferimento,
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "avvertenza": ("Su dati etichettati a mano circa un terzo delle proposte cade entro "
+                           "1 grado e circa meta' entro 3: sono da confermare una per una. "
+                           "Le famiglie viste in un solo fotogramma stanno sotto 'incerte'."),
+        }
+
+        def mutate(_p: Project, value: Dict) -> Dict:
+            value["proposal"] = risultato
+            return value
+
+        _write_step(project_id, "guides", mutate, invalidate=False)
+        _job_update(job_id, status="done", stage="fatto", result=risultato)
+    except Exception as errore:
+        _job_update(job_id, status="error", stage=str(errore), error=str(errore))
+
+
+@app.post("/api/projects/<project_id>/guides/propose")
+def api_guides_propose(project_id: str):
+    """Proponi #22 e #23 misurando gli aghi nei fotogrammi di calibrazione."""
+    project = _project(project_id)
+    if not project.dedup_names():
+        return jsonify({"error": "importa prima una cartella"}), 400
+    per_folder = int(_payload().get("per_folder") or 12)
+    return jsonify({"job_id": _start_job(_run_guides_proposal, project_id, per_folder)})
+
+
 @app.post("/api/projects/<project_id>/duplicates/unkeep")
 def api_duplicates_unkeep(project_id: str):
     """Disfa un «le tengo tutte»: quel gruppo torna a farsi guardare alla ricerca dopo."""
