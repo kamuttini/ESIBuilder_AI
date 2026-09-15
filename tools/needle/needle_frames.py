@@ -107,3 +107,55 @@ def calibration_frames(scorer: NeedleScorer, acquisition: Path, size: Tuple[int,
     ranked = sorted(zip(frames, scores), key=lambda pair: -pair[1])
     kept = [(path, score) for path, score in ranked if score >= threshold]
     return kept[:limit]
+
+
+# --------------------------------------------------------------------- sonda
+import re as _re
+
+# A probe code mixes letters and digits: LA332, CA541, TLC3-13, E14CL4b, ML6-15, 12L-RS, 8848.
+# Words that look like one but never are, mostly software and build numbers.
+_NOT_A_PROBE = _re.compile(
+    r"^(rev\d*|sw\d*|v\d+|f\d{6}|\d{1,2}|\d{4}|20\d{2}|r\d|bt\d+)$", _re.IGNORECASE)
+
+
+def probe_tokens(config_name: str) -> List[str]:
+    """Probe codes named in a configuration's folder name."""
+    out: List[str] = []
+    for token in _re.split(r"[\s,_/()]+", config_name):
+        token = token.strip("-.")
+        if len(token) < 3 or len(token) > 12:
+            continue
+        if not (_re.search(r"[A-Za-z]", token) and _re.search(r"\d", token)):
+            continue
+        if _NOT_A_PROBE.match(token):
+            continue
+        out.append(token)
+    return out
+
+
+def _normalise(text: str) -> str:
+    return _re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def frames_of_probe(frames: Sequence[Path], acquisition: Path, config_name: str
+                    ) -> List[Path]:
+    """Keep the frames whose sub-folder names the configuration's probe, when it does.
+
+    One acquisition often covers several probes in sub-folders -- "0. LA332", "1. CA541",
+    "2. LA523" -- and every configuration of that machine matched the whole acquisition, so a
+    configuration for one probe was being measured on another probe's needles. Their guide
+    angles differ, so the comparison against the legacy values was wrong in a way that looked
+    like a detector error.
+
+    If no sub-folder mentions any of the probes, nothing is filtered: the acquisition is
+    single-probe and the frames are all there is.
+    """
+    tokens = [_normalise(t) for t in probe_tokens(config_name)]
+    if not tokens:
+        return list(frames)
+    kept = [
+        path for path in frames
+        if any(token in _normalise(str(path.parent.relative_to(acquisition)))
+               for token in tokens)
+    ]
+    return kept or list(frames)

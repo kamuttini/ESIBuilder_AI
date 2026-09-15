@@ -30,7 +30,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from detect_needle_line import candidates_in_frame  # noqa: E402
 from guides_geometry import read_setup  # noqa: E402
-from needle_frames import NeedleScorer, all_frames  # noqa: E402
+from needle_frames import NeedleScorer, all_frames, frames_of_probe  # noqa: E402
 
 CALIB_DIR = re.compile(r"agh|guid|biops", re.IGNORECASE)
 # BGR, as OpenCV wants them. One colour and one letter per needle, because several are
@@ -44,7 +44,8 @@ SKIP_DIRS = {"$RECYCLE.BIN", "System Volume Information"}
 def frames_of(acquisition: Path, size: Tuple[int, int], limit: int,
               scorer: Optional["NeedleScorer"] = None,
               rect: Optional[Tuple[int, int, int, int]] = None,
-              threshold: float = 0.60, scan_cap: int = 80) -> List[Path]:
+              threshold: float = 0.60, scan_cap: int = 80,
+              config_name: str = "") -> List[Path]:
     """Frames to measure: inside a calibration folder AND confirmed by the classifier.
 
     Neither test alone is right. Folder names carry the intent -- these acquisitions are filed
@@ -59,7 +60,12 @@ def frames_of(acquisition: Path, size: Tuple[int, int], limit: int,
             path for path in all_frames(acquisition, size, cap=400)
             if any(CALIB_DIR.search(part)
                    for part in os.path.relpath(path.parent, acquisition).split(os.sep))
-        ][:scan_cap]
+        ]
+        # one acquisition often covers several probes in sub-folders; a configuration must be
+        # measured on its own probe's needles, whose guide angles differ from the others
+        if config_name:
+            pool = frames_of_probe(pool, acquisition, config_name)
+        pool = pool[:scan_cap]
         if pool:
             scores = scorer.score(pool, rect)
             ranked = [p for p, v in sorted(zip(pool, scores), key=lambda z: -z[1]) if v >= threshold]
@@ -157,7 +163,7 @@ def main() -> int:
                 setup.rect_echo.right, setup.rect_echo.bottom)
 
         for frame in frames_of(Path(row["acquisition"]), size, args.frames_per_config,
-                               scorer=scorer, rect=rect):
+                               scorer=scorer, rect=rect, config_name=row["config"]):
             gray = cv2.imread(str(frame), cv2.IMREAD_GRAYSCALE)
             if gray is None or (gray.shape[1], gray.shape[0]) != size:
                 continue
