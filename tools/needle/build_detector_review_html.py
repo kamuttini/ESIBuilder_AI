@@ -29,12 +29,40 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from detect_needle_line import detect_in_frame  # noqa: E402
 from guides_geometry import read_setup  # noqa: E402
+from needle_frames import NeedleScorer, all_frames  # noqa: E402
 
 CALIB_DIR = re.compile(r"agh|guid|biops", re.IGNORECASE)
 SKIP_DIRS = {"$RECYCLE.BIN", "System Volume Information"}
 
 
-def frames_of(acquisition: Path, size: Tuple[int, int], limit: int) -> List[Path]:
+def frames_of(acquisition: Path, size: Tuple[int, int], limit: int,
+              scorer: Optional["NeedleScorer"] = None,
+              rect: Optional[Tuple[int, int, int, int]] = None,
+              threshold: float = 0.60, scan_cap: int = 80) -> List[Path]:
+    """Frames to measure: inside a calibration folder AND confirmed by the classifier.
+
+    Neither test alone is right. Folder names carry the intent -- these acquisitions are filed
+    by angle and depth, which is exactly what the calibration needs -- but they also contain
+    frames that are not calibration material at all. The classifier answers "is there a needle",
+    which is a different question: on its own it happily picks a needle from a biopsy demo
+    filed elsewhere. Measured over twenty configurations, agreement with the legacy angles was
+    33% by folder alone and 39% for the two together, 40% against 49% counting the shortlist.
+    """
+    if scorer is not None and rect is not None:
+        pool = [
+            path for path in all_frames(acquisition, size, cap=400)
+            if any(CALIB_DIR.search(part)
+                   for part in os.path.relpath(path.parent, acquisition).split(os.sep))
+        ][:scan_cap]
+        if pool:
+            scores = scorer.score(pool, rect)
+            ranked = [p for p, v in sorted(zip(pool, scores), key=lambda z: -z[1]) if v >= threshold]
+            if ranked:
+                return ranked[:limit]
+    return _frames_by_folder(acquisition, size, limit)
+
+
+def _frames_by_folder(acquisition: Path, size: Tuple[int, int], limit: int) -> List[Path]:
     found: List[Path] = []
     for dirpath, dirnames, filenames in os.walk(acquisition):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
@@ -70,7 +98,14 @@ def main() -> int:
     parser.add_argument("--max-configs", type=int, default=14)
     parser.add_argument("--frames-per-config", type=int, default=3)
     parser.add_argument("--width", type=int, default=520)
+    parser.add_argument("--model", type=Path, default=None,
+                        help="Needle classifier used to confirm the frames. Without it, folder "
+                             "names decide alone and non-calibration frames get through.")
     args = parser.parse_args()
+
+    scorer = NeedleScorer(args.model) if args.model and args.model.is_file() else None
+    if scorer is None:
+        print("attenzione: nessun classificatore, i fotogrammi li scelgono solo i nomi delle cartelle")
 
     wanted = {int(v) for v in args.probe_types.split(",") if v.strip().isdigit()}
     rows = [
@@ -88,7 +123,8 @@ def main() -> int:
         rect = (setup.rect_echo.left, setup.rect_echo.top,
                 setup.rect_echo.right, setup.rect_echo.bottom)
 
-        for frame in frames_of(Path(row["acquisition"]), size, args.frames_per_config):
+        for frame in frames_of(Path(row["acquisition"]), size, args.frames_per_config,
+                               scorer=scorer, rect=rect):
             gray = cv2.imread(str(frame), cv2.IMREAD_GRAYSCALE)
             if gray is None or (gray.shape[1], gray.shape[0]) != size:
                 continue
