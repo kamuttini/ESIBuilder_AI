@@ -17,6 +17,7 @@ import base64
 import csv
 import html
 import io
+import json
 import os
 import re
 import sys
@@ -36,6 +37,7 @@ CALIB_DIR = re.compile(r"agh|guid|biops", re.IGNORECASE)
 # usually visible and a verdict on "the detection" is meaningless when there are four.
 SEGMENT_COLOURS = [(0, 0, 255), (0, 220, 255), (0, 255, 120), (255, 180, 0), (255, 120, 255)]
 SEGMENT_LETTERS = "abcde"
+SEGMENT_HTML = ["#ffb020"] * 5
 SKIP_DIRS = {"$RECYCLE.BIN", "System Volume Information"}
 
 
@@ -161,18 +163,12 @@ def main() -> int:
                 continue
             total += 1
             detections = candidates_in_frame(gray, rect, top_k=args.per_frame)
-            canvas = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            for order, detection in enumerate(detections):
-                colour = SEGMENT_COLOURS[order % len(SEGMENT_COLOURS)]
-                cv2.line(canvas,
-                         (int(detection.p1[0]), int(detection.p1[1])),
-                         (int(detection.p2[0]), int(detection.p2[1])), colour, 2)
-                cv2.putText(canvas, SEGMENT_LETTERS[order % len(SEGMENT_LETTERS)],
-                            (int(detection.p2[0]) + 6, int(detection.p2[1]) + 6),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, colour, 2, cv2.LINE_AA)
+            # The needles are NOT burned into the image: they go into the SVG overlay, so a
+            # verdict can restyle the one it refers to. Baked in, "b is wrong" left the frame
+            # looking exactly as before and the reviewer could not see what she had marked.
             if detections:
                 found += 1
-            crop = canvas[rect[1]:rect[3], rect[0]:rect[2]]
+            crop = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)[rect[1]:rect[3], rect[0]:rect[2]]
             uri = encode(crop, args.width)
             if not detections:
                 caption = '<span class="no">nessuna rilevazione</span>'
@@ -187,12 +183,19 @@ def main() -> int:
                 caption = " &nbsp; ".join(parts)
             number = len(cards) + 1
             crop_w, crop_h = rect[2] - rect[0], rect[3] - rect[1]
+            drawn = json.dumps([
+                {"x1": (d.p1[0] - rect[0]) / crop_w, "y1": (d.p1[1] - rect[1]) / crop_h,
+                 "x2": (d.p2[0] - rect[0]) / crop_w, "y2": (d.p2[1] - rect[1]) / crop_h,
+                 "a": round(d.angle_deg, 2)}
+                for d in detections
+            ])
             cards.append(
                 f'<figure id="c{number}" data-n="{number}" '
                 f'data-frame="{html.escape(str(frame))}" '
                 f'data-config="{html.escape(row["config"])}" '
                 f'data-rect="{rect[0]},{rect[1]},{rect[2]},{rect[3]}" '
-                f'data-crop="{crop_w},{crop_h}">'
+                f'data-crop="{crop_w},{crop_h}" '
+                f"data-det='{html.escape(drawn, quote=True)}'>"
                 f'<div class="head"><span class="num">{number}</span>'
                 f'<span class="mark" id="m{number}"></span></div>'
                 f'<div class="canvas"><img loading="lazy" src="{uri}" alt="">'
@@ -227,8 +230,14 @@ def main() -> int:
  .vote .wide {{ flex: 1; }}
  .canvas {{ position: relative; line-height: 0; touch-action: none; cursor: crosshair; }}
  .overlay {{ position: absolute; inset: 0; width: 100%; height: 100%; }}
- .overlay line {{ stroke: #35ff9b; stroke-width: 2.5; }}
- .overlay line.tmp {{ stroke: #9bffd0; stroke-dasharray: 5 4; }}
+ .overlay line.mia {{ stroke: #35ff9b; stroke-width: 3; stroke-linecap: round; }}
+ .overlay line.tmp {{ stroke: #9bffd0; stroke-dasharray: 5 4; stroke-width: 2.5; }}
+ .overlay line.det {{ stroke: #ffb020; stroke-width: 2.5; }}
+ .overlay line.det.ok {{ stroke: #35c8ff; stroke-width: 4; }}
+ .overlay line.det.no {{ stroke: #f2564d; stroke-width: 2; stroke-dasharray: 6 5; opacity: .7; }}
+ .overlay text {{ font: 700 15px system-ui; paint-order: stroke; stroke: #000; stroke-width: 3px; }}
+ .vote button.attivo {{ background: #35507a; border-color: #4d7ab8; color: #fff; }}
+ .vote button.attivo.rosso {{ background: #6b2a26; border-color: #a04a44; }}
  .disegnate {{ color: #35ff9b; font-size: 12px; margin-top: 4px; }}
  #scarica {{ margin-top: 8px; padding: 6px 12px; border-radius: 6px; cursor: pointer;
              border: 1px solid #3a3a3a; background: #263; color: #eaffea; }}
@@ -250,7 +259,12 @@ RECT_ECHO. Quello che conta non &egrave; quante ne trova, ma se ognuna sta <b>su
 &egrave; lo strumento di misura di tutta la catena delle linee guida, e se sbaglia di qualche grado
 sbagliano tutti i numeri a valle senza che nessuno se ne accorga.</p>
 <div id="barra">
-  <b>Come segnalarmele:</b> ogni ago disegnato ha la sua lettera
+  <b>Come segnalarmele:</b> ogni ago trovato dal programma &egrave;
+  <span style="color:#ffb020">arancione</span>; quando lo marchi diventa
+  <span style="color:#35c8ff">azzurro e spesso</span> se &egrave; giusto,
+  <span style="color:#f2564d">rosso tratteggiato e smorto</span> se &egrave; sbagliato. Cos&igrave;
+  vedi a colpo d'occhio cosa hai segnato, anche quando in un fotogramma uno solo &egrave;
+  sbagliato. Ogni ago ha la sua lettera
   (<b>a</b>, <b>b</b>, <b>c</b>&hellip;) e la sua riga di bottoni, quindi un riquadro pu&ograve;
   avere <i>7a</i> giusto e <i>7b</i> sbagliato. Se il programma ha perso un ago che si vede,
   premi <i>ne manca uno</i>. Il riepilogo qui sotto si aggiorna da solo: copialo e incollamelo.
@@ -289,6 +303,13 @@ function disegna() {{
   const ok = Object.keys(voti).filter((k) => voti[k] === 'ok').sort(ordina);
   const no = Object.keys(voti).filter((k) => voti[k] === 'no').sort(ordina);
   const manca = Object.keys(voti).filter((k) => voti[k] === 'manca').sort(ordina);
+  document.querySelectorAll('.vote button[id^="b"]').forEach((b) => {{
+    const key = b.id.slice(1, -2);
+    const tipo = b.id.slice(-2);
+    b.classList.toggle('attivo', voti[key] === tipo);
+    b.classList.toggle('rosso', tipo === 'no');
+  }});
+  disegnaLinee();
   const visti = new Set(Object.keys(voti).map((k) => parseInt(k, 10))).size;
   document.getElementById('conta').textContent =
     ` \u2014 ${{ok.length}} segmenti sull\u2019ago, ${{no.length}} sbagliati, ` +
@@ -311,14 +332,37 @@ function cancellaLinea(n) {{
   salvaLinee();
 }}
 
+const LETTERE = 'abcde';
+const COLORI = {{det: '#ffb020', ok: '#35c8ff', no: '#f2564d'}};
+
 function disegnaLinee() {{
   document.querySelectorAll('figure[data-n]').forEach((fig) => {{
     const n = fig.dataset.n;
     const svg = document.getElementById('s' + n);
     if (!svg) return;
     svg.innerHTML = '';
+    // le rilevazioni, ognuna con l'aspetto del proprio verdetto
+    let det = [];
+    try {{ det = JSON.parse(fig.dataset.det || '[]'); }} catch (e) {{ det = []; }}
+    det.forEach((d, i) => {{
+      const lettera = LETTERE[i] || '?';
+      const stato = voti[n + lettera] || '';
+      const el = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      el.setAttribute('class', 'det ' + stato);
+      el.setAttribute('x1', d.x1 * 100 + '%'); el.setAttribute('y1', d.y1 * 100 + '%');
+      el.setAttribute('x2', d.x2 * 100 + '%'); el.setAttribute('y2', d.y2 * 100 + '%');
+      svg.appendChild(el);
+      const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      t.setAttribute('x', (d.x2 * 100) + '%');
+      t.setAttribute('y', (d.y2 * 100) + '%');
+      t.setAttribute('fill', COLORI[stato] || COLORI.det);
+      t.setAttribute('opacity', stato === 'no' ? '.7' : '1');
+      t.textContent = lettera;
+      svg.appendChild(t);
+    }});
     for (const l of (linee[n] || [])) {{
       const el = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      el.setAttribute('class', 'mia');
       el.setAttribute('x1', l[0] * 100 + '%'); el.setAttribute('y1', l[1] * 100 + '%');
       el.setAttribute('x2', l[2] * 100 + '%'); el.setAttribute('y2', l[3] * 100 + '%');
       svg.appendChild(el);
