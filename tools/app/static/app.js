@@ -1404,9 +1404,9 @@ function cardTutteLeImmagini(panel) {
         + (propostaRete.size && !guardate.size ? `, ${propostaRete.size} proposte dalla ricerca` : '')
         + (manoDentro.size || manoFuori.size
           ? `, ${manoDentro.size} aggiunte e ${manoFuori.size} escluse a mano` : '')
-        + '. Puoi correggere la scelta automatica con «Usa per guide» oppure «Escludi '
-        + 'dalle guide»; dopo una correzione, «Scelta automatica» la annulla. La misura '
-        + 'va poi rilanciata dallo step Linee guida.'));
+        + '. Le immagini gia\' scelte sono indicate chiaramente e si possono escludere '
+        + 'solo dalla calibrazione; sulle altre trovi «Inserisci nel pool di calibrazione». '
+        + 'La misura va poi rilanciata dallo step Linee guida.'));
     }
     const thumbs = el('div', { class: 'thumbs immagini-grid' });
     for (const nome of nomi.slice(0, mostrate)) {
@@ -1451,9 +1451,8 @@ function cardTutteLeImmagini(panel) {
       });
       if (proibite.has(nome)) fig.classList.add('proibita');
 
-      // Linee guida: la targhetta dice che fine fa il fotogramma. Ogni scelta automatica
-      // puo' essere corretta nei due versi; dopo la correzione il comando torna a offrire
-      // l'automatico, cosi' e' sempre chiaro se sta decidendo la rete o l'operatore.
+      // Linee guida: la targhetta dice che fine fa il fotogramma. Qui la scelta e' binaria
+      // e parla il linguaggio dell'operatore: dentro o fuori dal pool di calibrazione.
       const sg = statoGuide(nome);
       if (sg.targa) media.append(el('span', { class: 'thumb-guide-targa', title: sg.perche }, sg.targa));
       if (usate.has(nome) && !manoFuori.has(nome)) fig.classList.add('guide-usata');
@@ -1461,17 +1460,19 @@ function cardTutteLeImmagini(panel) {
       if (!sg.attiva || (guardate.has(nome) && !usate.has(nome))) fig.classList.add('guide-fuori');
       anteprima.title = `${sg.perche} — clicca per aprirla a tutto schermo`;
       azioni.append(b, vietata);
+      if (sg.attiva) {
+        azioni.append(el('span', { class: 'thumb-calibrazione-stato' },
+          'Già segnalata come immagine di calibrazione'));
+      }
       const gb = el('button', { class: 'ghost thumb-guide' },
-        sg.mano ? 'Scelta automatica' : sg.attiva ? 'Escludi dalle guide' : 'Usa per guide');
-      gb.title = sg.mano
-        ? 'annulla la scelta manuale e torna alla selezione automatica'
-        : sg.attiva
-          ? 'esclude manualmente il fotogramma dallo studio delle linee guida (#22 e #23)'
-          : 'aggiunge il fotogramma allo studio delle linee guida anche se non era stato proposto';
+        sg.attiva ? 'Escludi solo dalla calibrazione' : 'Inserisci nel pool di calibrazione');
+      gb.title = sg.attiva
+        ? 'toglie il fotogramma soltanto dal pool usato per #22 e #23, non dal progetto'
+        : 'aggiunge il fotogramma al pool usato per studiare #22 e #23';
       gb.addEventListener('click', async (ev) => {
         ev.stopPropagation();
         gb.disabled = true;
-        const prossimo = sg.mano ? 'auto' : sg.attiva ? 'exclude' : 'include';
+        const prossimo = sg.attiva ? 'exclude' : 'include';
         try { await cambiaGuide(nome, prossimo); }
         catch (errore) { toast(errore.message, true); gb.disabled = false; }
       });

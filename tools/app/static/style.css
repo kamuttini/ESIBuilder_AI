@@ -1394,6 +1394,11 @@ img.depth-crop {
   white-space: normal;
 }
 .immagini-grid .thumb-actions .thumb-guide { grid-column: 1 / -1; }
+.immagini-grid .thumb-calibrazione-stato {
+  grid-column: 1 / -1; padding: 4px 6px; border: 1px solid rgba(63, 185, 80, .5);
+  border-radius: 5px; color: var(--ok); background: rgba(63, 185, 80, .08);
+  font-size: 10.5px; line-height: 1.25; text-align: center;
+}
 .immagini-grid .thumb-voce .thumb-via:hover { color: #f85149; border-color: #f85149; }
 
 
