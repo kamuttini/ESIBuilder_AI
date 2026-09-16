@@ -202,7 +202,8 @@ def _inclination(angle_deg: float) -> float:
 def refine(candidates, gray: np.ndarray, rect: Optional[Tuple[int, int, int, int]] = None,
            max_needles: int = 2, parallel_tol: float = 8.0, min_brightness: float = 30.0,
            min_ridge: float = 2.0, min_inclination: float = 8.0,
-           max_start_depth: float = 0.55, min_vertical_span: float = 0.0) -> List[Refined]:
+           max_start_depth: float = 0.55, min_vertical_span: float = 0.0,
+           fallback: bool = True) -> List[Refined]:
     """Apply the rules, best first.
 
     Two of them come from Camilla noticing that the detector prefers the wrong mark when
@@ -235,20 +236,33 @@ def refine(candidates, gray: np.ndarray, rect: Optional[Tuple[int, int, int, int
     """
     if not candidates:
         return []
+
+    def tieni(rimasti: List, passati: List) -> List:
+        """Con `fallback` la regola sceglie, senza `fallback` la regola esclude.
+
+        Chi guarda una galleria vuole sempre vedere la scommessa migliore, anche quando
+        nessun candidato convince: la ripesca serve a quello. Chi misura una configurazione
+        no -- se il fotogramma non e' sonda in acqua non c'e' nessun ago da ripescare, e la
+        ripesca inventa una riga piatta che poi diventa una famiglia di linee guida.
+        """
+        if passati:
+            return passati
+        return rimasti if fallback else []
+
     merged = merge_collinear(candidates)
     if min_inclination > 0:
-        dritti = [n for n in merged if _inclination(n.angle_deg) >= min_inclination]
-        merged = dritti or merged
-    if rect is not None and max_start_depth < 1.0:
+        merged = tieni(merged, [n for n in merged
+                                if _inclination(n.angle_deg) >= min_inclination])
+    if merged and rect is not None and max_start_depth < 1.0:
         top, height = rect[1], max(1, rect[3] - rect[1])
-        alti = [n for n in merged
-                if (min(n.p1[1], n.p2[1]) - top) / height <= max_start_depth]
-        merged = alti or merged
-    if rect is not None and min_vertical_span > 0:
+        merged = tieni(merged, [n for n in merged
+                                if (min(n.p1[1], n.p2[1]) - top) / height <= max_start_depth])
+    if merged and rect is not None and min_vertical_span > 0:
         height = max(1, rect[3] - rect[1])
-        lunghi = [n for n in merged
-                  if abs(n.p2[1] - n.p1[1]) / height >= min_vertical_span]
-        merged = lunghi or merged
+        merged = tieni(merged, [n for n in merged
+                                if abs(n.p2[1] - n.p1[1]) / height >= min_vertical_span])
+    if not merged:
+        return []
     scored = []
     for needle in merged:
         brightness = line_brightness(gray, needle.p1, needle.p2)
@@ -258,6 +272,8 @@ def refine(candidates, gray: np.ndarray, rect: Optional[Tuple[int, int, int, int
     # a dark line is not a needle whatever else it has going for it
     kept = [(n, b, r) for n, b, r in scored if b >= min_brightness and r >= min_ridge]
     if not kept:
+        if not fallback:
+            return []
         kept = sorted(scored, key=lambda z: -z[1])[:1]
 
     kept.sort(key=lambda z: -(z[1] * (1.0 + z[2])))

@@ -76,13 +76,23 @@ def frames_in(folder: Path, size: Optional[Tuple[int, int]], cap: int) -> List[P
     return out
 
 
-def measure(frame: Path, rect: Tuple[int, int, int, int], ratio_x: float, ratio_y: float
-            ) -> Optional[Dict[str, float]]:
-    """Angle in degrees and centre distance in millimetres, the legacy way."""
+def measure(frame: Path, rect: Tuple[int, int, int, int], ratio_x: float, ratio_y: float,
+            strict: bool = True) -> Optional[Dict[str, float]]:
+    """Angle in degrees and centre distance in millimetres, the legacy way.
+
+    `strict` is what separates measuring from reviewing. A gallery wants the best guess even
+    on a hopeless frame; a proposal wants silence, because a calibration folder also holds
+    frames with no needle in them at all, and there the fallback invents a flat line -- eleven
+    of those, on one real project, formed the largest "family" of guide lines in the proposal.
+    Measured on the 66 frames of the diversity gallery, refusing to answer on 24 of them takes
+    the median error from 3.48 to 1.20 degrees and within-one-degree from 30% to 45%, and the
+    three frames Camilla marked as not-probe-in-water go from three answers to none.
+    """
     gray = cv2.imread(str(frame), cv2.IMREAD_GRAYSCALE)
     if gray is None:
         return None
-    needles = refine(detect(gray, rect, top_k=6), gray, rect=rect, max_needles=2)
+    needles = refine(detect(gray, rect, top_k=6), gray, rect=rect, max_needles=2,
+                     fallback=not strict)
     if not needles:
         return None
     needle = needles[0]
