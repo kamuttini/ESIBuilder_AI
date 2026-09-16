@@ -4016,6 +4016,13 @@ function svgTraccia(t, rect, larghezzaSchermo) {
   const sp = (px) => (px * k).toFixed(1);
   const tratti = (a, b) => `stroke-dasharray="${sp(a)} ${sp(b)}"`;
   const parti = [];
+  // L'ago su cui stanno agendo i comandi: un alone sotto la retta, non un colore diverso --
+  // il colore dice gia' un'altra cosa, quale dei due e' il principale.
+  if (t.selezionata) {
+    const s = t.selezionata;
+    parti.push(`<line class="traccia-scelta" x1="${s[0]}" y1="${s[1]}" x2="${s[2]}" y2="${s[3]}" `
+      + `stroke-width="${sp(9)}"/>`);
+  }
   if (rect) {
     const cx = (rect.left + rect.right) / 2;
     parti.push(`<rect class="traccia-rect" x="${rect.left}" y="${rect.top}" `
@@ -4101,7 +4108,8 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
   let elenco = tracce.slice();
   let indice = Math.max(0, Math.min(Number(partenza) || 0, elenco.length - 1));
   let disegno = true;
-  let modifica = null;     // { cx, cy, ang } in coordinate del fotogramma, null = non toccata
+  let rette = null;        // [{cx, cy, ang}] quando si sta modificando, altrimenti null
+  let quale = 0;           // quale ago ricevono i comandi
   let passo = 0.5;
 
   const pieno = el('div', { class: 'piani-pieno' });
@@ -4109,6 +4117,7 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
   const scena = el('div', { class: 'piani-pieno-scena' });
   const info = el('span', { class: 'hint' });
   const misura = el('span', { class: 'hint' });
+  const scelta = el('select', { title: 'quale ago ricevono i comandi' });
   const indietro = el('button', { class: 'ghost sq', title: 'precedente' }, '‹');
   const avanti = el('button', { class: 'ghost sq', title: 'successiva' }, '›');
   const vedi = el('button', { class: 'ghost', title: 'mostra o nasconde il disegno (tasto O)' },
@@ -4144,19 +4153,26 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     if (!(ry > 0)) ry = rx;
     return { rx, ry };
   };
-  const ratioY = (t) => ratios(t).ry;
-  const ratioX = (t) => ratios(t).rx;
 
-  // dalla retta corrente (o da quella misurata) al punto sulla verticale e all'inclinazione
-  const statoDi = (t) => {
-    if (modifica) return modifica;
-    const seg = t.linea || (t.p1 && t.p2 ? [t.p1[0], t.p1[1], t.p2[0], t.p2[1]] : null);
-    if (!seg) return null;
+  const cx = () => (rect.left + rect.right) / 2;
+
+  // una retta come (punto sulla verticale centrale, inclinazione): sono #22 e #23
+  const statoDa = (seg) => {
+    if (!seg || seg.length < 4) return null;
     const ang = Math.atan2(seg[3] - seg[1], seg[2] - seg[0]);
-    const cx = (rect.left + rect.right) / 2;
-    const cy = t.crossing ? t.crossing[1]
-      : seg[1] + (seg[3] - seg[1]) * ((cx - seg[0]) / ((seg[2] - seg[0]) || 1e-6));
-    return { cx, cy, ang };
+    const dx = seg[2] - seg[0];
+    const cy = seg[1] + (seg[3] - seg[1]) * ((cx() - seg[0]) / (Math.abs(dx) > 1e-6 ? dx : 1e-6));
+    return { cx: cx(), cy, ang };
+  };
+
+  // gli aghi del fotogramma: il primo e' il principale, ed e' quello che scrive #22 e #23
+  const statiDi = (t) => {
+    if (rette) return rette;
+    const prima = t.linea || (t.p1 && t.p2 ? [t.p1[0], t.p1[1], t.p2[0], t.p2[1]] : null);
+    const tutte = [prima, ...(t.altre_linee || [])].filter(Boolean);
+    const stati = tutte.map(statoDa).filter(Boolean);
+    if (stati.length && t.crossing) stati[0] = { ...stati[0], cy: t.crossing[1] };
+    return stati;
   };
 
   // la retta tagliata sui quattro lati: la stessa cosa che fa il server, qui solo per vederla
@@ -4173,50 +4189,82 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     return [s.cx + t0 * dx, s.cy + t0 * dy, s.cx + t1 * dx, s.cy + t1 * dy];
   };
 
-  // i due numeri che si stanno modificando, con la formula della misura
+  // i due numeri di una retta, con la formula della misura
   const numeri = (t, s) => {
-    const rx = ratioX(t), ry = ratioY(t);
-    const ang = Math.atan2(Math.sin(s.ang) * ry, Math.cos(s.ang) * rx) * 180 / Math.PI;
-    return { angolo: ang, distanza: (s.cy - rect.top + 1) * ry };
+    const { rx, ry } = ratios(t);
+    return { angolo: Math.atan2(Math.sin(s.ang) * ry, Math.cos(s.ang) * rx) * 180 / Math.PI,
+             distanza: (s.cy - rect.top + 1) * ry };
   };
 
   const disegnata = (t) => {
-    const s = statoDi(t);
-    if (!modifica || !s) return t;
-    const linea = estremi(s);
-    return { ...t, linea, crossing: [s.cx, s.cy], p1: null, p2: null,
-             altri: [], altre_linee: t.altre_linee };
+    const stati = statiDi(t);
+    if (!stati.length) return t;
+    const segmenti = stati.map(estremi);
+    const scelto = segmenti[Math.min(quale, segmenti.length - 1)];
+    return {
+      ...t,
+      linea: segmenti[0] || t.linea,
+      altre_linee: segmenti.slice(1).filter(Boolean),
+      // il tratto grezzo si mostra solo finche' nessuno ha toccato niente: dopo una modifica
+      // indicherebbe un pezzo di una retta che non c'e' piu'
+      p1: rette ? null : t.p1, p2: rette ? null : t.p2, altri: rette ? [] : t.altri,
+      crossing: [stati[Math.min(quale, stati.length - 1)].cx,
+                 stati[Math.min(quale, stati.length - 1)].cy],
+      selezionata: stati.length > 1 ? scelto : null,
+    };
   };
 
   const salva = el('button', { class: 'ghost' }, 'Salva la correzione');
   const auto = el('button', { class: 'ghost' }, 'Torna all\'automatico');
   const annulla = el('button', { class: 'ghost' }, 'Annulla');
 
+  const aggiornaScelta = (stati) => {
+    scelta.replaceChildren();
+    for (let i = 0; i < stati.length; i += 1) {
+      scelta.append(el('option', { value: i },
+        i === 0 ? 'ago 1 (principale)' : `ago ${i + 1}`));
+    }
+    scelta.value = String(Math.min(quale, Math.max(0, stati.length - 1)));
+    scelta.style.display = stati.length > 1 ? '' : 'none';
+  };
+
   const mostra = () => {
     const t = traccia();
+    const stati = statiDi(t);
+    if (quale >= stati.length) quale = 0;
     scena.innerHTML = '';
-    const figura = fotogrammaTracciato(disegno ? disegnata(t) : { ...t, linea: null, p1: null, p2: null, crossing: null, altri: [], altre_linee: [] },
+    const figura = fotogrammaTracciato(
+      disegno ? disegnata(t)
+        : { ...t, linea: null, p1: null, p2: null, crossing: null, altri: [], altre_linee: [] },
       disegno ? rect : null, 1600, null);
-    figura.classList.add('traccia-grande');
     scena.append(figura);
     trascinamento(figura);
     info.textContent = `${indice + 1} di ${elenco.length} · ${t.image.split('/').pop()}`;
-    const s = statoDi(t);
+    aggiornaScelta(stati);
+    const s = stati[quale];
     if (s) {
       const n = numeri(t, s);
-      misura.textContent = `#23 ${n.angolo.toFixed(2)}°  ·  #22 ${n.distanza.toFixed(2)} mm`
+      misura.textContent = (stati.length > 1 ? `ago ${quale + 1}: ` : '')
+        + `#23 ${n.angolo.toFixed(2)}°  ·  #22 ${n.distanza.toFixed(2)} mm`
+        + (quale > 0 ? ' (non scrive le righe)' : '')
         + `  ·  ${t.orientamento || 'orientamento non noto'}`
-        + (modifica ? '  · modificata, non ancora salvata' : t.corretto ? '  · corretta a mano' : '');
+        + (rette ? '  · modificata, non ancora salvata' : t.corretto ? '  · corretta a mano' : '');
     } else misura.textContent = '';
     vedi.textContent = disegno ? 'disegno: acceso' : 'disegno: spento';
-    salva.disabled = !modifica;
-    annulla.disabled = !modifica;
+    salva.disabled = !rette;
+    annulla.disabled = !rette;
     auto.disabled = !t.corretto;
     indietro.disabled = elenco.length < 2;
     avanti.disabled = elenco.length < 2;
   };
 
-  // trascinare: sul punto giallo si sposta la retta, altrove la si ruota intorno a lui
+  // prima di toccare qualcosa si congela lo stato corrente: da li' in poi si modifica quello
+  const prendi = () => {
+    if (!rette) rette = statiDi(traccia()).map((s) => ({ ...s }));
+    return rette;
+  };
+
+  // trascinare: sul punto giallo si sposta la retta scelta, altrove la si ruota intorno a lui
   const trascinamento = (figura) => {
     if (!disegno) return;
     const img = figura.querySelector('img');
@@ -4231,23 +4279,25 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     figura.style.cursor = 'crosshair';
     figura.addEventListener('pointerdown', (evento) => {
       const t = traccia();
-      const s = statoDi(t);
+      const stati = prendi();
+      const s = stati[quale];
       if (!s) return;
       const p = dove(evento);
       const vicino = Math.hypot(p.x - s.cx, p.y - s.cy) < (t.size ? t.size[0] / 40 : 40);
       modo = vicino ? 'sposta' : 'ruota';
-      modifica = { ...s };
       figura.setPointerCapture(evento.pointerId);
       evento.preventDefault();
     });
     figura.addEventListener('pointermove', (evento) => {
       if (!modo) return;
       const p = dove(evento);
+      const s = rette[quale];
       if (modo === 'sposta') {
-        modifica = { ...modifica, cy: Math.min(rect.bottom, Math.max(rect.top, p.y)) };
+        rette[quale] = { ...s, cy: Math.min(rect.bottom, Math.max(rect.top, p.y)) };
       } else {
-        modifica = { ...modifica, ang: Math.atan2(p.y - modifica.cy, p.x - modifica.cx) };
-        if (Math.cos(modifica.ang) < 0) modifica.ang += Math.PI;   // la retta non ha verso
+        let ang = Math.atan2(p.y - s.cy, p.x - s.cx);
+        if (Math.cos(ang) < 0) ang += Math.PI;   // la retta non ha verso
+        rette[quale] = { ...s, ang };
       }
       aggiornaDisegno();
     });
@@ -4266,10 +4316,11 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     const larghezza = Math.round(figura.getBoundingClientRect().width);
     if (vecchio) vecchio.remove();
     figura.insertAdjacentHTML('beforeend', svgTraccia(disegnata(t), rect, larghezza));
-    const s = statoDi(t);
+    const s = (rette || statiDi(t))[quale];
     if (s) {
       const n = numeri(t, s);
-      misura.textContent = `#23 ${n.angolo.toFixed(2)}°  ·  #22 ${n.distanza.toFixed(2)} mm`
+      misura.textContent = (rette.length > 1 ? `ago ${quale + 1}: ` : '')
+        + `#23 ${n.angolo.toFixed(2)}°  ·  #22 ${n.distanza.toFixed(2)} mm`
         + '  · modificata, non ancora salvata';
     }
     salva.disabled = false;
@@ -4277,16 +4328,28 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
   };
 
   // Ruota di `gradi` intorno al punto sulla verticale, quindi #22 non si muove.
-  const ritocca = (gradi) => {
+  const ruota = (gradi) => {
     const t = traccia();
-    const s = statoDi(t);
+    const stati = prendi();
+    const s = stati[quale];
     if (!s) return;
-    const rx = ratioX(t), ry = ratioY(t);
+    const { rx, ry } = ratios(t);
     // i gradi sono quelli di #23, che vive nei millimetri: si torna ai pixel con gli stessi
     // ratio, se no una rotazione di mezzo grado non ne vale mezzo sullo schermo
     const inMm = Math.atan2(Math.sin(s.ang) * ry, Math.cos(s.ang) * rx) + gradi * Math.PI / 180;
-    const ang = Math.atan2(Math.sin(inMm) / (ry || 1), Math.cos(inMm) / (rx || 1));
-    modifica = { cx: s.cx, cy: s.cy, ang };
+    stati[quale] = { ...s, ang: Math.atan2(Math.sin(inMm) / ry, Math.cos(inMm) / rx) };
+    mostra();
+  };
+
+  // Sposta la retta lungo la verticale senza ruotarla: cambia solo #22, in millimetri.
+  const sposta = (mm) => {
+    const t = traccia();
+    const stati = prendi();
+    const s = stati[quale];
+    if (!s) return;
+    const { ry } = ratios(t);
+    const cy = s.cy + mm / ry;
+    stati[quale] = { ...s, cy: Math.min(rect.bottom, Math.max(rect.top, cy)) };
     mostra();
   };
 
@@ -4298,7 +4361,7 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
 
   const vai = (delta) => {
     if (elenco.length < 2) return;
-    modifica = null;
+    rette = null; quale = 0;
     indice = (indice + delta + elenco.length) % elenco.length;
     mostra();
   };
@@ -4316,7 +4379,7 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     salva.disabled = true; auto.disabled = true;
     try {
       const esito = await api(`/projects/${state.projectId}/guides/correction`, { body: corpo });
-      modifica = null;
+      rette = null; quale = 0;
       // le tracce tornano ricalcolate: si riprendono per nome, cosi' il visore mostra il
       // risultato del salvataggio invece dei numeri di prima
       const proposta = esito.proposal || {};
@@ -4331,36 +4394,41 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
 
   salva.addEventListener('click', () => {
     const t = traccia();
-    const s = statoDi(t);
-    const ends = s && estremi(s);
-    if (!ends) return;
-    manda({ name: t.image, p1: [ends[0], ends[1]], p2: [ends[2], ends[3]] },
+    const linee = statiDi(t).map(estremi).filter(Boolean);
+    if (!linee.length) return;
+    manda({ name: t.image, linee },
       'retta corretta: la proposta e\' stata ricalcolata');
   });
   auto.addEventListener('click', () => {
     manda({ name: traccia().image, reset: true },
       'torna alla misura automatica su questo fotogramma');
   });
-  annulla.addEventListener('click', () => { modifica = null; mostra(); });
+  annulla.addEventListener('click', () => { rette = null; mostra(); });
   vedi.addEventListener('click', () => { disegno = !disegno; mostra(); });
+  scelta.addEventListener('change', () => { quale = Number(scelta.value) || 0; mostra(); });
   indietro.addEventListener('click', () => vai(-1));
   avanti.addEventListener('click', () => vai(1));
   chiudi.addEventListener('click', chiudiOra);
 
-  const passoScelta = el('select', { title: 'di quanti gradi ruota ogni freccia' });
-  for (const v of [0.1, 0.5, 1, 2]) passoScelta.append(el('option', { value: v }, `passo ${v}°`));
+  const passoScelta = el('select', {
+    title: 'quanto muove ogni pulsante: gradi per le frecce, millimetri per il meno e il piu\'' });
+  for (const v of [0.1, 0.5, 1, 2]) passoScelta.append(el('option', { value: v }, `passo ${v}`));
   passoScelta.value = String(passo);
   passoScelta.addEventListener('change', () => { passo = Number(passoScelta.value) || 0.5; });
 
-  /* Due frecce e basta.
+  /* Frecce per l'angolo, meno e piu' per la quota.
 
-     Prima c'erano due coppie di meno-e-piu', una per #23 e una per #22, e nessuna delle due
-     diceva da sola in che verso avrebbe mosso la retta: bisognava premere per scoprirlo. Le
-     frecce lo dicono. La retta si sposta trascinando il punto giallo, che e' il gesto giusto
-     per una posizione, mentre per un angolo il gesto giusto e' un passo fisso. */
-  testa.append(indietro, avanti, info, vedi,
-    bottoncino('↺', 'ruota in senso antiorario', () => ritocca(-passo)),
-    bottoncino('↻', 'ruota in senso orario', () => ritocca(passo)),
+     Prima c'erano due coppie di meno-e-piu' e nessuna delle due diceva da sola in che verso
+     avrebbe mosso la retta: bisognava premere per scoprirlo. Le frecce lo dicono, e il meno
+     e il piu' restano dove il verso e' gia' nel numero -- #22 e' una distanza dall'alto,
+     quindi piu' grande vuol dire piu' in basso. */
+  testa.append(indietro, avanti, info, vedi, scelta,
+    bottoncino('↺', 'ruota in senso antiorario, del passo scelto in gradi', () => ruota(-passo)),
+    bottoncino('↻', 'ruota in senso orario, del passo scelto in gradi', () => ruota(passo)),
+    bottoncino('−', 'alza la retta: #22 diminuisce del passo scelto, in millimetri',
+      () => sposta(-passo)),
+    bottoncino('+', 'abbassa la retta: #22 aumenta del passo scelto, in millimetri',
+      () => sposta(passo)),
     passoScelta, misura, salva, annulla, auto, chiudi);
   pieno.append(testa, scena);
   document.body.append(pieno);
@@ -4495,8 +4563,8 @@ function panelGuides(panel, step) {
       + 'quello piu\' vicino alla sonda: la linea piu\' alta in NF e LR, la piu\' bassa in UD e '
       + 'LRUD, dove l\'immagine e\' ribaltata. In giallo la verticale centrale e il punto in cui '
       + 'la retta la incrocia, che e\' esattamente cio\' che #22 misura. Clicca una miniatura '
-      + 'per vederla a tutto schermo: li\' la retta si corregge — le due frecce la ruotano del '
-      + 'passo scelto, e trascinando il punto giallo la si sposta lungo la verticale.'));
+      + 'per vederla a tutto schermo: li\' la retta si corregge — le frecce la ruotano, il meno '
+      + 'e il piu\' la alzano e la abbassano, e il punto giallo si trascina.'));
     panel.append(el('p', { class: 'hint' }, proposta.avvertenza || ''));
 
     const usa = el('button', {}, 'Porta la proposta nel valore');

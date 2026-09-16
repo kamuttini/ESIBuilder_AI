@@ -4625,6 +4625,24 @@ def _selezione_guide(project: Project) -> Dict[str, List[str]]:
     return {"include": dentro, "exclude": fuori}
 
 
+def _linee_corrette(mano: Optional[Dict]) -> List[List[float]]:
+    """Le rette di una correzione, nelle due forme che il file puo' avere.
+
+    Le prime correzioni salvavano un ago solo, come `p1` e `p2`; da quando si puo' scegliere
+    quale dei due modificare ne salvano una lista. Le vecchie restano leggibili: buttarle
+    perche' e' cambiata la forma sarebbe buttare il lavoro di chi ha corretto.
+    """
+    if not mano:
+        return []
+    righe = mano.get("linee")
+    if isinstance(righe, list) and righe:
+        return [[float(v) for v in r[:4]] for r in righe if r and len(r) >= 4]
+    p1, p2 = mano.get("p1"), mano.get("p2")
+    if isinstance(p1, list) and isinstance(p2, list) and len(p1) == 2 and len(p2) == 2:
+        return [[float(p1[0]), float(p1[1]), float(p2[0]), float(p2[1])]]
+    return []
+
+
 def _orientamento_per_fotogramma(project: Project) -> Dict[str, str]:
     """Nome immagine -> gruppo di orientamento (NF, LR, UD, LRUD).
 
@@ -4790,7 +4808,7 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int,
                          tutti: bool = False) -> None:
     try:
         sys.path.insert(0, str(REPO_ROOT / "tools" / "needle"))
-        from propose_guide_lines import measure, measure_from_line  # noqa: PLC0415
+        from propose_guide_lines import measure, measure_from_lines  # noqa: PLC0415
 
         project = _project(project_id)
         rect = ((project.step_value("rect") or {}).get("rect_echo")
@@ -4899,10 +4917,12 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int,
             rx, ry, profonda, stato_ratio = ratio_del_fotogramma(nome)
             mano = corrette.get(nome)
             gruppo = orientamenti.get(nome, "")
-            if mano and mano.get("p1") and mano.get("p2"):
-                trovato = measure_from_line(mano["p1"], mano["p2"], box, rx, ry,
-                                            mano.get("size"))
-                trovato["corretto"] = True
+            linee_mano = _linee_corrette(mano)
+            if linee_mano:
+                trovato = measure_from_lines(linee_mano, box, rx, ry,
+                                             flipped=gruppo in RIBALTATI, size=mano.get("size"))
+                if trovato:
+                    trovato["corretto"] = True
             else:
                 trovato = measure(base / nome, box, rx, ry,
                                   flipped=gruppo in RIBALTATI)
@@ -4998,10 +5018,11 @@ def api_guides_correction(project_id: str):
         return jsonify({"error": "nessuna proposta da correggere: lancia prima la misura"}), 400
 
     azzera = bool(dati.get("reset"))
-    p1, p2 = dati.get("p1"), dati.get("p2")
-    if not azzera and not (isinstance(p1, list) and isinstance(p2, list)
-                           and len(p1) == 2 and len(p2) == 2):
-        return jsonify({"error": "servono i due estremi della retta"}), 400
+    linee = _linee_corrette(dati)
+    if not azzera and not linee:
+        return jsonify({"error": "servono gli estremi della retta"}), 400
+    if len(linee) > 2:
+        return jsonify({"error": "al massimo due aghi per fotogramma"}), 400
 
     rect = proposta.get("rect") or {}
     box = (int(rect.get("left", 0)), int(rect.get("top", 0)),
@@ -5018,15 +5039,14 @@ def api_guides_correction(project_id: str):
         return jsonify({"error": "questo fotogramma non e' nella proposta"}), 400
 
     sys.path.insert(0, str(REPO_ROOT / "tools" / "needle"))
-    from propose_guide_lines import measure, measure_from_line  # noqa: PLC0415
+    from propose_guide_lines import measure, measure_from_lines  # noqa: PLC0415
 
     def mutate(_p: Project, value: Dict) -> Dict:
         tutte = dict(value.get("correzioni") or {})
         if azzera:
             tutte.pop(nome, None)
         else:
-            tutte[nome] = {"p1": [float(p1[0]), float(p1[1])],
-                           "p2": [float(p2[0]), float(p2[1])],
+            tutte[nome] = {"linee": linee,
                            "size": per_nome[nome].get("size"),
                            "at": datetime.now().isoformat(timespec="seconds")}
         value["correzioni"] = tutte
@@ -5042,14 +5062,17 @@ def api_guides_correction(project_id: str):
     for altro, t in per_nome.items():
         rx = float(t.get("ratio_x") or t.get("ratio_y") or 0.0)
         ry = float(t.get("ratio_y") or rx)
-        mano = correzioni.get(altro)
+        mano = _linee_corrette(correzioni.get(altro))
+        ribaltato = str(t.get("orientamento") or "") in RIBALTATI
         if mano:
-            nuova = measure_from_line(mano["p1"], mano["p2"], box, rx, ry, t.get("size"))
+            nuova = measure_from_lines(mano, box, rx, ry, flipped=ribaltato,
+                                       size=t.get("size")) or {}
+            if not nuova:
+                continue
             nuova["corretto"] = True
         elif altro == nome:
             # tornata all'automatico: la si rimisura, e' un fotogramma solo
-            nuova = measure(base / altro, box, rx, ry,
-                            flipped=str(t.get("orientamento") or "") in RIBALTATI) or {}
+            nuova = measure(base / altro, box, rx, ry, flipped=ribaltato) or {}
             if not nuova:
                 continue
         else:

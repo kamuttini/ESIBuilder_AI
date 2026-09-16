@@ -1448,4 +1448,5 @@ img.depth-crop {
 .traccia-prolunga { stroke: #3fb950; fill: none; opacity: .8; }
 .traccia-centro { stroke: #d29922; fill: none; opacity: .75; }
 .traccia-punto { fill: #d29922; stroke: #0d1117; }
+.traccia-scelta { stroke: rgba(240, 246, 252, .28); fill: none; stroke-linecap: round; }
 .traccia-rect { stroke: rgba(240, 246, 252, .35); fill: none; }

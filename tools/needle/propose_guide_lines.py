@@ -167,6 +167,30 @@ def order_by_probe(needles: Sequence, rect: Tuple[int, int, int, int], flipped: 
     return [n for _, n in con_quota]
 
 
+def measure_from_lines(linee: Sequence[Sequence[float]], rect: Tuple[int, int, int, int],
+                       ratio_x: float, ratio_y: float, flipped: bool = False,
+                       size: Optional[Sequence[int]] = None) -> Optional[Dict]:
+    """Una o due rette disegnate a mano -> la misura, con la principale scelta dalla regola.
+
+    Quale delle due sia la principale non lo decide chi disegna ma dove sta la sonda, come per
+    le rette trovate dal rilevatore: se no correggere il secondo ago cambierebbe #22 solo
+    perche' e' stato toccato per ultimo.
+    """
+    valide = [[float(v) for v in linea[:4]] for linea in linee if linea and len(linea) >= 4]
+    if not valide:
+        return None
+    ordinate = sorted(valide, key=lambda r: depth_on_centre((r[0], r[1]), (r[2], r[3]), rect),
+                      reverse=flipped)
+    prima = ordinate[0]
+    misura = measure_from_line((prima[0], prima[1]), (prima[2], prima[3]),
+                               rect, ratio_x, ratio_y, size)
+    misura["lines"] = [r for r in (line_across_rect((l[0], l[1]), (l[2], l[3]), rect)
+                                   for l in ordinate) if r]
+    misura["needles"] = [list(l) for l in ordinate]
+    misura["flipped"] = bool(flipped)
+    return misura
+
+
 def measure(frame: Path, rect: Tuple[int, int, int, int], ratio_x: float, ratio_y: float,
             strict: bool = True, flipped: bool = False) -> Optional[Dict[str, float]]:
     """Angle in degrees and centre distance in millimetres, the legacy way.
