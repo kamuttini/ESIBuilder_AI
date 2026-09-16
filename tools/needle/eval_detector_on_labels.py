@@ -35,6 +35,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from detect_needle import detect  # noqa: E402
+from propose_guide_lines import order_by_probe  # noqa: E402
 from refine_needles import refine  # noqa: E402
 
 
@@ -78,13 +79,16 @@ def _rects_from_gallery(path: Path) -> Dict[str, List[int]]:
     return trovati
 
 
-def _choices(frame: Path, rect: Sequence[int], strict: bool) -> List[Tuple[float, float, float, float]]:
+def _choices(frame: Path, rect: Sequence[int], strict: bool,
+             ordine: str = "score", flipped: bool = False) -> List[Tuple[float, float, float, float]]:
     gray = cv2.imread(str(frame), cv2.IMREAD_GRAYSCALE)
     if gray is None:
         return []
     box = (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3]))
     needles = refine(detect(gray, box, top_k=6), gray, rect=box, max_needles=2,
                      fallback=not strict)
+    if ordine == "probe":
+        needles = order_by_probe(needles, box, flipped)
     return [(n.p1[0], n.p1[1], n.p2[0], n.p2[1]) for n in needles]
 
 
@@ -97,6 +101,11 @@ def main() -> int:
     ap.add_argument("--match", choices=("first", "any"), default="first",
                     help="'first' scores the top choice only; 'any' scores the better of the two "
                          "it returns, which is what a reviewer confirming a pair would see")
+    ap.add_argument("--order", choices=("score", "probe"), default="score",
+                    help="'probe' mette per primo l'ago piu' vicino alla sonda, che e' il "
+                         "principale; 'score' l'ordine del rilevatore (luminosita' per cresta)")
+    ap.add_argument("--flipped", action="store_true",
+                    help="orientamento UD o LRUD: la sonda e' in basso")
     ap.add_argument("--gallery", type=Path, default=None,
                     help="HTML gallery the labels came from, to recover the rect of excluded frames")
     ap.add_argument("--json-out", type=Path, default=None)
@@ -120,7 +129,7 @@ def main() -> int:
         if not percorso.is_file():
             mancanti += 1
             continue
-        scelte = _choices(percorso, dati["rect"], args.strict)
+        scelte = _choices(percorso, dati["rect"], args.strict, args.order, args.flipped)
         if not scelte:
             senza_risposta += 1
             continue
@@ -140,11 +149,12 @@ def main() -> int:
         if not percorso.is_file() or not rect:
             continue
         escluse_lette += 1
-        risposte_su_escluse += bool(_choices(percorso, rect, args.strict))
+        risposte_su_escluse += bool(_choices(percorso, rect, args.strict, args.order, args.flipped))
 
     esito = {
         "modo": "severo" if args.strict else "con ripesca",
         "confronto": args.match,
+        "ordine": args.order + (" (ribaltato)" if args.flipped else ""),
         "fotogrammi": len(per_frame),
         "non_trovati_su_disco": mancanti,
         "risposte": len(errori),

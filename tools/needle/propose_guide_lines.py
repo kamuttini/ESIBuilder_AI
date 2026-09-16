@@ -136,8 +136,39 @@ def measure_from_line(p1: Sequence[float], p2: Sequence[float],
             "size": [int(size[0]), int(size[1])] if size else None}
 
 
+def depth_on_centre(p1: Sequence[float], p2: Sequence[float],
+                    rect: Tuple[int, int, int, int]) -> float:
+    """Quanto in basso passa questa retta, misurato dove conta: sulla verticale centrale.
+
+    E' lo stesso punto da cui nasce #22, quindi due aghi si confrontano con la stessa
+    grandezza con cui poi vengono scritti nel file.
+    """
+    left, top, right, _bottom = rect
+    x1, y1 = float(p1[0]) - left, float(p1[1]) - top
+    x2, y2 = float(p2[0]) - left, float(p2[1]) - top
+    centre_x = (right - left) / 2.0
+    if abs(x2 - x1) < 1e-6:
+        return (y1 + y2) / 2.0
+    return y1 + (y2 - y1) * (centre_x - x1) / (x2 - x1)
+
+
+def order_by_probe(needles: Sequence, rect: Tuple[int, int, int, int], flipped: bool) -> List:
+    """L'ago principale e' quello piu' vicino alla sonda, e dove sia la sonda lo dice
+    l'orientamento.
+
+    Regola di Camilla: in NF e LR la sonda e' in alto, quindi l'ago principale e' la linea
+    piu' alta; in UD e LRUD l'immagine e' ribaltata e la sonda sta in basso, quindi e' la
+    piu' bassa. Prima l'ordine lo dava il punteggio del rilevatore -- luminosita' per cresta
+    -- che dice quale tratto si vede meglio, non quale ago serve: fra due aghi paralleli il
+    secondo puo' benissimo essere piu' luminoso del primo.
+    """
+    con_quota = [(depth_on_centre(n.p1, n.p2, rect), n) for n in needles]
+    con_quota.sort(key=lambda z: -z[0] if flipped else z[0])
+    return [n for _, n in con_quota]
+
+
 def measure(frame: Path, rect: Tuple[int, int, int, int], ratio_x: float, ratio_y: float,
-            strict: bool = True) -> Optional[Dict[str, float]]:
+            strict: bool = True, flipped: bool = False) -> Optional[Dict[str, float]]:
     """Angle in degrees and centre distance in millimetres, the legacy way.
 
     `strict` is what separates measuring from reviewing. A gallery wants the best guess even
@@ -155,6 +186,7 @@ def measure(frame: Path, rect: Tuple[int, int, int, int], ratio_x: float, ratio_
                      fallback=not strict)
     if not needles:
         return None
+    needles = order_by_probe(needles, rect, flipped)
     needle = needles[0]
     # I punti stanno in coordinate del fotogramma, non del ritaglio: servono a disegnare la
     # misura sopra l'immagine cosi' com'e', ed e' l'unico modo di controllarla guardandola.
@@ -162,6 +194,7 @@ def measure(frame: Path, rect: Tuple[int, int, int, int], ratio_x: float, ratio_
                                (gray.shape[1], gray.shape[0]))
     misura.update({
         "confidence": float(getattr(needle, "source_score", 0.0)),
+        "flipped": bool(flipped),
         "needles": [[float(n.p1[0]), float(n.p1[1]), float(n.p2[0]), float(n.p2[1])]
                     for n in needles],
         "lines": [[round(v, 2) for v in r] for r in

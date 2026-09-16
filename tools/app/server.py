@@ -4627,6 +4627,29 @@ def _selezione_guide(project: Project) -> Dict[str, List[str]]:
     return {"include": dentro, "exclude": fuori}
 
 
+def _orientamento_per_fotogramma(project: Project) -> Dict[str, str]:
+    """Nome immagine -> gruppo di orientamento (NF, LR, UD, LRUD).
+
+    La precedenza e' quella che la sezione orientamento usa gia' per decidere che cosa
+    mostrare: prima la correzione fatta a mano, poi il gruppo del ritaglio consegnato -- che
+    e' la previsione di cosa fara' ESI -- e solo in mancanza di quelli il marker indicato
+    a mano. Due verita' diverse sulla stessa immagine esistono davvero, e questa e' quella
+    con cui sono fatti gli envelope.
+    """
+    valore = project.step_value("orientation") or {}
+    fuori: Dict[str, str] = {}
+    for sorgente in ("marker_rows_override", "marker_rows_delivered", "corrections"):
+        for nome, riga in (valore.get(sorgente) or {}).items():
+            gruppo = str((riga or {}).get("group") or "").strip().upper()
+            if gruppo in ("NF", "LR", "UD", "LRUD"):
+                fuori[str(nome)] = gruppo
+    return fuori
+
+
+# In NF e LR la sonda e' in alto, in UD e LRUD l'immagine e' ribaltata e la sonda e' in basso.
+RIBALTATI = {"UD", "LRUD"}
+
+
 def _depth_per_fotogramma(scala: Dict) -> Dict[str, float]:
     """Nome immagine -> depth letta nel suo riquadro, dove la rilettura e' passata."""
     fuori: Dict[str, float] = {}
@@ -4739,6 +4762,7 @@ def _famiglie_da_misure(misure: Sequence[Dict], depths: Sequence[float],
                         "altre_linee": (g.get("lines") or [])[1:],
                         "altri": (g.get("needles") or [])[1:],
                         "ratio_x": g.get("ratio_x_usato"), "ratio_y": g.get("ratio_usato"),
+                        "orientamento": g.get("orientamento") or "",
                         "corretto": bool(g.get("corretto"))}
                        for g in gruppo],
             "depth_viste": sorted({round(d, 1) for d, _ in punti}),
@@ -4780,6 +4804,7 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
         if not ratio_y:
             raise ValueError("servono i millimetri per pixel: lancia lo step depth e scala")
         per_depth = _depth_per_fotogramma(scala)
+        orientamenti = _orientamento_per_fotogramma(project)
 
         # i fotogrammi di calibrazione li ha gia' trovati lo scan dell'import
         scan = (project.step_value("import") or {}).get("needle_scan") or {}
@@ -4866,18 +4891,21 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
         for done, nome in enumerate(candidati, 1):
             rx, ry, profonda, stato_ratio = ratio_del_fotogramma(nome)
             mano = corrette.get(nome)
+            gruppo = orientamenti.get(nome, "")
             if mano and mano.get("p1") and mano.get("p2"):
                 trovato = measure_from_line(mano["p1"], mano["p2"], box, rx, ry,
                                             mano.get("size"))
                 trovato["corretto"] = True
             else:
-                trovato = measure(base / nome, box, rx, ry)
+                trovato = measure(base / nome, box, rx, ry,
+                                  flipped=gruppo in RIBALTATI)
             if trovato:
                 trovato["image"] = nome
                 trovato["depth_mm"] = profonda
                 trovato["ratio_stato"] = stato_ratio
                 trovato["ratio_usato"] = ry
                 trovato["ratio_x_usato"] = rx
+                trovato["orientamento"] = gruppo
                 misure.append(trovato)
                 senza_depth += profonda is None
             if done % 5 == 0:
@@ -5014,7 +5042,8 @@ def api_guides_correction(project_id: str):
             nuova["corretto"] = True
         elif altro == nome:
             # tornata all'automatico: la si rimisura, e' un fotogramma solo
-            nuova = measure(base / altro, box, rx, ry) or {}
+            nuova = measure(base / altro, box, rx, ry,
+                            flipped=str(t.get("orientamento") or "") in RIBALTATI) or {}
             if not nuova:
                 continue
         else:
@@ -5027,6 +5056,7 @@ def api_guides_correction(project_id: str):
                      "corretto": bool(t.get("corretto"))}
         nuova.update({"image": altro, "depth_mm": t.get("depth_mm"),
                       "ratio_usato": ry, "ratio_x_usato": rx,
+                      "orientamento": t.get("orientamento") or "",
                       "ratio_stato": "accepted" if t.get("scala_confermata") else ""})
         misure.append(nuova)
 

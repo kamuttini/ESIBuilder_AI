@@ -4064,7 +4064,8 @@ function fotogrammaTracciato(t, rect, larghezza, onClick, larghezzaSchermo) {
 
 function descriviTraccia(t) {
   return `${t.angolo.toFixed(2)}°  ·  #22 ${t.distanza.toFixed(2)} mm`
-    + (t.depth_mm ? `  ·  depth ${t.depth_mm} mm` : '  ·  depth non letta');
+    + (t.depth_mm ? `  ·  depth ${t.depth_mm} mm` : '  ·  depth non letta')
+    + (t.orientamento ? `  ·  ${t.orientamento}` : '  ·  orientamento non noto, sonda in alto');
 }
 
 /* Il visore delle linee guida e' anche l'editor.
@@ -4161,6 +4162,7 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     if (s) {
       const n = numeri(t, s);
       misura.textContent = `#23 ${n.angolo.toFixed(2)}°  ·  #22 ${n.distanza.toFixed(2)} mm`
+        + `  ·  ${t.orientamento || 'orientamento non noto'}`
         + (modifica ? '  · modificata, non ancora salvata' : t.corretto ? '  · corretta a mano' : '');
     } else misura.textContent = '';
     vedi.textContent = disegno ? 'disegno: acceso' : 'disegno: spento';
@@ -4428,12 +4430,13 @@ function panelGuides(panel, step) {
       panel.append(meno);
     }
     panel.append(el('p', { class: 'hint' },
-      'sulle immagini: in verde l\'ago, disegnato come retta da un bordo all\'altro del '
-      + 'rettangolo — e\' cosi\' che nasce la linea guida — col tratto piu\' spesso sul pezzo '
-      + 'dove il rilevatore ha visto davvero qualcosa; in giallo la verticale centrale e il '
-      + 'punto in cui la retta la incrocia, che e\' esattamente cio\' che #22 misura; in blu '
-      + 'gli altri candidati. Clicca una miniatura per vederla a tutto schermo, frecce per '
-      + 'scorrere.'));
+      'sulle immagini: in verde l\'ago principale, disegnato come retta da un bordo all\'altro '
+      + 'del rettangolo — e\' cosi\' che nasce la linea guida — col tratto piu\' spesso sul pezzo '
+      + 'dove il rilevatore ha visto davvero qualcosa; in blu il secondo ago. Principale e\' '
+      + 'quello piu\' vicino alla sonda: la linea piu\' alta in NF e LR, la piu\' bassa in UD e '
+      + 'LRUD, dove l\'immagine e\' ribaltata. In giallo la verticale centrale e il punto in cui '
+      + 'la retta la incrocia, che e\' esattamente cio\' che #22 misura. Clicca una miniatura '
+      + 'per vederla a tutto schermo, frecce per scorrere.'));
     panel.append(el('p', { class: 'hint' }, proposta.avvertenza || ''));
 
     const usa = el('button', {}, 'Porta la proposta nel valore');
