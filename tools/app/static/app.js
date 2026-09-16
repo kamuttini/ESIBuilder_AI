@@ -4248,19 +4248,17 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     annulla.disabled = false;
   };
 
-  const ritocca = (dAngolo, dDistanza) => {
+  // Ruota di `gradi` intorno al punto sulla verticale, quindi #22 non si muove.
+  const ritocca = (gradi) => {
     const t = traccia();
     const s = statoDi(t);
     if (!s) return;
     const rx = ratioX(t), ry = ratioY(t);
-    let ang = s.ang;
-    if (dAngolo) {
-      // si ritocca #23, che vive nei millimetri: si torna ai pixel con gli stessi ratio
-      const inMm = Math.atan2(Math.sin(ang) * ry, Math.cos(ang) * rx) + dAngolo * Math.PI / 180;
-      ang = Math.atan2(Math.sin(inMm) / (ry || 1), Math.cos(inMm) / (rx || 1));
-    }
-    const cy = s.cy + (dDistanza && ry ? dDistanza / ry : 0);
-    modifica = { cx: s.cx, cy: Math.min(rect.bottom, Math.max(rect.top, cy)), ang };
+    // i gradi sono quelli di #23, che vive nei millimetri: si torna ai pixel con gli stessi
+    // ratio, se no una rotazione di mezzo grado non ne vale mezzo sullo schermo
+    const inMm = Math.atan2(Math.sin(s.ang) * ry, Math.cos(s.ang) * rx) + gradi * Math.PI / 180;
+    const ang = Math.atan2(Math.sin(inMm) / (ry || 1), Math.cos(inMm) / (rx || 1));
+    modifica = { cx: s.cx, cy: s.cy, ang };
     mostra();
   };
 
@@ -4321,18 +4319,20 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
   avanti.addEventListener('click', () => vai(1));
   chiudi.addEventListener('click', chiudiOra);
 
-  const passoScelta = el('select', {});
-  for (const v of [0.1, 0.5, 1, 2]) passoScelta.append(el('option', { value: v }, `passo ${v}`));
+  const passoScelta = el('select', { title: 'di quanti gradi ruota ogni freccia' });
+  for (const v of [0.1, 0.5, 1, 2]) passoScelta.append(el('option', { value: v }, `passo ${v}°`));
   passoScelta.value = String(passo);
   passoScelta.addEventListener('change', () => { passo = Number(passoScelta.value) || 0.5; });
 
+  /* Due frecce e basta.
+
+     Prima c'erano due coppie di meno-e-piu', una per #23 e una per #22, e nessuna delle due
+     diceva da sola in che verso avrebbe mosso la retta: bisognava premere per scoprirlo. Le
+     frecce lo dicono. La retta si sposta trascinando il punto giallo, che e' il gesto giusto
+     per una posizione, mentre per un angolo il gesto giusto e' un passo fisso. */
   testa.append(indietro, avanti, info, vedi,
-    el('span', { class: 'hint' }, '#23'),
-    bottoncino('−', 'ruota di meno (gradi)', () => ritocca(-passo, 0)),
-    bottoncino('+', 'ruota di piu\' (gradi)', () => ritocca(passo, 0)),
-    el('span', { class: 'hint' }, '#22'),
-    bottoncino('−', 'alza il punto sulla verticale (mm)', () => ritocca(0, -passo)),
-    bottoncino('+', 'abbassa il punto sulla verticale (mm)', () => ritocca(0, passo)),
+    bottoncino('↺', 'ruota in senso antiorario', () => ritocca(-passo)),
+    bottoncino('↻', 'ruota in senso orario', () => ritocca(passo)),
     passoScelta, misura, salva, annulla, auto, chiudi);
   pieno.append(testa, scena);
   document.body.append(pieno);
@@ -4467,7 +4467,8 @@ function panelGuides(panel, step) {
       + 'quello piu\' vicino alla sonda: la linea piu\' alta in NF e LR, la piu\' bassa in UD e '
       + 'LRUD, dove l\'immagine e\' ribaltata. In giallo la verticale centrale e il punto in cui '
       + 'la retta la incrocia, che e\' esattamente cio\' che #22 misura. Clicca una miniatura '
-      + 'per vederla a tutto schermo, frecce per scorrere.'));
+      + 'per vederla a tutto schermo: li\' la retta si corregge — le due frecce la ruotano del '
+      + 'passo scelto, e trascinando il punto giallo la si sposta lungo la verticale.'));
     panel.append(el('p', { class: 'hint' }, proposta.avvertenza || ''));
 
     const usa = el('button', {}, 'Porta la proposta nel valore');
