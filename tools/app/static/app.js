@@ -4116,8 +4116,36 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
   const chiudi = el('button', { class: 'ghost' }, 'chiudi (Esc)');
 
   const traccia = () => elenco[indice];
-  const ratioY = (t) => Number(t.ratio_y) || Number(t.ratio_x) || 0;
-  const ratioX = (t) => Number(t.ratio_x) || ratioY(t);
+
+  /* I millimetri per pixel, anche quando la proposta non se li porta dietro.
+
+     Le proposte calcolate prima che le tracce li includessero hanno ratio_x e ratio_y a null,
+     e con ratio zero l'angolo si annullava: premere una freccia metteva la retta orizzontale e
+     da li' non si muoveva piu'. Invece di chiedere di rimisurare, i due numeri si ricavano
+     dalla traccia stessa invertendo le formule con cui il server li ha usati: #22 e' la quota
+     dell'incrocio per il ratio verticale, e l'angolo in millimetri lega i due ratio alla
+     pendenza in pixel. Sui dati veri la ricostruzione torna alla sesta cifra. */
+  const ratios = (t) => {
+    let ry = Number(t.ratio_y) || 0;
+    let rx = Number(t.ratio_x) || 0;
+    if (!ry && t.crossing && Number.isFinite(t.distanza)) {
+      const px = t.crossing[1] - rect.top + 1;
+      if (Math.abs(px) > 1e-6) ry = t.distanza / px;
+    }
+    if (!rx && ry) {
+      const seg = t.linea || (t.p1 && t.p2 ? [t.p1[0], t.p1[1], t.p2[0], t.p2[1]] : null);
+      const tg = Math.tan((Number(t.angolo) || 0) * Math.PI / 180);
+      if (seg && Math.abs(seg[2] - seg[0]) > 1e-6 && Math.abs(tg) > 1e-3) {
+        const stimato = ((seg[3] - seg[1]) * ry) / ((seg[2] - seg[0]) * tg);
+        if (Number.isFinite(stimato) && stimato > 0) rx = stimato;
+      }
+    }
+    if (!(rx > 0)) rx = ry > 0 ? ry : 1;
+    if (!(ry > 0)) ry = rx;
+    return { rx, ry };
+  };
+  const ratioY = (t) => ratios(t).ry;
+  const ratioX = (t) => ratios(t).rx;
 
   // dalla retta corrente (o da quella misurata) al punto sulla verticale e all'inclinazione
   const statoDi = (t) => {
