@@ -4839,6 +4839,10 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
                             "angolo": round(float(g["angle"]), 3),
                             "distanza": round(float(g["distance"]), 3),
                             "depth_mm": g.get("depth_mm"),
+                            # l'ago e' una retta dentro il rettangolo, non il tratto che il
+                            # rilevatore ha visto: si disegna quella, e il tratto sopra
+                            "linea": g.get("line"),
+                            "altre_linee": (g.get("lines") or [])[1:],
                             "altri": (g.get("needles") or [])[1:]}
                            for g in gruppo],
                 "depth_viste": sorted({round(d, 1) for d, _ in punti}),

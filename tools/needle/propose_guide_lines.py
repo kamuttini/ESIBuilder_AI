@@ -39,6 +39,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from detect_needle import detect  # noqa: E402
+from guides_geometry import clip_to_rect  # noqa: E402
 from refine_needles import refine  # noqa: E402
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg"}
@@ -76,6 +77,34 @@ def frames_in(folder: Path, size: Optional[Tuple[int, int]], cap: int) -> List[P
     return out
 
 
+def line_across_rect(p1: Sequence[float], p2: Sequence[float],
+                     rect: Tuple[int, int, int, int]) -> Optional[Tuple[float, float, float, float]]:
+    """L'ago come retta dentro il rettangolo, non come il pezzo che era piu' luminoso.
+
+    Quello che il rilevatore trova e' un tratto: dove il riflesso era abbastanza forte da
+    superare la soglia. L'ago, e la linea guida che se ne ricava, attraversano tutto il
+    rettangolo ecografico -- nel vecchio ESIBuilder la linea si disegnava da un bordo
+    all'altro. Qui il tratto si prolunga nella sua direzione e si taglia sui quattro lati con
+    lo stesso taglio parametrico del legacy (`upDateLine`), cosi' gli estremi cadono sul bordo
+    e non fuori.
+    """
+    left, top, right, bottom = rect
+    x1, y1 = float(p1[0]) - left, float(p1[1]) - top
+    x2, y2 = float(p2[0]) - left, float(p2[1]) - top
+    dx, dy = x2 - x1, y2 - y1
+    lunghezza = math.hypot(dx, dy)
+    if lunghezza < 1e-6:
+        return None
+    # abbondante: la diagonale basta a uscire dal rettangolo da tutte e due le parti
+    passo = float(right - left + bottom - top)
+    ux, uy = dx / lunghezza, dy / lunghezza
+    esteso = (x1 - ux * passo, y1 - uy * passo, x2 + ux * passo, y2 + uy * passo)
+    tagliato = clip_to_rect(esteso, right - left + 1, bottom - top + 1)
+    if tagliato is None:
+        return None
+    return (tagliato[0] + left, tagliato[1] + top, tagliato[2] + left, tagliato[3] + top)
+
+
 def measure(frame: Path, rect: Tuple[int, int, int, int], ratio_x: float, ratio_y: float,
             strict: bool = True) -> Optional[Dict[str, float]]:
     """Angle in degrees and centre distance in millimetres, the legacy way.
@@ -111,14 +140,18 @@ def measure(frame: Path, rect: Tuple[int, int, int, int], ratio_x: float, ratio_
         distance = (y_at_centre + 1) * ratio_y
     # I punti tornano in coordinate del fotogramma, non del ritaglio: servono a disegnare la
     # misura sopra l'immagine cosi' com'e', ed e' l'unico modo di controllarla guardandola.
+    retta = line_across_rect((fx1, fy1), (fx2, fy2), rect)
     return {"angle": angle, "distance": distance,
             "confidence": float(getattr(needle, "source_score", 0.0)),
             "p1": [float(fx1), float(fy1)], "p2": [float(fx2), float(fy2)],
+            "line": [round(v, 2) for v in retta] if retta else None,
             "crossing": ([float(centre_x + left), float(y_at_centre + top)]
                          if y_at_centre is not None else None),
             "size": [int(gray.shape[1]), int(gray.shape[0])],
             "needles": [[float(n.p1[0]), float(n.p1[1]), float(n.p2[0]), float(n.p2[1])]
-                        for n in needles]}
+                        for n in needles],
+            "lines": [[round(v, 2) for v in r] for r in
+                      (line_across_rect(n.p1, n.p2, rect) for n in needles) if r]}
 
 
 def main() -> int:

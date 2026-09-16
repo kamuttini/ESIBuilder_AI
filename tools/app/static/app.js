@@ -4008,20 +4008,30 @@ function svgTraccia(t, rect, larghezzaSchermo) {
     parti.push(`<line class="traccia-centro" x1="${cx}" y1="${rect.top}" x2="${cx}" y2="${rect.bottom}" `
       + `stroke-width="${sp(1.5)}" ${tratti(3, 6)}/>`);
   }
+  // Gli altri candidati: anche loro rette dentro il rettangolo, col tratto visto sopra.
+  for (const a of (t.altre_linee || [])) {
+    parti.push(`<line class="traccia-altro" x1="${a[0]}" y1="${a[1]}" x2="${a[2]}" y2="${a[3]}" `
+      + `stroke-width="${sp(1.5)}" ${tratti(7, 6)}/>`);
+  }
   for (const a of (t.altri || [])) {
     parti.push(`<line class="traccia-altro" x1="${a[0]}" y1="${a[1]}" x2="${a[2]}" y2="${a[3]}" `
-      + `stroke-width="${sp(2)}" ${tratti(6, 5)}/>`);
+      + `stroke-width="${sp(2.5)}"/>`);
   }
-  if (t.crossing && t.p1 && t.p2) {
-    // il prolungamento parte dall'estremo piu' vicino alla verticale, cosi' si vede che il
-    // punto sulla verticale e' una conseguenza della retta e non una seconda misura
+  // L'ago e' una retta da un bordo all'altro del rettangolo: quella e' la linea guida. Il
+  // tratto piu' spesso e' il pezzo su cui il rilevatore ha visto davvero qualcosa, cioe'
+  // dove sta la prova; il resto e' la stessa retta prolungata nella sua direzione.
+  if (t.linea) {
+    parti.push(`<line class="traccia-ago" x1="${t.linea[0]}" y1="${t.linea[1]}" `
+      + `x2="${t.linea[2]}" y2="${t.linea[3]}" stroke-width="${sp(1.8)}"/>`);
+  }
+  if (t.crossing && t.p1 && t.p2 && !t.linea) {
     const vicino = Math.abs(t.p1[0] - t.crossing[0]) < Math.abs(t.p2[0] - t.crossing[0]) ? t.p1 : t.p2;
     parti.push(`<line class="traccia-prolunga" x1="${vicino[0]}" y1="${vicino[1]}" `
       + `x2="${t.crossing[0]}" y2="${t.crossing[1]}" stroke-width="${sp(2)}" ${tratti(5, 5)}/>`);
   }
   if (t.p1 && t.p2) {
     parti.push(`<line class="traccia-ago" x1="${t.p1[0]}" y1="${t.p1[1]}" x2="${t.p2[0]}" y2="${t.p2[1]}" `
-      + `stroke-width="${sp(3)}"/>`);
+      + `stroke-width="${sp(3.5)}"/>`);
   }
   if (t.crossing) {
     parti.push(`<circle class="traccia-punto" cx="${t.crossing[0]}" cy="${t.crossing[1]}" `
@@ -4203,10 +4213,12 @@ function panelGuides(panel, step) {
       panel.append(meno);
     }
     panel.append(el('p', { class: 'hint' },
-      'sulle immagini: in verde l\'ago misurato e il suo prolungamento, in giallo la verticale '
-      + 'centrale del rettangolo e il punto in cui la incrocia — quel punto e\' esattamente '
-      + 'cio\' che #22 misura; in blu tratteggiato gli altri segmenti che il rilevatore ha '
-      + 'tenuto. Clicca una miniatura per vederla a tutto schermo, frecce per scorrere.'));
+      'sulle immagini: in verde l\'ago, disegnato come retta da un bordo all\'altro del '
+      + 'rettangolo — e\' cosi\' che nasce la linea guida — col tratto piu\' spesso sul pezzo '
+      + 'dove il rilevatore ha visto davvero qualcosa; in giallo la verticale centrale e il '
+      + 'punto in cui la retta la incrocia, che e\' esattamente cio\' che #22 misura; in blu '
+      + 'gli altri candidati. Clicca una miniatura per vederla a tutto schermo, frecce per '
+      + 'scorrere.'));
     panel.append(el('p', { class: 'hint' }, proposta.avvertenza || ''));
 
     const usa = el('button', {}, 'Porta la proposta nel valore');
