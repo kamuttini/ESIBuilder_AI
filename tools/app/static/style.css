@@ -33,6 +33,7 @@ header {
   z-index: 100;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 18px;
   padding: 10px 18px;
   background: var(--panel);
@@ -42,9 +43,10 @@ header {
 .brand { font-weight: 600; letter-spacing: .3px; }
 .brand span { color: var(--accent); }
 
-.project-bar { display: flex; gap: 8px; align-items: center; }
+.project-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.project-bar select { max-width: min(42vw, 420px); }
 .head-status { margin-left: auto; color: var(--muted); font-size: 13px; }
-.job-status { color: var(--accent); font-size: 12px; max-width: 360px; }
+.job-status { color: var(--accent); font-size: 12px; max-width: 360px; overflow-wrap: anywhere; }
 .job-status.running::before { content: '● '; color: var(--warn); }
 .job-status.done { color: var(--ok, #7ee787); }
 .job-status.error { color: var(--err); }
@@ -125,6 +127,9 @@ textarea { width: 100%; min-height: 160px; font-family: ui-monospace, Menlo, mon
 button { cursor: pointer; background: var(--accent); border-color: var(--accent); color: #06101d; font-weight: 600; }
 button.ghost { background: transparent; color: var(--text); border-color: var(--line); font-weight: 400; }
 button:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
 
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
 
@@ -148,9 +153,18 @@ ul.problems li { color: var(--warn); }
 }
 .err-badge { color: var(--err); }
 
-.thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 10px; }
+.thumbs {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px; margin-top: 10px;
+}
 .thumbs img { width: 100%; border-radius: 6px; border: 1px solid var(--line); display: block; }
-.thumbs figcaption { font-size: 11px; color: var(--muted); word-break: break-all; }
+.thumbs figcaption {
+  min-width: 0; font-size: 11px; line-height: 1.35;
+  color: var(--muted); overflow-wrap: anywhere;
+}
+.thumbs.immagini-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(190px, 100%), 1fr)); gap: 10px;
+}
 
 pre.out {
   background: #0d1117; border: 1px solid var(--line); border-radius: 6px;
@@ -1233,6 +1247,8 @@ img.depth-crop {
   display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
 }
+.piani-pieno-testa .hint { flex: 1 1 260px; min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.piani-pieno-testa button { flex: 0 0 auto; }
 .piani-pieno-scena {
   flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
   padding: 12px;
@@ -1356,41 +1372,58 @@ img.depth-crop {
 .visore.occupato .visore-barra button { pointer-events: none; opacity: .6; }
 
 
-/* Ogni miniatura dell'elenco completo porta il suo «escludi», che compare passandoci
-   sopra: sempre visibile sarebbe una fila di bottoni, e l'elenco serve a guardare. */
-.thumb-voce { position: relative; }
-.thumb-voce .thumb-via { position: absolute; top: 6px; right: 6px; opacity: 0; }
-.thumb-voce:hover .thumb-via { opacity: 1; }
-.thumb-voce .thumb-via:hover { color: #f85149; border-color: #f85149; }
+/* Le azioni stanno sotto al fotogramma: non coprono cio' che si deve giudicare e restano
+   utilizzabili anche su touch, dove non esiste il passaggio del mouse. */
+.immagini-grid .thumb-voce {
+  position: relative; min-width: 0; padding: 6px; overflow: hidden;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+}
+.immagini-grid .thumb-media {
+  position: relative; display: flex; align-items: center; justify-content: center;
+  aspect-ratio: 16 / 9; overflow: hidden; border-radius: 6px; background: #000;
+}
+.immagini-grid .thumb-media img {
+  width: 100%; height: 100%; object-fit: contain; border: 0; border-radius: 0;
+}
+.immagini-grid .thumb-actions {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px;
+  margin-top: 6px;
+}
+.immagini-grid .thumb-actions button {
+  min-width: 0; padding: 5px 6px; font-size: 11px; line-height: 1.25;
+  white-space: normal;
+}
+.immagini-grid .thumb-actions .thumb-guide { grid-column: 1 / -1; }
+.immagini-grid .thumb-voce .thumb-via:hover { color: #f85149; border-color: #f85149; }
 
 
 /* Le due vie d'uscita di un'immagine, una per lato: a destra «escludi» (via dal progetto),
    a sinistra «proibita» (resta, ma fuori da ogni misura). Una miniatura proibita si vede
    da lontano: se non si distinguesse, si riguarderebbe ogni volta per sapere com'e'. */
-.thumb-voce .thumb-vietata { position: absolute; top: 6px; left: 6px; opacity: 0; }
-.thumb-voce:hover .thumb-vietata { opacity: 1; }
-.thumb-voce .thumb-vietata:hover { color: #d29922; border-color: #d29922; }
-.thumb-voce.proibita { outline: 2px solid #d29922; outline-offset: -2px; }
-.thumb-voce.proibita img { opacity: .55; }
-.thumb-voce.proibita .thumb-vietata { opacity: 1; color: #d29922; border-color: #d29922; }
+.immagini-grid .thumb-voce .thumb-vietata:hover { color: #d29922; border-color: #d29922; }
+.immagini-grid .thumb-voce.proibita { border-color: #d29922; box-shadow: 0 0 0 1px #d29922 inset; }
+.immagini-grid .thumb-voce.proibita img { opacity: .55; }
+.immagini-grid .thumb-voce.proibita .thumb-vietata { color: #d29922; border-color: #d29922; }
 
 /* Linee guida: lo stato di un fotogramma nello studio degli aghi.
    Il bordo dice se entra nello studio, la targhetta dice perche'. Verde = ci ha trovato
    l'ago ed e' finita nella proposta; grigia = guardata e scartata dal rilevatore; gialla =
    decisione presa a mano, che vince sull'automatico. */
-.thumb-voce .thumb-guide { position: absolute; bottom: 24px; right: 6px; opacity: 0; }
-.thumb-voce:hover .thumb-guide { opacity: 1; }
-.thumb-guide-targa {
-  position: absolute; top: 6px; left: 6px; font-size: 10px; line-height: 1;
+.immagini-grid .thumb-guide-targa {
+  position: absolute; top: 6px; left: 6px; max-width: calc(100% - 12px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 10px; line-height: 1;
   padding: 3px 5px; border-radius: 4px; background: rgba(13, 17, 23, .82);
   border: 1px solid var(--line); color: var(--muted); pointer-events: none;
 }
-.thumb-voce.guide-usata { outline: 2px solid #3fb950; outline-offset: -2px; }
-.thumb-voce.guide-usata .thumb-guide-targa { color: #3fb950; border-color: #3fb950; }
-.thumb-voce.guide-mano { outline: 2px dashed #d29922; outline-offset: -2px; }
-.thumb-voce.guide-mano .thumb-guide-targa { color: #d29922; border-color: #d29922; }
-.thumb-voce.guide-fuori img { opacity: .62; }
-.thumb-voce.guide-usata.guide-fuori img { opacity: 1; }
+.immagini-grid .thumb-voce.guide-usata {
+  border-color: #3fb950; box-shadow: 0 0 0 1px #3fb950 inset;
+}
+.immagini-grid .thumb-voce.guide-usata .thumb-guide-targa { color: #3fb950; border-color: #3fb950; }
+.immagini-grid .thumb-voce.guide-mano { border-style: dashed; border-color: #d29922; }
+.immagini-grid .thumb-voce.guide-mano .thumb-guide-targa { color: #d29922; border-color: #d29922; }
+.immagini-grid .thumb-voce.guide-fuori img { opacity: .62; }
+.immagini-grid .thumb-voce.guide-usata.guide-fuori img { opacity: 1; }
 
 /* La misura disegnata sopra il fotogramma: l'ago trovato, il suo prolungamento fino alla
    verticale centrale e il punto in cui la incrocia, che e' esattamente cio' che #22 misura. */

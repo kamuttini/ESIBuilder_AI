@@ -4253,7 +4253,9 @@ def _da_rifare_dopo_le_immagini(project: Project) -> List[str]:
     if not quando:
         return []
     indietro = []
-    for nome in ("rect", "orientation", "depth_scale", "scale_study"):
+    # `guides` sta qui per lo stesso motivo degli altri: misura sui fotogrammi, e uno entrato
+    # dopo non e' un fotogramma scartato, e' un fotogramma mai guardato.
+    for nome in ("rect", "orientation", "depth_scale", "scale_study", "guides"):
         stato = project.steps.get(nome) or {}
         if str(stato.get("status") or "") in ("", "empty"):
             continue

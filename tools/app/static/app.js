@@ -634,7 +634,20 @@ function panelImport(panel) {
       `${conto.scanned} fotogrammi esaminati su ${conto.images_total}`
       + (dati.sampled ? ' (campionati)' : '')
       + ` · ${conto.accepted} proposti`
-      + (conto.review ? `, ${conto.review} da verificare` : '')));
+      + (conto.review ? `, ${conto.review} da verificare` : '')
+      + (dati.at ? ` · ricerca del ${dati.at.replace('T', ' ')}` : '')));
+
+    /* La ricerca e' una fotografia di un momento, e le immagini del progetto cambiano dopo:
+       se ne esclude una, se ne rimette dentro un'altra. Il risultato restava li' con l'aria
+       di essere aggiornato, e un fotogramma entrato dopo non risultava «scartato» ma non
+       esaminato -- che e' una cosa diversa e non si vedeva da nessuna parte. */
+    const cambiate = value.images_changed_at || '';
+    if (dati.at && cambiate && cambiate > dati.at) {
+      const avviso = el('p', { class: 'hint', style: 'color:var(--warn)' },
+        `le immagini del progetto sono cambiate il ${cambiate.replace('T', ' ')}, dopo questa `
+        + 'ricerca: i fotogrammi entrati dopo non sono stati esaminati. Rilanciala.');
+      elencoAghi.append(avviso);
+    }
 
     if (!proposte.length) {
       elencoAghi.append(el('p', { class: 'hint' },
@@ -1378,8 +1391,8 @@ function cardTutteLeImmagini(panel) {
     };
     card.append(el('h3', {}, `immagini (${nomi.length} nel progetto)`));
     card.append(el('p', { class: 'hint' },
-      'passa sopra a una e premi «escludi» per toglierla dal progetto: resta sul disco e la '
-      + 'ritrovi qui sotto, da dove puoi rimetterla dentro. «Proibita» invece la tiene nel '
+      'sotto ogni anteprima trovi «Escludi», che la toglie dal progetto ma la lascia sul '
+      + 'disco: la ritrovi qui sotto e puoi rimetterla dentro. «Proibisci» invece la tiene nel '
       + 'progetto ma la toglie da tutte le misure — vendor, sonda, rettangolo, orientamento, '
       + 'depth e scala — e la mette da parte per la riga #15. Clicca una miniatura '
       + 'per aprirla a tutto schermo; usa le frecce per scorrere le immagini.'
@@ -1391,20 +1404,22 @@ function cardTutteLeImmagini(panel) {
         + (propostaRete.size && !guardate.size ? `, ${propostaRete.size} proposte dalla ricerca` : '')
         + (manoDentro.size || manoFuori.size
           ? `, ${manoDentro.size} aggiunte e ${manoFuori.size} escluse a mano` : '')
-        + '. Il pulsante «guide» sulla miniatura cambia la scelta, e un secondo clic la '
-        + 'rimette all\'automatico; la misura va poi rilanciata dallo step Linee guida.'));
+        + '. Sulle immagini fuori dalla scelta automatica puoi premere «Usa per guide»; '
+        + 'una scelta manuale si puo\' poi restituire all\'automatico. La misura va '
+        + 'rilanciata dallo step Linee guida.'));
     }
-    const thumbs = el('div', { class: 'thumbs' });
+    const thumbs = el('div', { class: 'thumbs immagini-grid' });
     for (const nome of nomi.slice(0, mostrate)) {
       const anteprima = el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
                     loading: 'lazy', alt: nome, title: 'apri a tutto schermo' });
       anteprima.addEventListener('click', () => visoreImmagini(
         nomi, nomi.indexOf(nome), state.projectId,
         (daTogliere) => escludi([daTogliere], false)));
-      const fig = el('figure', { class: 'thumb-voce', style: 'margin:0' },
-        anteprima,
-        el('figcaption', {}, nome.split('/').pop()
-          + ((dati.planes || {})[nome] ? ` · piano ${dati.planes[nome]}` : '')));
+      const media = el('div', { class: 'thumb-media' }, anteprima);
+      const azioni = el('div', { class: 'thumb-actions' });
+      const didascalia = el('figcaption', {}, nome.split('/').pop()
+        + ((dati.planes || {})[nome] ? ` · piano ${dati.planes[nome]}` : ''));
+      const fig = el('figure', { class: 'thumb-voce', style: 'margin:0' }, media);
       // Due modi diversi di togliere un'immagine di mezzo, e non sono lo stesso.
       //
       // «Escludi» la toglie dal progetto: e' un fotogramma che non serve piu' a nessuno.
@@ -1412,13 +1427,13 @@ function cardTutteLeImmagini(panel) {
       // campione buono per il vendor o per la sonda, non ha un rettangolo ecografico,
       // marker, depth ne' righello - e la tiene da parte perche' **servira' dopo**: da lei
       // si ritaglia il template con cui ESI imparera' a riconoscerla e a rifiutarla.
-      const b = el('button', { class: 'ghost sq2 thumb-via' }, 'escludi');
+      const b = el('button', { class: 'ghost thumb-via' }, 'Escludi');
       b.addEventListener('click', async () => {
         b.disabled = true;
         try { await escludi([nome]); } catch (errore) { toast(errore.message, true); b.disabled = false; }
       });
-      const vietata = el('button', { class: 'ghost sq2 thumb-vietata' },
-        proibite.has(nome) ? 'riammetti' : 'proibita');
+      const vietata = el('button', { class: 'ghost thumb-vietata' },
+        proibite.has(nome) ? 'Riammetti' : 'Proibisci');
       vietata.title = proibite.has(nome)
         ? 'la rimette fra le immagini che i moduli possono usare'
         : 'schermata di servizio: resta nel progetto ma esce da tutte le misure, e si '
@@ -1436,29 +1451,31 @@ function cardTutteLeImmagini(panel) {
       });
       if (proibite.has(nome)) fig.classList.add('proibita');
 
-      // Linee guida: una targhetta che dice che fine fa questo fotogramma, e un pulsante che
-      // in un clic la ribalta e in un secondo clic torna all'automatico.
+      // Linee guida: la targhetta dice che fine fa il fotogramma. Non proponiamo di
+      // togliere una scelta automatica: dalla galleria serve solo poter aggiungere un caso
+      // ignorato dal rilevatore o annullare una decisione manuale gia' esistente.
       const sg = statoGuide(nome);
-      if (sg.targa) fig.append(el('span', { class: 'thumb-guide-targa', title: sg.perche }, sg.targa));
+      if (sg.targa) media.append(el('span', { class: 'thumb-guide-targa', title: sg.perche }, sg.targa));
       if (usate.has(nome) && !manoFuori.has(nome)) fig.classList.add('guide-usata');
       if (sg.mano) fig.classList.add('guide-mano');
       if (!sg.attiva || (guardate.has(nome) && !usate.has(nome))) fig.classList.add('guide-fuori');
       anteprima.title = `${sg.perche} — clicca per aprirla a tutto schermo`;
-      const gb = el('button', { class: 'ghost sq2 thumb-guide' },
-        sg.mano ? 'guide: auto' : sg.attiva ? 'guide: togli' : 'guide: usa');
-      gb.title = sg.mano
-        ? 'rimette questo fotogramma alla scelta automatica'
-        : sg.attiva
-          ? 'lo toglie dallo studio delle linee guida (#22 e #23)'
-          : 'lo aggiunge allo studio delle linee guida anche se non e\' stato proposto';
-      gb.addEventListener('click', async (ev) => {
-        ev.stopPropagation();
-        gb.disabled = true;
-        const prossimo = sg.mano ? 'auto' : sg.attiva ? 'exclude' : 'include';
-        try { await cambiaGuide(nome, prossimo); }
-        catch (errore) { toast(errore.message, true); gb.disabled = false; }
-      });
-      fig.append(b, vietata, gb);
+      azioni.append(b, vietata);
+      if (sg.mano || !sg.attiva) {
+        const gb = el('button', { class: 'ghost thumb-guide' },
+          sg.mano ? 'Scelta automatica' : 'Usa per guide');
+        gb.title = sg.mano
+          ? 'annulla la scelta manuale e torna alla selezione automatica'
+          : 'aggiunge il fotogramma allo studio delle linee guida anche se non era stato proposto';
+        gb.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          gb.disabled = true;
+          try { await cambiaGuide(nome, sg.mano ? 'auto' : 'include'); }
+          catch (errore) { toast(errore.message, true); gb.disabled = false; }
+        });
+        azioni.append(gb);
+      }
+      fig.append(azioni, didascalia);
       thumbs.append(fig);
     }
     card.append(thumbs);
@@ -4368,7 +4385,8 @@ function panelGuides(panel, step) {
         el('span', { class: 'hint' }, '  gli altri'),
         el('span', { class: 'hint' },
           `${proposta.fotogrammi - proposta.misure} guardati senza riconoscerci un ago: li trovi `
-          + 'segnati nella galleria dell\'import, dove puoi aggiungerne o toglierne a mano')));
+          + 'segnati nella galleria dell\'import, dove puoi aggiungerne a mano o restituire '
+          + 'all\'automatico una scelta manuale')));
     }
     if (proposta.ratio_fonte && proposta.ratio_fonte !== 'righe #19/#20') {
       card.append(el('div', { class: 'kv' },
