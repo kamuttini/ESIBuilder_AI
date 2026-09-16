@@ -1371,13 +1371,13 @@ function cardTutteLeImmagini(panel) {
         return { attiva: true, mano: false, targa: '✓ linee guida',
                  perche: 'su questa il rilevatore ha trovato l\'ago: e\' finita nella proposta #22/#23' };
       }
-      if (guardate.has(nome)) {
-        return { attiva: true, mano: false, targa: '',
-                 perche: 'guardata per le linee guida, ma il rilevatore non ci ha riconosciuto un ago' };
-      }
       if (propostaRete.has(nome)) {
         return { attiva: true, mano: false, targa: 'guide: proposta',
                  perche: 'proposta dalla ricerca come materiale di calibrazione, non ancora misurata' };
+      }
+      if (guardate.has(nome)) {
+        return { attiva: false, mano: false, targa: '',
+                 perche: 'esaminata dal modulo, ma senza ago riconosciuto: non e\' nel pool di calibrazione' };
       }
       return { attiva: false, mano: false, targa: '',
                perche: 'fuori dallo studio delle linee guida' };
