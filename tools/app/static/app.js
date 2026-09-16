@@ -1404,9 +1404,9 @@ function cardTutteLeImmagini(panel) {
         + (propostaRete.size && !guardate.size ? `, ${propostaRete.size} proposte dalla ricerca` : '')
         + (manoDentro.size || manoFuori.size
           ? `, ${manoDentro.size} aggiunte e ${manoFuori.size} escluse a mano` : '')
-        + '. Sulle immagini fuori dalla scelta automatica puoi premere «Usa per guide»; '
-        + 'una scelta manuale si puo\' poi restituire all\'automatico. La misura va '
-        + 'rilanciata dallo step Linee guida.'));
+        + '. Puoi correggere la scelta automatica con «Usa per guide» oppure «Escludi '
+        + 'dalle guide»; dopo una correzione, «Scelta automatica» la annulla. La misura '
+        + 'va poi rilanciata dallo step Linee guida.'));
     }
     const thumbs = el('div', { class: 'thumbs immagini-grid' });
     for (const nome of nomi.slice(0, mostrate)) {
@@ -1451,9 +1451,9 @@ function cardTutteLeImmagini(panel) {
       });
       if (proibite.has(nome)) fig.classList.add('proibita');
 
-      // Linee guida: la targhetta dice che fine fa il fotogramma. Non proponiamo di
-      // togliere una scelta automatica: dalla galleria serve solo poter aggiungere un caso
-      // ignorato dal rilevatore o annullare una decisione manuale gia' esistente.
+      // Linee guida: la targhetta dice che fine fa il fotogramma. Ogni scelta automatica
+      // puo' essere corretta nei due versi; dopo la correzione il comando torna a offrire
+      // l'automatico, cosi' e' sempre chiaro se sta decidendo la rete o l'operatore.
       const sg = statoGuide(nome);
       if (sg.targa) media.append(el('span', { class: 'thumb-guide-targa', title: sg.perche }, sg.targa));
       if (usate.has(nome) && !manoFuori.has(nome)) fig.classList.add('guide-usata');
@@ -1461,20 +1461,21 @@ function cardTutteLeImmagini(panel) {
       if (!sg.attiva || (guardate.has(nome) && !usate.has(nome))) fig.classList.add('guide-fuori');
       anteprima.title = `${sg.perche} — clicca per aprirla a tutto schermo`;
       azioni.append(b, vietata);
-      if (sg.mano || !sg.attiva) {
-        const gb = el('button', { class: 'ghost thumb-guide' },
-          sg.mano ? 'Scelta automatica' : 'Usa per guide');
-        gb.title = sg.mano
-          ? 'annulla la scelta manuale e torna alla selezione automatica'
+      const gb = el('button', { class: 'ghost thumb-guide' },
+        sg.mano ? 'Scelta automatica' : sg.attiva ? 'Escludi dalle guide' : 'Usa per guide');
+      gb.title = sg.mano
+        ? 'annulla la scelta manuale e torna alla selezione automatica'
+        : sg.attiva
+          ? 'esclude manualmente il fotogramma dallo studio delle linee guida (#22 e #23)'
           : 'aggiunge il fotogramma allo studio delle linee guida anche se non era stato proposto';
-        gb.addEventListener('click', async (ev) => {
-          ev.stopPropagation();
-          gb.disabled = true;
-          try { await cambiaGuide(nome, sg.mano ? 'auto' : 'include'); }
-          catch (errore) { toast(errore.message, true); gb.disabled = false; }
-        });
-        azioni.append(gb);
-      }
+      gb.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        gb.disabled = true;
+        const prossimo = sg.mano ? 'auto' : sg.attiva ? 'exclude' : 'include';
+        try { await cambiaGuide(nome, prossimo); }
+        catch (errore) { toast(errore.message, true); gb.disabled = false; }
+      });
+      azioni.append(gb);
       fig.append(azioni, didascalia);
       thumbs.append(fig);
     }
@@ -4358,20 +4359,29 @@ function panelGuides(panel, step) {
     + 'sui dati etichettati a mano il 45% cade entro un grado e il 71% entro tre.'));
 
   const stato = el('span', { class: 'hint' });
-  const bottone = el('button', {}, proposta ? 'Rimisura' : 'Misura gli aghi');
-  bottone.addEventListener('click', async () => {
+  const misura = async (bottone, corpo, messaggio) => {
     bottone.disabled = true;
     try {
-      const { job_id } = await api(`/projects/${state.projectId}/guides/propose`, { body: {} });
+      const { job_id } = await api(`/projects/${state.projectId}/guides/propose`, { body: corpo });
       await pollJob(job_id, stato);
-      toast('aghi misurati');
+      toast(messaggio);
       await reload();
     } catch (errore) {
       toast(errore.message, true);
       stato.textContent = errore.message;
     } finally { bottone.disabled = false; }
-  });
-  panel.append(el('div', { class: 'row' }, bottone, stato));
+  };
+  const bottone = el('button', {}, proposta ? 'Rimisura' : 'Misura gli aghi');
+  bottone.title = 'misura i fotogrammi indicati dalla ricerca nello step Import e analisi, '
+    + 'piu\' quelli aggiunti a mano e meno quelli esclusi';
+  bottone.addEventListener('click', () => misura(bottone, {}, 'aghi misurati'));
+  // La scorciatoia per quando la ricerca non ha trovato quello che si vede a occhio: costa
+  // qualche secondo in piu' e non chiede di fidarsi del classificatore.
+  const tutti = el('button', { class: 'ghost' }, 'Misura tutti i fotogrammi');
+  tutti.title = 'ignora la ricerca e guarda ogni fotogramma delle cartelle proposte: piu\' lento, '
+    + 'utile se la ricerca ha saltato qualcosa';
+  tutti.addEventListener('click', () => misura(tutti, { tutti: true }, 'misurati tutti i fotogrammi'));
+  panel.append(el('div', { class: 'row' }, bottone, tutti, stato));
 
   if (proposta && ((proposta.proposte || []).length || (proposta.incerte || []).length)) {
     panel.append(el('h3', {}, 'proposta'));
@@ -4387,6 +4397,12 @@ function panelGuides(panel, step) {
           `${proposta.fotogrammi - proposta.misure} guardati senza riconoscerci un ago: li trovi `
           + 'segnati nella galleria dell\'import, dove puoi aggiungerne a mano o restituire '
           + 'all\'automatico una scelta manuale')));
+    }
+    if (proposta.avviso_ricerca) {
+      card.append(el('div', { class: 'kv' },
+        el('span', { style: 'color:var(--warn)' }, 'attenzione'),
+        el('span', { style: 'color:var(--warn)' }, proposta.avviso_ricerca
+          + ' — rilancia la ricerca, oppure usa «Misura tutti i fotogrammi»')));
     }
     if (proposta.ratio_fonte && proposta.ratio_fonte !== 'righe #19/#20') {
       card.append(el('div', { class: 'kv' },

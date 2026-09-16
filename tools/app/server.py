@@ -4432,10 +4432,6 @@ NEEDLE_REJECT_BELOW = 0.25
 # aspettare su cartelle enormi, ma se il materiale e' una manciata di immagini saltarne
 # una significa non trovarlo.
 NEEDLE_SCAN_ALL_UNDER = 400
-# Sotto questa taglia le linee guida misurano ogni fotogramma delle cartelle proposte invece
-# di fidarsi della selezione: misurare costa poco, e il rilevatore severo e' esso stesso il
-# filtro (4 risposte su 66 immagini, tutte e sole quelle di calibrazione).
-GUIDES_MEASURE_ALL_UNDER = 400
 
 
 def _needle_policy() -> Dict[str, float]:
@@ -4790,7 +4786,8 @@ def _famiglie_da_misure(misure: Sequence[Dict], depths: Sequence[float],
             [p for p in proposte if p["fotogrammi"] < 2])
 
 
-def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
+def _run_guides_proposal(job_id: str, project_id: str, per_folder: int,
+                         tutti: bool = False) -> None:
     try:
         sys.path.insert(0, str(REPO_ROOT / "tools" / "needle"))
         from propose_guide_lines import measure, measure_from_line  # noqa: PLC0415
@@ -4831,31 +4828,31 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
                 if voce.get("verdict") != "no" and str(voce.get("name")) in nomi:
                     votate.setdefault(str(voce["name"]), float(voce.get("score") or 0.0))
 
-        # Dentro le cartelle proposte, se sono poche immagini si misurano tutte: il rilevatore
-        # severo tace dove non c'e' un ago, e su una cartella vera ha risposto esattamente sui
-        # 4 fotogrammi di calibrazione e su nessuno degli altri 62. Il classificatore, da solo,
-        # ne riconosceva 3: il quarto angolo della riga #23 si perdeva li'. Il classificatore
-        # resta come voto -- decide quali cartelle guardare, e in quelle grandi da dove partire.
+        # Si misurano i fotogrammi che la ricerca ha indicato come materiale di calibrazione,
+        # non tutta la cartella: la ricerca esiste per questo. Per un po' li ho misurati tutti,
+        # perche' su un progetto vero il classificatore sembrava perdere un angolo -- ma quel
+        # fotogramma non era stato scartato, era entrato nel progetto *dopo* la ricerca e non
+        # era mai stato esaminato. Rifatta la ricerca, il classificatore li trova tutti e
+        # quattro. Resta `tutti` per quando serve guardare comunque dentro tutta la cartella.
         dentro_cartelle: List[str] = []
         for cartella in cartelle:
             prefisso = "" if cartella["folder"] == "." else cartella["folder"] + os.sep
             dentro_cartelle.extend(sorted(n for n in nomi if n.startswith(prefisso)))
 
         scelta = _selezione_guide(project)
-        if len(dentro_cartelle) <= GUIDES_MEASURE_ALL_UNDER:
+        if tutti:
             candidati: List[str] = dentro_cartelle
             scelta_fotogrammi = f"tutti i fotogrammi delle cartelle proposte ({len(candidati)})"
         else:
             candidati = sorted(votate, key=lambda n: -votate[n])
-            scelta_fotogrammi = "riconosciuti dal classificatore"
+            scelta_fotogrammi = f"indicati dalla ricerca ({len(candidati)})"
             if not candidati:
-                # Cartella grande e nessuna immagine accettata: resta il passo fisso.
-                scelta_fotogrammi = "a passo fisso (nessuna immagine riconosciuta)"
-                for cartella in cartelle:
-                    prefisso = "" if cartella["folder"] == "." else cartella["folder"] + os.sep
-                    dentro = sorted(n for n in nomi if n.startswith(prefisso))
-                    passo = max(1, len(dentro) // per_folder)
-                    candidati.extend(dentro[::passo][:per_folder])
+                # La ricerca non ha proposto nessuna immagine: misurare a caso dentro una
+                # cartella non e' una risposta, e dirlo lo e'.
+                raise ValueError(
+                    "la ricerca non ha indicato nessun fotogramma di calibrazione: "
+                    "rilanciala nello step Import e analisi, oppure segna a mano i fotogrammi "
+                    "da usare, oppure chiedi di misurarli tutti")
 
         # La mano di chi guarda viene per ultima: aggiunge i fotogrammi che la ricerca non ha
         # proposto e toglie quelli che non vanno, e nessuna delle due cose deve essere disfatta
@@ -4865,6 +4862,14 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
         if aggiunti or scelta["exclude"]:
             scelta_fotogrammi += (f", {len(aggiunti)} aggiunti e "
                                   f"{len(scelta['exclude'])} esclusi a mano")
+
+        # Se la ricerca e' piu' vecchia dell'elenco delle immagini, quello che si sta per
+        # misurare e' un elenco incompleto, e la misura non ha modo di accorgersene.
+        cambiate = str((project.step_value("import") or {}).get("images_changed_at") or "")
+        avviso = ""
+        if not tutti and cambiate and str(scan.get("at") or "") < cambiate:
+            avviso = (f"la ricerca e' del {scan.get('at')} e le immagini sono cambiate il "
+                      f"{cambiate}: i fotogrammi entrati dopo non sono stati esaminati")
 
         _job_update(job_id, stage="misura degli aghi", total=len(candidati))
         box = (int(rect["left"]), int(rect["top"]), int(rect["right"]), int(rect["bottom"]))
@@ -4931,9 +4936,7 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
                     "questo step non copre ancora")
             raise ValueError("nessun ago rilevato nei fotogrammi di calibrazione")
 
-        solide, incerte = _famiglie_da_misure(
-            misure, depths, bool(stati_ratio),
-            cieca=scelta_fotogrammi.startswith("a passo fisso"))
+        solide, incerte = _famiglie_da_misure(misure, depths, bool(stati_ratio), cieca=False)
 
         risultato = {
             "proposte": solide,
@@ -4945,6 +4948,7 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
             "ratio_fonte": fonte_ratio,
             "misure_senza_depth": senza_depth,
             "scelta_fotogrammi": scelta_fotogrammi,
+            "avviso_ricerca": avviso,
             # Serve alla galleria dell'import: la differenza fra «guardata» e «usata» e'
             # l'unica cosa che spiega perche' un fotogramma non conta, e senza vederla non
             # si puo' correggere la selezione.
@@ -5121,7 +5125,8 @@ def api_guides_propose(project_id: str):
     if not project.dedup_names():
         return jsonify({"error": "importa prima una cartella"}), 400
     per_folder = int(_payload().get("per_folder") or 12)
-    return jsonify({"job_id": _start_job(_run_guides_proposal, project_id, per_folder)})
+    tutti = bool(_payload().get("tutti"))
+    return jsonify({"job_id": _start_job(_run_guides_proposal, project_id, per_folder, tutti)})
 
 
 @app.post("/api/projects/<project_id>/duplicates/unkeep")
