@@ -1222,7 +1222,11 @@ img.depth-crop {
 
 /* La divisione L/T a tutto schermo: si passa in rassegna la cartella con le frecce. */
 .piani-pieno {
-  position: fixed; inset: 0; z-index: 80; background: rgba(2, 6, 12, .94);
+  /* Parte sotto la barra invece che dietro: la barra e' sticky a z-index 100, quindi a
+     tutto schermo copriva proprio la riga dei comandi del visore -- frecce, nome del
+     fotogramma e «chiudi» finivano sotto di lei. */
+  position: fixed; inset: var(--header-height, 53px) 0 0 0; z-index: 80;
+  background: rgba(2, 6, 12, .94);
   display: flex; flex-direction: column;
 }
 .piani-pieno-testa {
@@ -1369,3 +1373,35 @@ img.depth-crop {
 .thumb-voce.proibita { outline: 2px solid #d29922; outline-offset: -2px; }
 .thumb-voce.proibita img { opacity: .55; }
 .thumb-voce.proibita .thumb-vietata { opacity: 1; color: #d29922; border-color: #d29922; }
+
+/* Linee guida: lo stato di un fotogramma nello studio degli aghi.
+   Il bordo dice se entra nello studio, la targhetta dice perche'. Verde = ci ha trovato
+   l'ago ed e' finita nella proposta; grigia = guardata e scartata dal rilevatore; gialla =
+   decisione presa a mano, che vince sull'automatico. */
+.thumb-voce .thumb-guide { position: absolute; bottom: 24px; right: 6px; opacity: 0; }
+.thumb-voce:hover .thumb-guide { opacity: 1; }
+.thumb-guide-targa {
+  position: absolute; top: 6px; left: 6px; font-size: 10px; line-height: 1;
+  padding: 3px 5px; border-radius: 4px; background: rgba(13, 17, 23, .82);
+  border: 1px solid var(--line); color: var(--muted); pointer-events: none;
+}
+.thumb-voce.guide-usata { outline: 2px solid #3fb950; outline-offset: -2px; }
+.thumb-voce.guide-usata .thumb-guide-targa { color: #3fb950; border-color: #3fb950; }
+.thumb-voce.guide-mano { outline: 2px dashed #d29922; outline-offset: -2px; }
+.thumb-voce.guide-mano .thumb-guide-targa { color: #d29922; border-color: #d29922; }
+.thumb-voce.guide-fuori img { opacity: .62; }
+.thumb-voce.guide-usata.guide-fuori img { opacity: 1; }
+
+/* La misura disegnata sopra il fotogramma: l'ago trovato, il suo prolungamento fino alla
+   verticale centrale e il punto in cui la incrocia, che e' esattamente cio' che #22 misura. */
+.traccia { position: relative; display: block; }
+.traccia svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* Spessori e trattini arrivano come attributi dal disegno, non da qui: sono in unita' del
+   fotogramma (1920 di larghezza), e una regola CSS li vincerebbe rimettendoli a due pixel
+   dell'immagine -- cioe' un decimo di pixel sullo schermo, invisibili. */
+.traccia-ago { stroke: #3fb950; fill: none; }
+.traccia-altro { stroke: #58a6ff; fill: none; opacity: .85; }
+.traccia-prolunga { stroke: #3fb950; fill: none; opacity: .8; }
+.traccia-centro { stroke: #d29922; fill: none; opacity: .75; }
+.traccia-punto { fill: #d29922; stroke: #0d1117; }
+.traccia-rect { stroke: rgba(240, 246, 252, .35); fill: none; }

@@ -1333,6 +1333,49 @@ function cardTutteLeImmagini(panel) {
     if (!dati) { card.append(el('p', { class: 'hint' }, 'carico l\'elenco…')); return; }
     const nomi = dati.names || [];
     const proibite = new Set(dati.forbidden || []);
+    const guide = dati.guides || {};
+    const usate = new Set(guide.usate || []);
+    const guardate = new Set(guide.guardate || []);
+    const propostaRete = new Set(guide.proposte || []);
+    const manoDentro = new Set(guide.include || []);
+    const manoFuori = new Set(guide.exclude || []);
+    // Che cosa succede a questo fotogramma nello studio delle linee guida, e per decisione
+    // di chi. La mano vince sempre: e' il senso di poterla mettere.
+    // La targhetta e' corta perche' sta su una miniatura di centotrenta pixel, e compare solo
+    // dove dice qualcosa: il caso «guardata e scartata» e' la maggioranza, e scriverlo su
+    // sessanta immagini coprirebbe proprio quello che si sta cercando di guardare. Li' resta
+    // l'immagine un po' spenta, e il conto sta scritto una volta sola sopra la griglia.
+    const statoGuide = (nome) => {
+      if (manoFuori.has(nome)) {
+        return { attiva: false, mano: true, targa: 'guide: esclusa',
+                 perche: 'esclusa a mano dallo studio delle linee guida' };
+      }
+      if (manoDentro.has(nome)) {
+        return { attiva: true, mano: true, targa: 'guide: aggiunta',
+                 perche: 'aggiunta a mano allo studio delle linee guida' };
+      }
+      if (usate.has(nome)) {
+        return { attiva: true, mano: false, targa: '✓ linee guida',
+                 perche: 'su questa il rilevatore ha trovato l\'ago: e\' finita nella proposta #22/#23' };
+      }
+      if (guardate.has(nome)) {
+        return { attiva: true, mano: false, targa: '',
+                 perche: 'guardata per le linee guida, ma il rilevatore non ci ha riconosciuto un ago' };
+      }
+      if (propostaRete.has(nome)) {
+        return { attiva: true, mano: false, targa: 'guide: proposta',
+                 perche: 'proposta dalla ricerca come materiale di calibrazione, non ancora misurata' };
+      }
+      return { attiva: false, mano: false, targa: '',
+               perche: 'fuori dallo studio delle linee guida' };
+    };
+    const cambiaGuide = async (nome, stato) => {
+      await api(`/projects/${state.projectId}/guides/selection`, { body: { name: nome, state: stato } });
+      toast(stato === 'auto' ? 'torna alla scelta automatica'
+        : stato === 'include' ? 'entra nello studio delle linee guida'
+        : 'fuori dallo studio delle linee guida');
+      await carica();
+    };
     card.append(el('h3', {}, `immagini (${nomi.length} nel progetto)`));
     card.append(el('p', { class: 'hint' },
       'passa sopra a una e premi «escludi» per toglierla dal progetto: resta sul disco e la '
@@ -1341,6 +1384,16 @@ function cardTutteLeImmagini(panel) {
       + 'depth e scala — e la mette da parte per la riga #15. Clicca una miniatura '
       + 'per aprirla a tutto schermo; usa le frecce per scorrere le immagini.'
       + (proibite.size ? ` Adesso ne hai ${proibite.size} marcate proibite.` : '')));
+    if (usate.size || guardate.size || propostaRete.size) {
+      card.append(el('p', { class: 'hint' },
+        `linee guida: ${usate.size ? `${usate.size} usate per #22 e #23` : 'nessuna ancora usata'}`
+        + (guardate.size ? `, ${guardate.size - usate.size} guardate senza trovarci un ago` : '')
+        + (propostaRete.size && !guardate.size ? `, ${propostaRete.size} proposte dalla ricerca` : '')
+        + (manoDentro.size || manoFuori.size
+          ? `, ${manoDentro.size} aggiunte e ${manoFuori.size} escluse a mano` : '')
+        + '. Il pulsante «guide» sulla miniatura cambia la scelta, e un secondo clic la '
+        + 'rimette all\'automatico; la misura va poi rilanciata dallo step Linee guida.'));
+    }
     const thumbs = el('div', { class: 'thumbs' });
     for (const nome of nomi.slice(0, mostrate)) {
       const anteprima = el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
@@ -1382,7 +1435,30 @@ function cardTutteLeImmagini(panel) {
         } catch (errore) { toast(errore.message, true); vietata.disabled = false; }
       });
       if (proibite.has(nome)) fig.classList.add('proibita');
-      fig.append(b, vietata);
+
+      // Linee guida: una targhetta che dice che fine fa questo fotogramma, e un pulsante che
+      // in un clic la ribalta e in un secondo clic torna all'automatico.
+      const sg = statoGuide(nome);
+      if (sg.targa) fig.append(el('span', { class: 'thumb-guide-targa', title: sg.perche }, sg.targa));
+      if (usate.has(nome) && !manoFuori.has(nome)) fig.classList.add('guide-usata');
+      if (sg.mano) fig.classList.add('guide-mano');
+      if (!sg.attiva || (guardate.has(nome) && !usate.has(nome))) fig.classList.add('guide-fuori');
+      anteprima.title = `${sg.perche} — clicca per aprirla a tutto schermo`;
+      const gb = el('button', { class: 'ghost sq2 thumb-guide' },
+        sg.mano ? 'guide: auto' : sg.attiva ? 'guide: togli' : 'guide: usa');
+      gb.title = sg.mano
+        ? 'rimette questo fotogramma alla scelta automatica'
+        : sg.attiva
+          ? 'lo toglie dallo studio delle linee guida (#22 e #23)'
+          : 'lo aggiunge allo studio delle linee guida anche se non e\' stato proposto';
+      gb.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        gb.disabled = true;
+        const prossimo = sg.mano ? 'auto' : sg.attiva ? 'exclude' : 'include';
+        try { await cambiaGuide(nome, prossimo); }
+        catch (errore) { toast(errore.message, true); gb.disabled = false; }
+      });
+      fig.append(b, vietata, gb);
       thumbs.append(fig);
     }
     card.append(thumbs);
@@ -1415,12 +1491,17 @@ function cardTutteLeImmagini(panel) {
       card.append(dett);
     }
   };
-  disegna();
-  api(`/projects/${state.projectId}/images`).then((r) => { dati = r; disegna(); })
+  // Rileggere solo questo elenco, e non tutto il progetto: cambiare la selezione delle linee
+  // guida non tocca nessuno step, e un reload() completo farebbe perdere la posizione a chi
+  // sta scorrendo duecento miniature.
+  const carica = () => api(`/projects/${state.projectId}/images`)
+    .then((r) => { dati = r; disegna(); })
     .catch((errore) => {
       card.innerHTML = '';
       card.append(el('p', { class: 'hint' }, `elenco non leggibile: ${errore.message}`));
     });
+  disegna();
+  carica();
 }
 
 /* --- step 2: ecografo e sonda --- */
@@ -3902,6 +3983,121 @@ function valoreDiModulo(panel, step) {
    circa un terzo delle proposte cade entro un grado e circa meta' entro tre. Per questo ogni
    famiglia arriva con quanti fotogrammi l'hanno prodotta e quanto erano d'accordo, e il valore
    si scrive solo quando lo confermi. */
+/* La misura disegnata sopra il fotogramma.
+
+   Una riga #22 e una #23 sono due numeri: guardandoli non si puo' dire se il rilevatore ha
+   preso l'ago o un riflesso. Disegnati sopra l'immagine si', ed e' la stessa cosa che faceva
+   l'operatore del vecchio ESIBuilder quando ricalcava l'ago a mano.
+
+   Il disegno sta in un SVG sopra l'immagine, non cotto dentro il JPEG: le coordinate restano
+   quelle native del fotogramma (`viewBox`), quindi la stessa traccia vale per la miniatura da
+   260 pixel e per il pieno schermo, senza riscalare niente a mano. */
+function svgTraccia(t, rect, larghezzaSchermo) {
+  const [w, h] = t.size || [1920, 1080];
+  // Il disegno vive nelle coordinate del fotogramma, ma lo spessore di un tratto si giudica
+  // sullo schermo: in unita' del viewBox, tre pixel su una miniatura da 160 diventano un
+  // ventesimo di pixel e la riga sparisce. `k` e' quante unita' del disegno vale un pixel.
+  const k = w / Math.max(60, larghezzaSchermo || 160);
+  const sp = (px) => (px * k).toFixed(1);
+  const tratti = (a, b) => `stroke-dasharray="${sp(a)} ${sp(b)}"`;
+  const parti = [];
+  if (rect) {
+    const cx = (rect.left + rect.right) / 2;
+    parti.push(`<rect class="traccia-rect" x="${rect.left}" y="${rect.top}" `
+      + `width="${rect.right - rect.left}" height="${rect.bottom - rect.top}" stroke-width="${sp(1)}"/>`);
+    parti.push(`<line class="traccia-centro" x1="${cx}" y1="${rect.top}" x2="${cx}" y2="${rect.bottom}" `
+      + `stroke-width="${sp(1.5)}" ${tratti(3, 6)}/>`);
+  }
+  for (const a of (t.altri || [])) {
+    parti.push(`<line class="traccia-altro" x1="${a[0]}" y1="${a[1]}" x2="${a[2]}" y2="${a[3]}" `
+      + `stroke-width="${sp(2)}" ${tratti(6, 5)}/>`);
+  }
+  if (t.crossing && t.p1 && t.p2) {
+    // il prolungamento parte dall'estremo piu' vicino alla verticale, cosi' si vede che il
+    // punto sulla verticale e' una conseguenza della retta e non una seconda misura
+    const vicino = Math.abs(t.p1[0] - t.crossing[0]) < Math.abs(t.p2[0] - t.crossing[0]) ? t.p1 : t.p2;
+    parti.push(`<line class="traccia-prolunga" x1="${vicino[0]}" y1="${vicino[1]}" `
+      + `x2="${t.crossing[0]}" y2="${t.crossing[1]}" stroke-width="${sp(2)}" ${tratti(5, 5)}/>`);
+  }
+  if (t.p1 && t.p2) {
+    parti.push(`<line class="traccia-ago" x1="${t.p1[0]}" y1="${t.p1[1]}" x2="${t.p2[0]}" y2="${t.p2[1]}" `
+      + `stroke-width="${sp(3)}"/>`);
+  }
+  if (t.crossing) {
+    parti.push(`<circle class="traccia-punto" cx="${t.crossing[0]}" cy="${t.crossing[1]}" `
+      + `r="${sp(4)}" stroke-width="${sp(1.2)}"/>`);
+  }
+  return `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${parti.join('')}</svg>`;
+}
+
+function fotogrammaTracciato(t, rect, larghezza, onClick, larghezzaSchermo) {
+  const nome = t.image;
+  const box = el('span', { class: 'traccia' });
+  const img = el('img', {
+    src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=${larghezza}`,
+    loading: 'lazy', alt: nome, title: onClick ? 'apri a tutto schermo' : nome });
+  box.append(img);
+  box.insertAdjacentHTML('beforeend', svgTraccia(t, rect, larghezzaSchermo || larghezza));
+  // La miniatura sta in una griglia elastica: quanto e' larga davvero si sa solo dopo il
+  // layout, e da li' si ridisegna con lo spessore giusto per la larghezza vera.
+  requestAnimationFrame(() => {
+    const vera = Math.round(box.getBoundingClientRect().width);
+    if (vera > 40 && Math.abs(vera - (larghezzaSchermo || larghezza)) > 24) {
+      const vecchio = box.querySelector('svg');
+      if (vecchio) vecchio.remove();
+      box.insertAdjacentHTML('beforeend', svgTraccia(t, rect, vera));
+    }
+  });
+  if (onClick) { box.addEventListener('click', onClick); box.style.cursor = 'zoom-in'; }
+  return box;
+}
+
+function descriviTraccia(t) {
+  return `${t.angolo.toFixed(2)}°  ·  #22 ${t.distanza.toFixed(2)} mm`
+    + (t.depth_mm ? `  ·  depth ${t.depth_mm} mm` : '  ·  depth non letta');
+}
+
+/* Pieno schermo sulle tracce, con le frecce per scorrerle: le stesse della galleria delle
+   immagini, perche' chi le ha imparate li' non deve impararle una seconda volta. */
+function visoreTracce(tracce, partenza, rect) {
+  if (!tracce.length) return;
+  let indice = Math.max(0, Math.min(Number(partenza) || 0, tracce.length - 1));
+  const pieno = el('div', { class: 'piani-pieno' });
+  const testa = el('div', { class: 'piani-pieno-testa' });
+  const scena = el('div', { class: 'piani-pieno-scena' });
+  const info = el('span', { class: 'hint' });
+  const indietro = el('button', { class: 'ghost sq', title: 'precedente' }, '‹');
+  const avanti = el('button', { class: 'ghost sq', title: 'successiva' }, '›');
+  const chiudi = el('button', { class: 'ghost' }, 'chiudi (Esc)');
+  const mostra = () => {
+    const t = tracce[indice];
+    scena.innerHTML = '';
+    scena.append(fotogrammaTracciato(t, rect, 1600, null));
+    info.textContent = `${indice + 1} di ${tracce.length} · ${t.image.split('/').pop()} · ${descriviTraccia(t)}`;
+    indietro.disabled = tracce.length < 2;
+    avanti.disabled = tracce.length < 2;
+  };
+  const vai = (passo) => {
+    if (tracce.length < 2) return;
+    indice = (indice + passo + tracce.length) % tracce.length;
+    mostra();
+  };
+  const chiudiOra = () => { window.removeEventListener('keydown', tasti); pieno.remove(); };
+  const tasti = (evento) => {
+    if (evento.key === 'ArrowLeft') { evento.preventDefault(); vai(-1); }
+    else if (evento.key === 'ArrowRight') { evento.preventDefault(); vai(1); }
+    else if (evento.key === 'Escape') { evento.preventDefault(); chiudiOra(); }
+  };
+  indietro.addEventListener('click', () => vai(-1));
+  avanti.addEventListener('click', () => vai(1));
+  chiudi.addEventListener('click', chiudiOra);
+  testa.append(indietro, avanti, info, chiudi);
+  pieno.append(testa, scena);
+  document.body.append(pieno);
+  window.addEventListener('keydown', tasti);
+  mostra();
+}
+
 function panelGuides(panel, step) {
   const stored = (state.project.steps[step.id] || {}).value || {};
   const proposta = stored.proposal;
@@ -3914,7 +4110,8 @@ function panelGuides(panel, step) {
   panel.append(el('p', { class: 'hint' },
     'l\'angolo di ogni famiglia di linee (#23) e la distanza dal top del rettangolo al punto in cui '
     + 'la prima linea incrocia la verticale centrale (#22), misurati sugli aghi dei fotogrammi di '
-    + 'calibrazione. La proposta va confermata: oggi circa un terzo cade entro un grado.'));
+    + 'calibrazione. Ogni misura si vede disegnata sopra il suo fotogramma, e va confermata: '
+    + 'sui dati etichettati a mano il 45% cade entro un grado e il 71% entro tre.'));
 
   const stato = el('span', { class: 'hint' });
   const bottone = el('button', {}, proposta ? 'Rimisura' : 'Misura gli aghi');
@@ -3937,7 +4134,15 @@ function panelGuides(panel, step) {
     const card = el('div', { class: 'card' });
     card.append(el('div', { class: 'kv' },
       el('span', {}, 'fotogrammi misurati'),
-      el('span', {}, `${proposta.misure} su ${proposta.fotogrammi}`)));
+      el('span', {}, `${proposta.misure} su ${proposta.fotogrammi}`
+        + (proposta.scelta_fotogrammi ? ` · ${proposta.scelta_fotogrammi}` : ''))));
+    if (proposta.fotogrammi > proposta.misure) {
+      card.append(el('div', { class: 'kv' },
+        el('span', { class: 'hint' }, '  gli altri'),
+        el('span', { class: 'hint' },
+          `${proposta.fotogrammi - proposta.misure} guardati senza riconoscerci un ago: li trovi `
+          + 'segnati nella galleria dell\'import, dove puoi aggiungerne o toglierne a mano')));
+    }
     if (proposta.ratio_fonte && proposta.ratio_fonte !== 'righe #19/#20') {
       card.append(el('div', { class: 'kv' },
         el('span', {}, 'millimetri per pixel'),
@@ -3963,6 +4168,20 @@ function panelGuides(panel, step) {
             `da ${Math.min(...colonna).toFixed(2)} a ${Math.max(...colonna).toFixed(2)} mm`
             + ((p.depth_viste || []).length ? `  ·  misurato a ${p.depth_viste.join(', ')} mm` : ''))));
       }
+      // I fotogrammi su cui quella riga e' stata misurata, con sopra la misura.
+      const tracce = p.tracce || [];
+      if (tracce.length) {
+        const fila = el('div', { class: 'thumbs' });
+        for (const t of tracce) {
+          const tutte = proposta.proposte.flatMap((f) => f.tracce || []);
+          const dove = tutte.findIndex((x) => x.image === t.image);
+          fila.append(el('figure', { class: 'thumb-voce', style: 'margin:0' },
+            fotogrammaTracciato(t, proposta.rect, 260,
+              () => visoreTracce(tutte, Math.max(0, dove), proposta.rect)),
+            el('figcaption', {}, `${t.image.split('/').pop()} · ${descriviTraccia(t)}`)));
+        }
+        card.append(fila);
+      }
     }
     if (proposta.misure_senza_depth) {
       card.append(el('div', { class: 'kv' },
@@ -3983,6 +4202,11 @@ function panelGuides(panel, step) {
       }
       panel.append(meno);
     }
+    panel.append(el('p', { class: 'hint' },
+      'sulle immagini: in verde l\'ago misurato e il suo prolungamento, in giallo la verticale '
+      + 'centrale del rettangolo e il punto in cui la incrocia — quel punto e\' esattamente '
+      + 'cio\' che #22 misura; in blu tratteggiato gli altri segmenti che il rilevatore ha '
+      + 'tenuto. Clicca una miniatura per vederla a tutto schermo, frecce per scorrere.'));
     panel.append(el('p', { class: 'hint' }, proposta.avvertenza || ''));
 
     const usa = el('button', {}, 'Porta la proposta nel valore');

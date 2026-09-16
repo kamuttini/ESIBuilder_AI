@@ -4384,7 +4384,35 @@ def api_project_images(project_id: str):
         "forbidden": sorted(_immagini_proibite(project)),
         "planes": {n: (piani.get(n) or {}).get("plane") for n in dentro if piani.get(n)},
         "out": fuori,
+        # Lo stato di ciascuna rispetto alle linee guida: la galleria dell'import e' il posto
+        # dove si guardano le immagini, quindi e' li' che ha senso vedere quali finiscono
+        # nello studio e correggere la scelta -- non in un elenco di nomi dentro un altro step.
+        "guides": _stato_guide(project),
     })
+
+
+def _stato_guide(project: Project) -> Dict:
+    """Che cosa e' entrato nello studio delle linee guida, e per decisione di chi.
+
+    «Guardata» e «usata» non sono la stessa cosa: il rilevatore severo tace sui fotogrammi
+    dove non riconosce un ago, e quel silenzio e' il motivo per cui un'immagine di
+    calibrazione buona puo' non contare. Chi guarda deve poter distinguere i due casi, se no
+    l'unica correzione possibile e' a tentoni.
+    """
+    guide = project.step_value("guides") or {}
+    proposta = guide.get("proposal") or {}
+    scelta = _selezione_guide(project)
+    scan = (project.step_value("import") or {}).get("needle_scan") or {}
+    proposte_dal_modello = [str(v.get("name")) for v in (scan.get("images") or [])
+                            if v.get("verdict") and v.get("verdict") != "no"]
+    return {
+        "usate": list(proposta.get("usate") or []),
+        "guardate": list(proposta.get("guardate") or []),
+        "proposte": proposte_dal_modello,
+        "include": scelta["include"],
+        "exclude": scelta["exclude"],
+        "at": proposta.get("at") or "",
+    }
 
 
 # --------------------------------------------------------------------- aghi
@@ -4591,6 +4619,14 @@ def _ratios_di_scala(scala: Dict) -> Tuple[List[float], List[float], str, List[s
             stati)
 
 
+def _selezione_guide(project: Project) -> Dict[str, List[str]]:
+    """I fotogrammi che chi guarda ha aggiunto o tolto a mano dallo studio delle linee guida."""
+    valore = (project.step_value("guides") or {}).get("selezione") or {}
+    dentro = [str(n) for n in (valore.get("include") or [])]
+    fuori = [str(n) for n in (valore.get("exclude") or [])]
+    return {"include": dentro, "exclude": fuori}
+
+
 def _depth_per_fotogramma(scala: Dict) -> Dict[str, float]:
     """Nome immagine -> depth letta nel suo riquadro, dove la rilettura e' passata."""
     fuori: Dict[str, float] = {}
@@ -4680,6 +4716,7 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
             prefisso = "" if cartella["folder"] == "." else cartella["folder"] + os.sep
             dentro_cartelle.extend(sorted(n for n in nomi if n.startswith(prefisso)))
 
+        scelta = _selezione_guide(project)
         if len(dentro_cartelle) <= GUIDES_MEASURE_ALL_UNDER:
             candidati: List[str] = dentro_cartelle
             scelta_fotogrammi = f"tutti i fotogrammi delle cartelle proposte ({len(candidati)})"
@@ -4694,6 +4731,15 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
                     dentro = sorted(n for n in nomi if n.startswith(prefisso))
                     passo = max(1, len(dentro) // per_folder)
                     candidati.extend(dentro[::passo][:per_folder])
+
+        # La mano di chi guarda viene per ultima: aggiunge i fotogrammi che la ricerca non ha
+        # proposto e toglie quelli che non vanno, e nessuna delle due cose deve essere disfatta
+        # dalla misura successiva.
+        aggiunti = [n for n in scelta["include"] if n in nomi and n not in candidati]
+        candidati = [n for n in candidati if n not in scelta["exclude"]] + aggiunti
+        if aggiunti or scelta["exclude"]:
+            scelta_fotogrammi += (f", {len(aggiunti)} aggiunti e "
+                                  f"{len(scelta['exclude'])} esclusi a mano")
 
         _job_update(job_id, stage="misura degli aghi", total=len(candidati))
         box = (int(rect["left"]), int(rect["top"]), int(rect["right"]), int(rect["bottom"]))
@@ -4788,6 +4834,13 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
                 "verdetto": ("concorde" if len(gruppo) >= 3 and spread <= 2.0
                              else "da verificare" if len(gruppo) >= 2 else "un solo fotogramma"),
                 "immagini": [g["image"] for g in gruppo[:6]],
+                "tracce": [{"image": g["image"], "p1": g.get("p1"), "p2": g.get("p2"),
+                            "crossing": g.get("crossing"), "size": g.get("size"),
+                            "angolo": round(float(g["angle"]), 3),
+                            "distanza": round(float(g["distance"]), 3),
+                            "depth_mm": g.get("depth_mm"),
+                            "altri": (g.get("needles") or [])[1:]}
+                           for g in gruppo],
                 "depth_viste": sorted({round(d, 1) for d, _ in punti}),
                 # #22 e' proporzionale ai millimetri per pixel: una scala non confermata alla
                 # depth del fotogramma si porta dietro il proprio errore, tale e quale. Su una
@@ -4821,6 +4874,12 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
             "ratio_fonte": fonte_ratio,
             "misure_senza_depth": senza_depth,
             "scelta_fotogrammi": scelta_fotogrammi,
+            # Serve alla galleria dell'import: la differenza fra «guardata» e «usata» e'
+            # l'unica cosa che spiega perche' un fotogramma non conta, e senza vederla non
+            # si puo' correggere la selezione.
+            "guardate": candidati,
+            "usate": [m["image"] for m in misure],
+            "rect": {"left": box[0], "top": box[1], "right": box[2], "bottom": box[3]},
             "at": datetime.now().isoformat(timespec="seconds"),
             "avvertenza": ("Sui 66 fotogrammi etichettati a mano il rilevatore risponde su 42 e "
                            "tace sugli altri: di quelle 42 risposte il 45% cade entro 1 grado e il "
@@ -4838,6 +4897,39 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
         _job_update(job_id, status="done", stage="fatto", result=risultato)
     except Exception as errore:
         _job_update(job_id, status="error", stage=str(errore), error=str(errore))
+
+
+@app.post("/api/projects/<project_id>/guides/selection")
+def api_guides_selection(project_id: str):
+    """Aggiunge o toglie un fotogramma dallo studio delle linee guida.
+
+    Non tocca la proposta gia' calcolata: dice solo che cosa guardare la volta dopo. Il valore
+    dello step non viene invalidato, perche' questa e' una correzione dell'ingresso, non un
+    cambio della riga #22/#23 gia' confermata.
+    """
+    project = _project(project_id)
+    nome = str(_payload().get("name") or "").strip()
+    stato = str(_payload().get("state") or "").strip()
+    if not nome:
+        return jsonify({"error": "manca il nome dell'immagine"}), 400
+    if stato not in ("include", "exclude", "auto"):
+        return jsonify({"error": "stato: include, exclude o auto"}), 400
+    if nome not in set(project.dedup_names()):
+        return jsonify({"error": "immagine non nel progetto"}), 400
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        scelta = dict(value.get("selezione") or {})
+        dentro = [n for n in (scelta.get("include") or []) if n != nome]
+        fuori = [n for n in (scelta.get("exclude") or []) if n != nome]
+        if stato == "include":
+            dentro.append(nome)
+        elif stato == "exclude":
+            fuori.append(nome)
+        value["selezione"] = {"include": sorted(dentro), "exclude": sorted(fuori)}
+        return value
+
+    valore = _write_step(project_id, "guides", mutate, invalidate=False)
+    return jsonify({"selezione": valore.get("selezione") or {}})
 
 
 @app.post("/api/projects/<project_id>/guides/propose")
