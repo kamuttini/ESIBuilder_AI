@@ -105,6 +105,37 @@ def line_across_rect(p1: Sequence[float], p2: Sequence[float],
     return (tagliato[0] + left, tagliato[1] + top, tagliato[2] + left, tagliato[3] + top)
 
 
+def measure_from_line(p1: Sequence[float], p2: Sequence[float],
+                      rect: Tuple[int, int, int, int], ratio_x: float, ratio_y: float,
+                      size: Optional[Sequence[int]] = None) -> Dict:
+    """Da due punti sul fotogramma ad angolo e distanza, la strada del legacy.
+
+    E' il pezzo di `measure` che non guarda l'immagine: serve anche quando la retta la
+    corregge una persona invece del rilevatore, e il numero che ne esce deve nascere dalla
+    stessa formula -- se no la correzione e la misura non sarebbero confrontabili.
+    """
+    left, top, right, bottom = rect
+    fx1, fy1 = float(p1[0]), float(p1[1])
+    fx2, fy2 = float(p2[0]), float(p2[1])
+    x1, y1, x2, y2 = fx1 - left, fy1 - top, fx2 - left, fy2 - top
+    angle = math.degrees(math.atan2((y2 - y1) * ratio_y, (x2 - x1) * ratio_x))
+
+    centre_x = (right - left) / 2.0
+    y_at_centre = None
+    if abs(x2 - x1) < 1e-6:
+        distance = (x1 + 1) * ratio_x - centre_x * ratio_x
+    else:
+        y_at_centre = y1 + (y2 - y1) * (centre_x - x1) / (x2 - x1)
+        distance = (y_at_centre + 1) * ratio_y
+    retta = line_across_rect((fx1, fy1), (fx2, fy2), rect)
+    return {"angle": angle, "distance": distance,
+            "p1": [fx1, fy1], "p2": [fx2, fy2],
+            "line": [round(v, 2) for v in retta] if retta else None,
+            "crossing": ([float(centre_x + left), float(y_at_centre + top)]
+                         if y_at_centre is not None else None),
+            "size": [int(size[0]), int(size[1])] if size else None}
+
+
 def measure(frame: Path, rect: Tuple[int, int, int, int], ratio_x: float, ratio_y: float,
             strict: bool = True) -> Optional[Dict[str, float]]:
     """Angle in degrees and centre distance in millimetres, the legacy way.
@@ -125,33 +156,18 @@ def measure(frame: Path, rect: Tuple[int, int, int, int], ratio_x: float, ratio_
     if not needles:
         return None
     needle = needles[0]
-
-    left, top, right, bottom = rect
-    (fx1, fy1), (fx2, fy2) = needle.p1, needle.p2
-    x1, y1, x2, y2 = fx1 - left, fy1 - top, fx2 - left, fy2 - top
-    angle = math.degrees(math.atan2((y2 - y1) * ratio_y, (x2 - x1) * ratio_x))
-
-    centre_x = (right - left) / 2.0
-    y_at_centre = None
-    if abs(x2 - x1) < 1e-6:
-        distance = (x1 + 1) * ratio_x - centre_x * ratio_x
-    else:
-        y_at_centre = y1 + (y2 - y1) * (centre_x - x1) / (x2 - x1)
-        distance = (y_at_centre + 1) * ratio_y
-    # I punti tornano in coordinate del fotogramma, non del ritaglio: servono a disegnare la
+    # I punti stanno in coordinate del fotogramma, non del ritaglio: servono a disegnare la
     # misura sopra l'immagine cosi' com'e', ed e' l'unico modo di controllarla guardandola.
-    retta = line_across_rect((fx1, fy1), (fx2, fy2), rect)
-    return {"angle": angle, "distance": distance,
-            "confidence": float(getattr(needle, "source_score", 0.0)),
-            "p1": [float(fx1), float(fy1)], "p2": [float(fx2), float(fy2)],
-            "line": [round(v, 2) for v in retta] if retta else None,
-            "crossing": ([float(centre_x + left), float(y_at_centre + top)]
-                         if y_at_centre is not None else None),
-            "size": [int(gray.shape[1]), int(gray.shape[0])],
-            "needles": [[float(n.p1[0]), float(n.p1[1]), float(n.p2[0]), float(n.p2[1])]
-                        for n in needles],
-            "lines": [[round(v, 2) for v in r] for r in
-                      (line_across_rect(n.p1, n.p2, rect) for n in needles) if r]}
+    misura = measure_from_line(needle.p1, needle.p2, rect, ratio_x, ratio_y,
+                               (gray.shape[1], gray.shape[0]))
+    misura.update({
+        "confidence": float(getattr(needle, "source_score", 0.0)),
+        "needles": [[float(n.p1[0]), float(n.p1[1]), float(n.p2[0]), float(n.p2[1])]
+                    for n in needles],
+        "lines": [[round(v, 2) for v in r] for r in
+                  (line_across_rect(n.p1, n.p2, rect) for n in needles) if r],
+    })
+    return misura
 
 
 def main() -> int:

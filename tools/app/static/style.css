@@ -1394,8 +1394,19 @@ img.depth-crop {
 
 /* La misura disegnata sopra il fotogramma: l'ago trovato, il suo prolungamento fino alla
    verticale centrale e il punto in cui la incrocia, che e' esattamente cio' che #22 misura. */
-.traccia { position: relative; display: block; }
+/* Il riquadro deve valere *esattamente* l'immagine: l'SVG ci sta sopra a inset 0, e se il
+   contenitore fosse piu' largo dell'immagine (a tutto schermo l'immagine si rimpicciolisce
+   per starci dentro) il disegno finirebbe spostato rispetto a quello che mostra. */
+.traccia { position: relative; display: block; line-height: 0; }
+.traccia img { display: block; }
 .traccia svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.thumbs .traccia { width: 100%; }
+.thumbs .traccia img { width: 100%; }
+.piani-pieno-scena .traccia { display: inline-flex; max-width: 100%; max-height: 100%; }
+.piani-pieno-scena .traccia img {
+  width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain;
+}
+.piani-pieno-testa select { padding: 4px 6px; }
 /* Spessori e trattini arrivano come attributi dal disegno, non da qui: sono in unita' del
    fotogramma (1920 di larghezza), e una regola CSS li vincerebbe rimettendoli a due pixel
    dell'immagine -- cioe' un decimo di pixel sullo schermo, invisibili. */

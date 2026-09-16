@@ -4067,29 +4067,196 @@ function descriviTraccia(t) {
     + (t.depth_mm ? `  ·  depth ${t.depth_mm} mm` : '  ·  depth non letta');
 }
 
-/* Pieno schermo sulle tracce, con le frecce per scorrerle: le stesse della galleria delle
-   immagini, perche' chi le ha imparate li' non deve impararle una seconda volta. */
-function visoreTracce(tracce, partenza, rect) {
+/* Il visore delle linee guida e' anche l'editor.
+
+   Il rilevatore prende l'ago giusto poco piu' di una volta su due, e finora l'unica risposta
+   possibile era togliere il fotogramma dallo studio: si perdeva un angolo intero per un errore
+   di tre gradi. Qui la retta si ridisegna, che e' esattamente quello che faceva l'operatore
+   del vecchio ESIBuilder -- ricalcava l'ago, e basta.
+
+   La retta si tiene come (punto sulla verticale centrale, inclinazione), non come due estremi,
+   perche' quelle due cose *sono* #22 e #23: trascinando il punto giallo cambia solo la
+   distanza, ruotando intorno a lui cambia solo l'angolo, e nessuno dei due tocca l'altro. Gli
+   estremi si ricavano tagliando sul rettangolo, come nel legacy. */
+function visoreTracce(tracce, partenza, rect, onCorretto) {
   if (!tracce.length) return;
-  let indice = Math.max(0, Math.min(Number(partenza) || 0, tracce.length - 1));
+  // copia locale: dopo un salvataggio le tracce arrivano ricalcolate dal server, e il visore
+  // deve mostrare quelle -- restando aperto sullo stesso fotogramma
+  let elenco = tracce.slice();
+  let indice = Math.max(0, Math.min(Number(partenza) || 0, elenco.length - 1));
+  let disegno = true;
+  let modifica = null;     // { cx, cy, ang } in coordinate del fotogramma, null = non toccata
+  let passo = 0.5;
+
   const pieno = el('div', { class: 'piani-pieno' });
   const testa = el('div', { class: 'piani-pieno-testa' });
   const scena = el('div', { class: 'piani-pieno-scena' });
   const info = el('span', { class: 'hint' });
+  const misura = el('span', { class: 'hint' });
   const indietro = el('button', { class: 'ghost sq', title: 'precedente' }, '‹');
   const avanti = el('button', { class: 'ghost sq', title: 'successiva' }, '›');
+  const vedi = el('button', { class: 'ghost', title: 'mostra o nasconde il disegno (tasto O)' },
+    'disegno: acceso');
   const chiudi = el('button', { class: 'ghost' }, 'chiudi (Esc)');
-  const mostra = () => {
-    const t = tracce[indice];
-    scena.innerHTML = '';
-    scena.append(fotogrammaTracciato(t, rect, 1600, null));
-    info.textContent = `${indice + 1} di ${tracce.length} · ${t.image.split('/').pop()} · ${descriviTraccia(t)}`;
-    indietro.disabled = tracce.length < 2;
-    avanti.disabled = tracce.length < 2;
+
+  const traccia = () => elenco[indice];
+  const ratioY = (t) => Number(t.ratio_y) || Number(t.ratio_x) || 0;
+  const ratioX = (t) => Number(t.ratio_x) || ratioY(t);
+
+  // dalla retta corrente (o da quella misurata) al punto sulla verticale e all'inclinazione
+  const statoDi = (t) => {
+    if (modifica) return modifica;
+    const seg = t.linea || (t.p1 && t.p2 ? [t.p1[0], t.p1[1], t.p2[0], t.p2[1]] : null);
+    if (!seg) return null;
+    const ang = Math.atan2(seg[3] - seg[1], seg[2] - seg[0]);
+    const cx = (rect.left + rect.right) / 2;
+    const cy = t.crossing ? t.crossing[1]
+      : seg[1] + (seg[3] - seg[1]) * ((cx - seg[0]) / ((seg[2] - seg[0]) || 1e-6));
+    return { cx, cy, ang };
   };
-  const vai = (passo) => {
-    if (tracce.length < 2) return;
-    indice = (indice + passo + tracce.length) % tracce.length;
+
+  // la retta tagliata sui quattro lati: la stessa cosa che fa il server, qui solo per vederla
+  const estremi = (s) => {
+    const dx = Math.cos(s.ang), dy = Math.sin(s.ang);
+    let t0 = -1e9, t1 = 1e9;
+    for (const [p, q] of [[-dx, s.cx - rect.left], [dx, rect.right - s.cx],
+                          [-dy, s.cy - rect.top], [dy, rect.bottom - s.cy]]) {
+      if (Math.abs(p) < 1e-9) { if (q < 0) return null; continue; }
+      const t = q / p;
+      if (p < 0) t0 = Math.max(t0, t); else t1 = Math.min(t1, t);
+    }
+    if (t0 > t1) return null;
+    return [s.cx + t0 * dx, s.cy + t0 * dy, s.cx + t1 * dx, s.cy + t1 * dy];
+  };
+
+  // i due numeri che si stanno modificando, con la formula della misura
+  const numeri = (t, s) => {
+    const rx = ratioX(t), ry = ratioY(t);
+    const ang = Math.atan2(Math.sin(s.ang) * ry, Math.cos(s.ang) * rx) * 180 / Math.PI;
+    return { angolo: ang, distanza: (s.cy - rect.top + 1) * ry };
+  };
+
+  const disegnata = (t) => {
+    const s = statoDi(t);
+    if (!modifica || !s) return t;
+    const linea = estremi(s);
+    return { ...t, linea, crossing: [s.cx, s.cy], p1: null, p2: null,
+             altri: [], altre_linee: t.altre_linee };
+  };
+
+  const salva = el('button', { class: 'ghost' }, 'Salva la correzione');
+  const auto = el('button', { class: 'ghost' }, 'Torna all\'automatico');
+  const annulla = el('button', { class: 'ghost' }, 'Annulla');
+
+  const mostra = () => {
+    const t = traccia();
+    scena.innerHTML = '';
+    const figura = fotogrammaTracciato(disegno ? disegnata(t) : { ...t, linea: null, p1: null, p2: null, crossing: null, altri: [], altre_linee: [] },
+      disegno ? rect : null, 1600, null);
+    figura.classList.add('traccia-grande');
+    scena.append(figura);
+    trascinamento(figura);
+    info.textContent = `${indice + 1} di ${elenco.length} · ${t.image.split('/').pop()}`;
+    const s = statoDi(t);
+    if (s) {
+      const n = numeri(t, s);
+      misura.textContent = `#23 ${n.angolo.toFixed(2)}°  ·  #22 ${n.distanza.toFixed(2)} mm`
+        + (modifica ? '  · modificata, non ancora salvata' : t.corretto ? '  · corretta a mano' : '');
+    } else misura.textContent = '';
+    vedi.textContent = disegno ? 'disegno: acceso' : 'disegno: spento';
+    salva.disabled = !modifica;
+    annulla.disabled = !modifica;
+    auto.disabled = !t.corretto;
+    indietro.disabled = elenco.length < 2;
+    avanti.disabled = elenco.length < 2;
+  };
+
+  // trascinare: sul punto giallo si sposta la retta, altrove la si ruota intorno a lui
+  const trascinamento = (figura) => {
+    if (!disegno) return;
+    const img = figura.querySelector('img');
+    const dove = (evento) => {
+      const box = img.getBoundingClientRect();
+      const t = traccia();
+      const [w, h] = t.size || [1920, 1080];
+      return { x: (evento.clientX - box.left) / box.width * w,
+               y: (evento.clientY - box.top) / box.height * h };
+    };
+    let modo = null;
+    figura.style.cursor = 'crosshair';
+    figura.addEventListener('pointerdown', (evento) => {
+      const t = traccia();
+      const s = statoDi(t);
+      if (!s) return;
+      const p = dove(evento);
+      const vicino = Math.hypot(p.x - s.cx, p.y - s.cy) < (t.size ? t.size[0] / 40 : 40);
+      modo = vicino ? 'sposta' : 'ruota';
+      modifica = { ...s };
+      figura.setPointerCapture(evento.pointerId);
+      evento.preventDefault();
+    });
+    figura.addEventListener('pointermove', (evento) => {
+      if (!modo) return;
+      const p = dove(evento);
+      if (modo === 'sposta') {
+        modifica = { ...modifica, cy: Math.min(rect.bottom, Math.max(rect.top, p.y)) };
+      } else {
+        modifica = { ...modifica, ang: Math.atan2(p.y - modifica.cy, p.x - modifica.cx) };
+        if (Math.cos(modifica.ang) < 0) modifica.ang += Math.PI;   // la retta non ha verso
+      }
+      aggiornaDisegno();
+    });
+    const fine = () => { modo = null; mostra(); };
+    figura.addEventListener('pointerup', fine);
+    figura.addEventListener('pointercancel', fine);
+  };
+
+  // ridisegna solo l'SVG durante il trascinamento: ricaricare l'immagine a ogni pixel
+  // farebbe lampeggiare tutto
+  const aggiornaDisegno = () => {
+    const figura = scena.querySelector('.traccia');
+    if (!figura) return;
+    const t = traccia();
+    const vecchio = figura.querySelector('svg');
+    const larghezza = Math.round(figura.getBoundingClientRect().width);
+    if (vecchio) vecchio.remove();
+    figura.insertAdjacentHTML('beforeend', svgTraccia(disegnata(t), rect, larghezza));
+    const s = statoDi(t);
+    if (s) {
+      const n = numeri(t, s);
+      misura.textContent = `#23 ${n.angolo.toFixed(2)}°  ·  #22 ${n.distanza.toFixed(2)} mm`
+        + '  · modificata, non ancora salvata';
+    }
+    salva.disabled = false;
+    annulla.disabled = false;
+  };
+
+  const ritocca = (dAngolo, dDistanza) => {
+    const t = traccia();
+    const s = statoDi(t);
+    if (!s) return;
+    const rx = ratioX(t), ry = ratioY(t);
+    let ang = s.ang;
+    if (dAngolo) {
+      // si ritocca #23, che vive nei millimetri: si torna ai pixel con gli stessi ratio
+      const inMm = Math.atan2(Math.sin(ang) * ry, Math.cos(ang) * rx) + dAngolo * Math.PI / 180;
+      ang = Math.atan2(Math.sin(inMm) / (ry || 1), Math.cos(inMm) / (rx || 1));
+    }
+    const cy = s.cy + (dDistanza && ry ? dDistanza / ry : 0);
+    modifica = { cx: s.cx, cy: Math.min(rect.bottom, Math.max(rect.top, cy)), ang };
+    mostra();
+  };
+
+  const bottoncino = (testo, titolo, azione) => {
+    const b = el('button', { class: 'ghost sq2', title: titolo }, testo);
+    b.addEventListener('click', azione);
+    return b;
+  };
+
+  const vai = (delta) => {
+    if (elenco.length < 2) return;
+    modifica = null;
+    indice = (indice + delta + elenco.length) % elenco.length;
     mostra();
   };
   const chiudiOra = () => { window.removeEventListener('keydown', tasti); pieno.remove(); };
@@ -4097,11 +4264,59 @@ function visoreTracce(tracce, partenza, rect) {
     if (evento.key === 'ArrowLeft') { evento.preventDefault(); vai(-1); }
     else if (evento.key === 'ArrowRight') { evento.preventDefault(); vai(1); }
     else if (evento.key === 'Escape') { evento.preventDefault(); chiudiOra(); }
+    else if (evento.key === 'o' || evento.key === 'O') {
+      evento.preventDefault(); disegno = !disegno; mostra();
+    }
   };
+
+  const manda = async (corpo, messaggio) => {
+    salva.disabled = true; auto.disabled = true;
+    try {
+      const esito = await api(`/projects/${state.projectId}/guides/correction`, { body: corpo });
+      modifica = null;
+      // le tracce tornano ricalcolate: si riprendono per nome, cosi' il visore mostra il
+      // risultato del salvataggio invece dei numeri di prima
+      const proposta = esito.proposal || {};
+      const fresche = (proposta.proposte || []).concat(proposta.incerte || [])
+        .flatMap((f) => f.tracce || []);
+      elenco = elenco.map((t) => fresche.find((n) => n.image === t.image) || t);
+      toast(messaggio);
+      if (onCorretto) onCorretto(proposta);
+    } catch (errore) { toast(errore.message, true); }
+    finally { mostra(); }
+  };
+
+  salva.addEventListener('click', () => {
+    const t = traccia();
+    const s = statoDi(t);
+    const ends = s && estremi(s);
+    if (!ends) return;
+    manda({ name: t.image, p1: [ends[0], ends[1]], p2: [ends[2], ends[3]] },
+      'retta corretta: la proposta e\' stata ricalcolata');
+  });
+  auto.addEventListener('click', () => {
+    manda({ name: traccia().image, reset: true },
+      'torna alla misura automatica su questo fotogramma');
+  });
+  annulla.addEventListener('click', () => { modifica = null; mostra(); });
+  vedi.addEventListener('click', () => { disegno = !disegno; mostra(); });
   indietro.addEventListener('click', () => vai(-1));
   avanti.addEventListener('click', () => vai(1));
   chiudi.addEventListener('click', chiudiOra);
-  testa.append(indietro, avanti, info, chiudi);
+
+  const passoScelta = el('select', {});
+  for (const v of [0.1, 0.5, 1, 2]) passoScelta.append(el('option', { value: v }, `passo ${v}`));
+  passoScelta.value = String(passo);
+  passoScelta.addEventListener('change', () => { passo = Number(passoScelta.value) || 0.5; });
+
+  testa.append(indietro, avanti, info, vedi,
+    el('span', { class: 'hint' }, '#23'),
+    bottoncino('−', 'ruota di meno (gradi)', () => ritocca(-passo, 0)),
+    bottoncino('+', 'ruota di piu\' (gradi)', () => ritocca(passo, 0)),
+    el('span', { class: 'hint' }, '#22'),
+    bottoncino('−', 'alza il punto sulla verticale (mm)', () => ritocca(0, -passo)),
+    bottoncino('+', 'abbassa il punto sulla verticale (mm)', () => ritocca(0, passo)),
+    passoScelta, misura, salva, annulla, auto, chiudi);
   pieno.append(testa, scena);
   document.body.append(pieno);
   window.addEventListener('keydown', tasti);
@@ -4187,7 +4402,7 @@ function panelGuides(panel, step) {
           const dove = tutte.findIndex((x) => x.image === t.image);
           fila.append(el('figure', { class: 'thumb-voce', style: 'margin:0' },
             fotogrammaTracciato(t, proposta.rect, 260,
-              () => visoreTracce(tutte, Math.max(0, dove), proposta.rect)),
+              () => visoreTracce(tutte, Math.max(0, dove), proposta.rect, () => reload())),
             el('figcaption', {}, `${t.image.split('/').pop()} · ${descriviTraccia(t)}`)));
         }
         card.append(fila);

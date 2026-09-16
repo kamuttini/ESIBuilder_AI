@@ -4666,10 +4666,108 @@ def _retta_in_depth(punti: Sequence[Tuple[float, float]]) -> Tuple[float, float,
             "pendenza tipica (una sola depth)")
 
 
+def _famiglie_da_misure(misure: Sequence[Dict], depths: Sequence[float],
+                        con_stato_scala: bool, cieca: bool) -> Tuple[List[Dict], List[Dict]]:
+    """Dalle misure per fotogramma alle famiglie di linee guida: una voce di #23, una colonna
+    di #22.
+
+    Sta fuori dal job perche' la stessa cosa serve due volte: quando si misura, e quando si
+    corregge una riga a mano -- e correggere non deve voler dire rimisurare tutto da capo.
+    """
+    # Due misure finiscono nella stessa famiglia se hanno lo stesso angolo -- ma *mai* se
+    # vengono da due fotogrammi presi alla stessa depth. La sessione di calibrazione del
+    # vecchio ESIBuilder e' una griglia angolo x depth con una immagine per casella: due
+    # immagini alla stessa depth sono due angoli diversi, anche quando il rilevatore le
+    # misura vicine. Senza questa regola, correggere una riga di tre gradi poteva farla
+    # cadere dentro la tolleranza della riga accanto e far sparire un angolo intero di #23.
+    gruppi: List[List[Dict]] = []
+    for m in sorted(misure, key=lambda m: m["angle"]):
+        sua = m.get("depth_mm")
+        for gruppo in gruppi:
+            mediana = sorted(g["angle"] for g in gruppo)[len(gruppo) // 2]
+            if abs(m["angle"] - mediana) > 4.0:
+                continue
+            if sua is not None and any(g.get("depth_mm") == sua for g in gruppo):
+                continue
+            gruppo.append(m)
+            break
+        else:
+            gruppi.append([m])
+    gruppi.sort(key=lambda g: -len(g))
+
+    proposte = []
+    for gruppo in gruppi:
+        angoli = sorted(g["angle"] for g in gruppo)
+        distanze = sorted(g["distance"] for g in gruppo)
+        spread = angoli[-1] - angoli[0]
+        mediana_distanza = distanze[len(distanze) // 2]
+
+        # #22 non e' un numero solo: cresce con la depth, e nel legacy lo fa quasi per
+        # retta. Con misure ad almeno due depth la retta si stima da qui; con una sola
+        # si usa la pendenza tipica. Senza nessuna depth nota resta il valore ripetuto.
+        punti = [(float(g["depth_mm"]), float(g["distance"]))
+                 for g in gruppo if g.get("depth_mm")]
+        quota, pendenza, modo = _retta_in_depth(punti)
+        if punti and depths:
+            colonna = [round(max(0.0, quota + pendenza * d), 3) for d in depths]
+        else:
+            colonna = [round(mediana_distanza, 3) for _ in (list(depths) or [None])]
+            modo = "depth dei fotogrammi non note: valore ripetuto"
+
+        a_mano = sum(1 for g in gruppo if g.get("corretto"))
+        proposte.append({
+            "angolo": round(angoli[len(angoli) // 2], 3),
+            "distanza": round(mediana_distanza, 3),
+            "distanze": colonna,
+            "andamento": modo,
+            "pendenza": round(pendenza, 5),
+            "fotogrammi": len(gruppo),
+            "corrette": a_mano,
+            "dispersione": round(spread, 2),
+            "verdetto": ("corretta a mano" if a_mano == len(gruppo)
+                         else "concorde" if len(gruppo) >= 3 and spread <= 2.0
+                         else "da verificare" if len(gruppo) >= 2 else "un solo fotogramma"),
+            "immagini": [g["image"] for g in gruppo[:6]],
+            "tracce": [{"image": g["image"], "p1": g.get("p1"), "p2": g.get("p2"),
+                        "crossing": g.get("crossing"), "size": g.get("size"),
+                        "angolo": round(float(g["angle"]), 3),
+                        "distanza": round(float(g["distance"]), 3),
+                        "depth_mm": g.get("depth_mm"),
+                        # l'ago e' una retta dentro il rettangolo, non il tratto che il
+                        # rilevatore ha visto: si disegna quella, e il tratto sopra
+                        "linea": g.get("line"),
+                        "altre_linee": (g.get("lines") or [])[1:],
+                        "altri": (g.get("needles") or [])[1:],
+                        "ratio_x": g.get("ratio_x_usato"), "ratio_y": g.get("ratio_usato"),
+                        "corretto": bool(g.get("corretto"))}
+                       for g in gruppo],
+            "depth_viste": sorted({round(d, 1) for d, _ in punti}),
+            # #22 e' proporzionale ai millimetri per pixel: una scala non confermata alla
+            # depth del fotogramma si porta dietro il proprio errore, tale e quale. Su una
+            # configurazione con il legacy a fianco il ratio era il 12% sotto, e le quattro
+            # distanze proposte erano tutte e quattro il 12% sotto.
+            "scala_confermata": all(str(g.get("ratio_stato") or "") == "accepted"
+                                    for g in gruppo) if con_stato_scala else None,
+            "ratio_usato": sorted({round(float(g.get("ratio_usato") or 0.0), 6)
+                                   for g in gruppo}),
+        })
+
+    # Una famiglia vista in un solo fotogramma era da nascondere finche' i fotogrammi si
+    # pescavano a passo fisso: dodici ne producevano nove, cioe' nessuna informazione. Con
+    # i fotogrammi scelti dal classificatore e il rilevatore che tace quando non e' sicuro,
+    # un fotogramma per angolo e' invece il caso *normale* -- e' come lavorava il vecchio
+    # ESIBuilder, una immagine per ogni angolo -- e nasconderle vorrebbe dire perdere
+    # meta' della riga #23. Restano sotto "incerte" solo quando la scelta e' stata cieca.
+    if not cieca:
+        return proposte, []
+    return ([p for p in proposte if p["fotogrammi"] >= 2],
+            [p for p in proposte if p["fotogrammi"] < 2])
+
+
 def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
     try:
         sys.path.insert(0, str(REPO_ROOT / "tools" / "needle"))
-        from propose_guide_lines import measure  # noqa: PLC0415
+        from propose_guide_lines import measure, measure_from_line  # noqa: PLC0415
 
         project = _project(project_id)
         rect = ((project.step_value("rect") or {}).get("rect_echo")
@@ -4759,16 +4857,27 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
             ry = ratio_y[indice] if indice < len(ratio_y) and ratio_y[indice] else riferimento
             return rx, ry, profonda, (stati_ratio[indice] if indice < len(stati_ratio) else "")
 
+        # Una retta corretta a mano non si rimisura: il rilevatore su quel fotogramma ha gia'
+        # dato la sua risposta ed e' stata scartata da chi guardava.
+        corrette = (project.step_value("guides") or {}).get("correzioni") or {}
+
         misure = []
         senza_depth = 0
         for done, nome in enumerate(candidati, 1):
             rx, ry, profonda, stato_ratio = ratio_del_fotogramma(nome)
-            trovato = measure(base / nome, box, rx, ry)
+            mano = corrette.get(nome)
+            if mano and mano.get("p1") and mano.get("p2"):
+                trovato = measure_from_line(mano["p1"], mano["p2"], box, rx, ry,
+                                            mano.get("size"))
+                trovato["corretto"] = True
+            else:
+                trovato = measure(base / nome, box, rx, ry)
             if trovato:
                 trovato["image"] = nome
                 trovato["depth_mm"] = profonda
                 trovato["ratio_stato"] = stato_ratio
                 trovato["ratio_usato"] = ry
+                trovato["ratio_x_usato"] = rx
                 misure.append(trovato)
                 senza_depth += profonda is None
             if done % 5 == 0:
@@ -4792,81 +4901,9 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
                     "questo step non copre ancora")
             raise ValueError("nessun ago rilevato nei fotogrammi di calibrazione")
 
-        # un gruppo per famiglia di linee guida: e' una voce di #23
-        gruppi: List[List[Dict]] = []
-        for m in sorted(misure, key=lambda m: m["angle"]):
-            for gruppo in gruppi:
-                mediana = sorted(g["angle"] for g in gruppo)[len(gruppo) // 2]
-                if abs(m["angle"] - mediana) <= 4.0:
-                    gruppo.append(m)
-                    break
-            else:
-                gruppi.append([m])
-        gruppi.sort(key=lambda g: -len(g))
-
-        proposte = []
-        for gruppo in gruppi:
-            angoli = sorted(g["angle"] for g in gruppo)
-            distanze = sorted(g["distance"] for g in gruppo)
-            spread = angoli[-1] - angoli[0]
-            mediana_distanza = distanze[len(distanze) // 2]
-
-            # #22 non e' un numero solo: cresce con la depth, e nel legacy lo fa quasi per
-            # retta. Con misure ad almeno due depth la retta si stima da qui; con una sola
-            # si usa la pendenza tipica. Senza nessuna depth nota resta il valore ripetuto.
-            punti = [(float(g["depth_mm"]), float(g["distance"]))
-                     for g in gruppo if g.get("depth_mm")]
-            quota, pendenza, modo = _retta_in_depth(punti)
-            if punti and depths:
-                colonna = [round(max(0.0, quota + pendenza * d), 3) for d in depths]
-            else:
-                colonna = [round(mediana_distanza, 3) for _ in (depths or [None])]
-                modo = "depth dei fotogrammi non note: valore ripetuto"
-
-            proposte.append({
-                "angolo": round(angoli[len(angoli) // 2], 3),
-                "distanza": round(mediana_distanza, 3),
-                "distanze": colonna,
-                "andamento": modo,
-                "pendenza": round(pendenza, 5),
-                "fotogrammi": len(gruppo),
-                "dispersione": round(spread, 2),
-                "verdetto": ("concorde" if len(gruppo) >= 3 and spread <= 2.0
-                             else "da verificare" if len(gruppo) >= 2 else "un solo fotogramma"),
-                "immagini": [g["image"] for g in gruppo[:6]],
-                "tracce": [{"image": g["image"], "p1": g.get("p1"), "p2": g.get("p2"),
-                            "crossing": g.get("crossing"), "size": g.get("size"),
-                            "angolo": round(float(g["angle"]), 3),
-                            "distanza": round(float(g["distance"]), 3),
-                            "depth_mm": g.get("depth_mm"),
-                            # l'ago e' una retta dentro il rettangolo, non il tratto che il
-                            # rilevatore ha visto: si disegna quella, e il tratto sopra
-                            "linea": g.get("line"),
-                            "altre_linee": (g.get("lines") or [])[1:],
-                            "altri": (g.get("needles") or [])[1:]}
-                           for g in gruppo],
-                "depth_viste": sorted({round(d, 1) for d, _ in punti}),
-                # #22 e' proporzionale ai millimetri per pixel: una scala non confermata alla
-                # depth del fotogramma si porta dietro il proprio errore, tale e quale. Su una
-                # configurazione con il legacy a fianco il ratio era il 12% sotto, e le quattro
-                # distanze proposte erano tutte e quattro il 12% sotto.
-                "scala_confermata": all(str(g.get("ratio_stato") or "") == "accepted"
-                                        for g in gruppo) if stati_ratio else None,
-                "ratio_usato": sorted({round(float(g.get("ratio_usato") or 0.0), 6)
-                                       for g in gruppo}),
-            })
-
-        # Una famiglia vista in un solo fotogramma era da nascondere finche' i fotogrammi si
-        # pescavano a passo fisso: dodici ne producevano nove, cioe' nessuna informazione. Con
-        # i fotogrammi scelti dal classificatore e il rilevatore che tace quando non e' sicuro,
-        # un fotogramma per angolo e' invece il caso *normale* -- e' come lavorava il vecchio
-        # ESIBuilder, una immagine per ogni angolo -- e nasconderle vorrebbe dire perdere
-        # meta' della riga #23. Restano sotto "incerte" solo quando la scelta e' stata cieca.
-        if not scelta_fotogrammi.startswith("a passo fisso"):
-            solide, incerte = proposte, []
-        else:
-            solide = [p for p in proposte if p["fotogrammi"] >= 2]
-            incerte = [p for p in proposte if p["fotogrammi"] < 2]
+        solide, incerte = _famiglie_da_misure(
+            misure, depths, bool(stati_ratio),
+            cieca=scelta_fotogrammi.startswith("a passo fisso"))
 
         risultato = {
             "proposte": solide,
@@ -4901,6 +4938,115 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
         _job_update(job_id, status="done", stage="fatto", result=risultato)
     except Exception as errore:
         _job_update(job_id, status="error", stage=str(errore), error=str(errore))
+
+
+@app.post("/api/projects/<project_id>/guides/correction")
+def api_guides_correction(project_id: str):
+    """La retta di un fotogramma, ridisegnata a mano.
+
+    Il rilevatore sbaglia un fotogramma su due circa, e finora l'unica risposta possibile era
+    togliere quel fotogramma dallo studio: si perdeva un angolo intero per un errore di tre
+    gradi. Qui la retta si corregge e basta, ed e' quello che faceva l'operatore del vecchio
+    ESIBuilder -- ricalcava l'ago a mano, punto.
+
+    Angolo e distanza non arrivano dal client: arrivano dagli stessi due punti passati per la
+    stessa formula della misura automatica, se no una riga corretta e una misurata non
+    sarebbero confrontabili. Le famiglie si ricalcolano subito, senza rimisurare niente.
+    """
+    project = _project(project_id)
+    dati = _payload()
+    nome = str(dati.get("name") or "").strip()
+    if not nome:
+        return jsonify({"error": "manca il nome dell'immagine"}), 400
+    guide = project.step_value("guides") or {}
+    proposta = dict(guide.get("proposal") or {})
+    if not proposta:
+        return jsonify({"error": "nessuna proposta da correggere: lancia prima la misura"}), 400
+
+    azzera = bool(dati.get("reset"))
+    p1, p2 = dati.get("p1"), dati.get("p2")
+    if not azzera and not (isinstance(p1, list) and isinstance(p2, list)
+                           and len(p1) == 2 and len(p2) == 2):
+        return jsonify({"error": "servono i due estremi della retta"}), 400
+
+    rect = proposta.get("rect") or {}
+    box = (int(rect.get("left", 0)), int(rect.get("top", 0)),
+           int(rect.get("right", 0)), int(rect.get("bottom", 0)))
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return jsonify({"error": "la proposta non porta con se' il rettangolo"}), 400
+
+    # le misure di tutti i fotogrammi, come stanno nella proposta
+    per_nome: Dict[str, Dict] = {}
+    for famiglia in list(proposta.get("proposte") or []) + list(proposta.get("incerte") or []):
+        for t in famiglia.get("tracce") or []:
+            per_nome[str(t.get("image"))] = t
+    if nome not in per_nome:
+        return jsonify({"error": "questo fotogramma non e' nella proposta"}), 400
+
+    sys.path.insert(0, str(REPO_ROOT / "tools" / "needle"))
+    from propose_guide_lines import measure, measure_from_line  # noqa: PLC0415
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        tutte = dict(value.get("correzioni") or {})
+        if azzera:
+            tutte.pop(nome, None)
+        else:
+            tutte[nome] = {"p1": [float(p1[0]), float(p1[1])],
+                           "p2": [float(p2[0]), float(p2[1])],
+                           "size": per_nome[nome].get("size"),
+                           "at": datetime.now().isoformat(timespec="seconds")}
+        value["correzioni"] = tutte
+        return value
+
+    valore = _write_step(project_id, "guides", mutate, invalidate=False)
+    correzioni = valore.get("correzioni") or {}
+
+    # si ricostruiscono le misure di tutti i fotogrammi e si ricalcolano le famiglie
+    progetto = _project(project_id)
+    base = progetto.working_dir()
+    misure: List[Dict] = []
+    for altro, t in per_nome.items():
+        rx = float(t.get("ratio_x") or t.get("ratio_y") or 0.0)
+        ry = float(t.get("ratio_y") or rx)
+        mano = correzioni.get(altro)
+        if mano:
+            nuova = measure_from_line(mano["p1"], mano["p2"], box, rx, ry, t.get("size"))
+            nuova["corretto"] = True
+        elif altro == nome:
+            # tornata all'automatico: la si rimisura, e' un fotogramma solo
+            nuova = measure(base / altro, box, rx, ry) or {}
+            if not nuova:
+                continue
+        else:
+            nuova = {"angle": float(t["angolo"]), "distance": float(t["distanza"]),
+                     "p1": t.get("p1"), "p2": t.get("p2"), "line": t.get("linea"),
+                     "crossing": t.get("crossing"), "size": t.get("size"),
+                     "lines": [t.get("linea")] + list(t.get("altre_linee") or []),
+                     "needles": [list(t.get("p1") or []) + list(t.get("p2") or [])]
+                                + list(t.get("altri") or []),
+                     "corretto": bool(t.get("corretto"))}
+        nuova.update({"image": altro, "depth_mm": t.get("depth_mm"),
+                      "ratio_usato": ry, "ratio_x_usato": rx,
+                      "ratio_stato": "accepted" if t.get("scala_confermata") else ""})
+        misure.append(nuova)
+
+    depths = [float(v) for v in (proposta.get("depths") or [])]
+    solide, incerte = _famiglie_da_misure(
+        misure, depths, con_stato_scala=False,
+        cieca=str(proposta.get("scelta_fotogrammi") or "").startswith("a passo fisso"))
+
+    def salva(_p: Project, value: Dict) -> Dict:
+        aggiornata = dict(value.get("proposal") or {})
+        aggiornata.update({"proposte": solide, "incerte": incerte,
+                           "misure": len(misure),
+                           "corrette_a_mano": len(correzioni),
+                           "at": datetime.now().isoformat(timespec="seconds")})
+        value["proposal"] = aggiornata
+        return value
+
+    finale = _write_step(project_id, "guides", salva, invalidate=False)
+    return jsonify({"proposal": finale.get("proposal") or {},
+                    "corrette": len(correzioni)})
 
 
 @app.post("/api/projects/<project_id>/guides/selection")
