@@ -16,6 +16,7 @@ Avvio:
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import io
 import json
@@ -4401,6 +4402,10 @@ NEEDLE_REJECT_BELOW = 0.25
 # aspettare su cartelle enormi, ma se il materiale e' una manciata di immagini saltarne
 # una significa non trovarlo.
 NEEDLE_SCAN_ALL_UNDER = 400
+# Sotto questa taglia le linee guida misurano ogni fotogramma delle cartelle proposte invece
+# di fidarsi della selezione: misurare costa poco, e il rilevatore severo e' esso stesso il
+# filtro (4 risposte su 66 immagini, tutte e sole quelle di calibrazione).
+GUIDES_MEASURE_ALL_UNDER = 400
 
 
 def _needle_policy() -> Dict[str, float]:
@@ -4543,6 +4548,88 @@ def api_import_needle(project_id: str):
 # centrale. Nel vecchio ESIBuilder l'operatore ricalcava l'ago; qui l'ago si misura da solo e
 # la proposta arriva con le prove, perche' la precisione di oggi non regge una conferma cieca.
 
+# La pendenza con cui #22 cresce con la depth, misurata su 853 colonne dei 380 setup legacy
+# leggibili: mediana +0.01536 mm per mm di depth (p10 +0.0016, p90 +0.0625, praticamente mai
+# negativa). Serve quando le misure stanno tutte alla stessa depth e la retta non si puo'
+# stimare: predire le altre depth con questa pendenza sbaglia 0.34 mm mediani contro gli 0.52
+# del valore ripetuto uguale.
+PENDENZA_DEPTH = 0.01536
+PENDENZA_MAX = 0.08          # p90 legacy 0.0625: oltre, la retta l'ha stimata il rumore
+
+
+def _ratios_di_scala(scala: Dict) -> Tuple[List[float], List[float], str, List[str]]:
+    """#19/#20, e se lo step non li ha consolidati, gli stessi numeri da dove nascono.
+
+    Il modulo scala misura `mm_per_px` depth per depth e li scrive in `scale_per_depth.csv`;
+    li consolida nelle righe #19/#20 solo alla fine, e se la riga #21 resta incompleta le
+    righe non escono affatto -- lo step resta senza ratio pur avendo la misura, e le linee
+    guida si fermavano li'. Verificato sui progetti che hanno entrambi (prova_7, prova_10,
+    prova_9): i due valori coincidono cifra per cifra.
+    """
+    cartella = (scala.get("scale_module") or {}).get("output_dir")
+    percorso = Path(cartella) / "scale_per_depth.csv" if cartella else None
+    letti: List[float] = []
+    stati: List[str] = []
+    if percorso and percorso.is_file():
+        with percorso.open(newline="", encoding="utf-8") as handle:
+            for riga in csv.DictReader(handle):
+                try:
+                    letti.append(float(riga["mm_per_px"]))
+                except (KeyError, TypeError, ValueError):
+                    letti.append(0.0)
+                stati.append(str(riga.get("status") or ""))
+
+    ratio_y = [float(v) for v in (scala.get("pixel_ratio_y") or [])]
+    ratio_x = [float(v) for v in (scala.get("pixel_ratio_x") or [])] or list(ratio_y)
+    if ratio_y:
+        return ratio_x, ratio_y, "righe #19/#20", stati
+    if not any(letti):
+        return [], [], "", []
+    accettate = sum(1 for s in stati if s == "accepted")
+    return (list(letti), list(letti),
+            f"misura per depth non consolidata ({accettate} depth su {len(letti)} accettate)",
+            stati)
+
+
+def _depth_per_fotogramma(scala: Dict) -> Dict[str, float]:
+    """Nome immagine -> depth letta nel suo riquadro, dove la rilettura e' passata."""
+    fuori: Dict[str, float] = {}
+    for nome, lettura in (scala.get("depth_box_reads") or {}).items():
+        try:
+            valore = float((lettura or {}).get("depth_mm"))
+        except (TypeError, ValueError):
+            continue
+        if valore > 0:
+            fuori[str(nome)] = valore
+    return fuori
+
+
+def _retta_in_depth(punti: Sequence[Tuple[float, float]]) -> Tuple[float, float, str]:
+    """(quota, pendenza) di #22 lungo la depth, piu' come e' stata ottenuta.
+
+    Sui setup legacy #22 segue la depth quasi per retta (correlazione mediana +0.986, |r|>0.8
+    nell'84% delle colonne): la retta lascia 0.056 mm di residuo mediano dove il valore
+    ripetuto uguale ne lascia 0.531. Con misure a una sola depth la retta non si stima e si
+    usa la pendenza tipica del legacy.
+    """
+    if not punti:
+        return 0.0, 0.0, "nessuna misura"
+    distinte = {round(d, 3) for d, _ in punti}
+    media_d = sum(d for d, _ in punti) / len(punti)
+    media_v = sum(v for _, v in punti) / len(punti)
+    if len(distinte) >= 2:
+        sxx = sum((d - media_d) ** 2 for d, _ in punti)
+        sxy = sum((d - media_d) * (v - media_v) for d, v in punti)
+        pendenza = sxy / sxx if sxx > 0 else 0.0
+        if 0.0 <= pendenza <= PENDENZA_MAX:
+            return media_v - pendenza * media_d, pendenza, f"retta su {len(distinte)} depth"
+        # fuori dall'intervallo che il legacy mostra: quella pendenza l'ha scritta il rumore
+        return (media_v - PENDENZA_DEPTH * media_d, PENDENZA_DEPTH,
+                "pendenza tipica (retta implausibile)")
+    return (media_v - PENDENZA_DEPTH * media_d, PENDENZA_DEPTH,
+            "pendenza tipica (una sola depth)")
+
+
 def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
     try:
         sys.path.insert(0, str(REPO_ROOT / "tools" / "needle"))
@@ -4554,11 +4641,11 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
         if not rect:
             raise ValueError("serve prima il rettangolo ecografico")
         scala = project.step_value("depth_scale") or {}
-        depths = list(scala.get("depths") or [])
-        ratio_y = list(scala.get("pixel_ratio_y") or [])
-        ratio_x = list(scala.get("pixel_ratio_x") or []) or ratio_y
+        depths = [float(v) for v in (scala.get("depths") or [])]
+        ratio_x, ratio_y, fonte_ratio, stati_ratio = _ratios_di_scala(scala)
         if not ratio_y:
-            raise ValueError("servono i pixel ratio dallo step depth e scala")
+            raise ValueError("servono i millimetri per pixel: lancia lo step depth e scala")
+        per_depth = _depth_per_fotogramma(scala)
 
         # i fotogrammi di calibrazione li ha gia' trovati lo scan dell'import
         scan = (project.step_value("import") or {}).get("needle_scan") or {}
@@ -4569,27 +4656,94 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
 
         base = project.working_dir()
         nomi = set(project.dedup_names())
-        candidati: List[str] = []
+
+        # La ricerca dell'import non dice solo *quali cartelle*: ha gia' dato un voto a ogni
+        # immagine. Misurare a passo fisso dentro la cartella ignorava quel voto e pescava
+        # soprattutto fotogrammi senza ago -- su una cartella vera, 3 immagini di calibrazione
+        # su 65, il passo fisso ne prendeva 1 su 20 e le altre 19 diventavano misure inventate.
+        votate: Dict[str, float] = {}
+        for voce in (scan.get("images") or []):
+            if voce.get("verdict") != "no" and str(voce.get("name")) in nomi:
+                votate[str(voce["name"])] = float(voce.get("score") or 0.0)
+        for cartella in cartelle:
+            for voce in (cartella.get("images") or []):
+                if voce.get("verdict") != "no" and str(voce.get("name")) in nomi:
+                    votate.setdefault(str(voce["name"]), float(voce.get("score") or 0.0))
+
+        # Dentro le cartelle proposte, se sono poche immagini si misurano tutte: il rilevatore
+        # severo tace dove non c'e' un ago, e su una cartella vera ha risposto esattamente sui
+        # 4 fotogrammi di calibrazione e su nessuno degli altri 62. Il classificatore, da solo,
+        # ne riconosceva 3: il quarto angolo della riga #23 si perdeva li'. Il classificatore
+        # resta come voto -- decide quali cartelle guardare, e in quelle grandi da dove partire.
+        dentro_cartelle: List[str] = []
         for cartella in cartelle:
             prefisso = "" if cartella["folder"] == "." else cartella["folder"] + os.sep
-            dentro = sorted(n for n in nomi if n.startswith(prefisso))
-            passo = max(1, len(dentro) // per_folder)
-            candidati.extend(dentro[::passo][:per_folder])
+            dentro_cartelle.extend(sorted(n for n in nomi if n.startswith(prefisso)))
+
+        if len(dentro_cartelle) <= GUIDES_MEASURE_ALL_UNDER:
+            candidati: List[str] = dentro_cartelle
+            scelta_fotogrammi = f"tutti i fotogrammi delle cartelle proposte ({len(candidati)})"
+        else:
+            candidati = sorted(votate, key=lambda n: -votate[n])
+            scelta_fotogrammi = "riconosciuti dal classificatore"
+            if not candidati:
+                # Cartella grande e nessuna immagine accettata: resta il passo fisso.
+                scelta_fotogrammi = "a passo fisso (nessuna immagine riconosciuta)"
+                for cartella in cartelle:
+                    prefisso = "" if cartella["folder"] == "." else cartella["folder"] + os.sep
+                    dentro = sorted(n for n in nomi if n.startswith(prefisso))
+                    passo = max(1, len(dentro) // per_folder)
+                    candidati.extend(dentro[::passo][:per_folder])
 
         _job_update(job_id, stage="misura degli aghi", total=len(candidati))
         box = (int(rect["left"]), int(rect["top"]), int(rect["right"]), int(rect["bottom"]))
-        # la depth del fotogramma non e' nota: si usa il ratio mediano, e la proposta dice quale
+        # Ogni fotogramma ha i millimetri per pixel della *sua* depth, quando la rilettura
+        # del riquadro depth l'ha coperto: fra la prima e l'ultima depth il rapporto cambia
+        # anche di cinque volte, e col ratio mediano la distanza #22 nasceva sbagliata dello
+        # stesso fattore. Dove la depth non si sa, resta il mediano, e la proposta lo dice.
         riferimento = sorted(ratio_y)[len(ratio_y) // 2]
+        rif_x = sorted(ratio_x)[len(ratio_x) // 2] if ratio_x else riferimento
+
+        def ratio_del_fotogramma(nome: str) -> Tuple[float, float, Optional[float], str]:
+            profonda = per_depth.get(nome)
+            if profonda is None or not depths:
+                return rif_x, riferimento, None, ""
+            indice = min(range(len(depths)), key=lambda i: abs(depths[i] - profonda))
+            rx = ratio_x[indice] if indice < len(ratio_x) and ratio_x[indice] else rif_x
+            ry = ratio_y[indice] if indice < len(ratio_y) and ratio_y[indice] else riferimento
+            return rx, ry, profonda, (stati_ratio[indice] if indice < len(stati_ratio) else "")
+
         misure = []
+        senza_depth = 0
         for done, nome in enumerate(candidati, 1):
-            trovato = measure(base / nome, box, ratio_x[len(ratio_x) // 2] if ratio_x else riferimento,
-                              riferimento)
+            rx, ry, profonda, stato_ratio = ratio_del_fotogramma(nome)
+            trovato = measure(base / nome, box, rx, ry)
             if trovato:
                 trovato["image"] = nome
+                trovato["depth_mm"] = profonda
+                trovato["ratio_stato"] = stato_ratio
+                trovato["ratio_usato"] = ry
                 misure.append(trovato)
+                senza_depth += profonda is None
             if done % 5 == 0:
                 _job_update(job_id, done=done)
         if not misure:
+            # Nessun ago puo' voler dire due cose molto diverse: fotogrammi sbagliati, oppure
+            # una sonda biplana, dove la calibrazione non si fa con l'ago in acqua ma con le
+            # linee di biopsia a pallini. Chiederlo al rilevatore dei pallini costa otto
+            # immagini e cambia completamente che cosa deve fare chi legge il messaggio.
+            from detect_biopsy_dots import detect as detect_dots  # noqa: PLC0415
+            import cv2  # noqa: PLC0415
+            con_pallini = 0
+            for nome in candidati[:8]:
+                bgr = cv2.imread(str(base / nome), cv2.IMREAD_COLOR)
+                if bgr is not None and detect_dots(bgr, box):
+                    con_pallini += 1
+            if con_pallini:
+                raise ValueError(
+                    f"nessun ago, ma {con_pallini} fotogrammi su {min(8, len(candidati))} hanno "
+                    "una linea di biopsia a pallini: questa e' la strada delle biplane, che "
+                    "questo step non copre ancora")
             raise ValueError("nessun ago rilevato nei fotogrammi di calibrazione")
 
         # un gruppo per famiglia di linee guida: e' una voce di #23
@@ -4609,22 +4763,53 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
             angoli = sorted(g["angle"] for g in gruppo)
             distanze = sorted(g["distance"] for g in gruppo)
             spread = angoli[-1] - angoli[0]
+            mediana_distanza = distanze[len(distanze) // 2]
+
+            # #22 non e' un numero solo: cresce con la depth, e nel legacy lo fa quasi per
+            # retta. Con misure ad almeno due depth la retta si stima da qui; con una sola
+            # si usa la pendenza tipica. Senza nessuna depth nota resta il valore ripetuto.
+            punti = [(float(g["depth_mm"]), float(g["distance"]))
+                     for g in gruppo if g.get("depth_mm")]
+            quota, pendenza, modo = _retta_in_depth(punti)
+            if punti and depths:
+                colonna = [round(max(0.0, quota + pendenza * d), 3) for d in depths]
+            else:
+                colonna = [round(mediana_distanza, 3) for _ in (depths or [None])]
+                modo = "depth dei fotogrammi non note: valore ripetuto"
+
             proposte.append({
                 "angolo": round(angoli[len(angoli) // 2], 3),
-                "distanza": round(distanze[len(distanze) // 2], 3),
+                "distanza": round(mediana_distanza, 3),
+                "distanze": colonna,
+                "andamento": modo,
+                "pendenza": round(pendenza, 5),
                 "fotogrammi": len(gruppo),
                 "dispersione": round(spread, 2),
                 "verdetto": ("concorde" if len(gruppo) >= 3 and spread <= 2.0
                              else "da verificare" if len(gruppo) >= 2 else "un solo fotogramma"),
                 "immagini": [g["image"] for g in gruppo[:6]],
+                "depth_viste": sorted({round(d, 1) for d, _ in punti}),
+                # #22 e' proporzionale ai millimetri per pixel: una scala non confermata alla
+                # depth del fotogramma si porta dietro il proprio errore, tale e quale. Su una
+                # configurazione con il legacy a fianco il ratio era il 12% sotto, e le quattro
+                # distanze proposte erano tutte e quattro il 12% sotto.
+                "scala_confermata": all(str(g.get("ratio_stato") or "") == "accepted"
+                                        for g in gruppo) if stati_ratio else None,
+                "ratio_usato": sorted({round(float(g.get("ratio_usato") or 0.0), 6)
+                                       for g in gruppo}),
             })
 
-        # Le famiglie con un solo fotogramma non sono proposte: con la precisione di oggi una
-        # misura sola e' tanto probabile che sia un errore quanto un ago, e metterle sullo stesso
-        # piano di quelle confermate da tre fotogrammi renderebbe l'elenco inutilizzabile --
-        # dodici fotogrammi producevano nove "famiglie", cioe' nessuna informazione.
-        solide = [p for p in proposte if p["fotogrammi"] >= 2]
-        incerte = [p for p in proposte if p["fotogrammi"] < 2]
+        # Una famiglia vista in un solo fotogramma era da nascondere finche' i fotogrammi si
+        # pescavano a passo fisso: dodici ne producevano nove, cioe' nessuna informazione. Con
+        # i fotogrammi scelti dal classificatore e il rilevatore che tace quando non e' sicuro,
+        # un fotogramma per angolo e' invece il caso *normale* -- e' come lavorava il vecchio
+        # ESIBuilder, una immagine per ogni angolo -- e nasconderle vorrebbe dire perdere
+        # meta' della riga #23. Restano sotto "incerte" solo quando la scelta e' stata cieca.
+        if not scelta_fotogrammi.startswith("a passo fisso"):
+            solide, incerte = proposte, []
+        else:
+            solide = [p for p in proposte if p["fotogrammi"] >= 2]
+            incerte = [p for p in proposte if p["fotogrammi"] < 2]
 
         risultato = {
             "proposte": solide,
@@ -4633,10 +4818,16 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int) -> None:
             "misure": len(misure),
             "fotogrammi": len(candidati),
             "ratio_y_usato": riferimento,
+            "ratio_fonte": fonte_ratio,
+            "misure_senza_depth": senza_depth,
+            "scelta_fotogrammi": scelta_fotogrammi,
             "at": datetime.now().isoformat(timespec="seconds"),
-            "avvertenza": ("Su dati etichettati a mano circa un terzo delle proposte cade entro "
-                           "1 grado e circa meta' entro 3: sono da confermare una per una. "
-                           "Le famiglie viste in un solo fotogramma stanno sotto 'incerte'."),
+            "avvertenza": ("Sui 66 fotogrammi etichettati a mano il rilevatore risponde su 42 e "
+                           "tace sugli altri: di quelle 42 risposte il 45% cade entro 1 grado e il "
+                           "71% entro 3, con 1.2 gradi di errore mediano. #22 e' proporzionale ai "
+                           "millimetri per pixel: se la scala a quella depth sbaglia del 12%, la "
+                           "distanza proposta sbaglia del 12%, e questo vale anche quando la scala "
+                           "risulta accettata. Restano proposte da confermare una per una."),
         }
 
         def mutate(_p: Project, value: Dict) -> Dict:

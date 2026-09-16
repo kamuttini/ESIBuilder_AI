@@ -3938,11 +3938,36 @@ function panelGuides(panel, step) {
     card.append(el('div', { class: 'kv' },
       el('span', {}, 'fotogrammi misurati'),
       el('span', {}, `${proposta.misure} su ${proposta.fotogrammi}`)));
+    if (proposta.ratio_fonte && proposta.ratio_fonte !== 'righe #19/#20') {
+      card.append(el('div', { class: 'kv' },
+        el('span', {}, 'millimetri per pixel'),
+        el('span', {}, proposta.ratio_fonte)));
+    }
     for (const [i, p] of (proposta.proposte).entries()) {
       card.append(el('div', { class: 'kv' },
         el('span', {}, `famiglia ${i + 1} — #23 angolo`),
         el('span', {}, `${p.angolo.toFixed(2)}°  ·  #22 ${p.distanza.toFixed(2)} mm  ·  `
           + `${p.fotogrammi} fotogrammi, dispersione ${p.dispersione}° — ${p.verdetto}`)));
+      if (p.scala_confermata === false) {
+        card.append(el('div', { class: 'kv' },
+          el('span', { class: 'hint' }, '  attenzione'),
+          el('span', { class: 'hint' },
+            'la scala alla depth di questi fotogrammi non e\' confermata: #22 e\' proporzionale '
+            + 'ai millimetri per pixel e ne eredita l\'errore in proporzione')));
+      }
+      const colonna = p.distanze || [];
+      if (colonna.length > 1) {
+        card.append(el('div', { class: 'kv' },
+          el('span', { class: 'hint' }, `  #22 lungo la depth (${p.andamento || ''})`),
+          el('span', { class: 'hint' },
+            `da ${Math.min(...colonna).toFixed(2)} a ${Math.max(...colonna).toFixed(2)} mm`
+            + ((p.depth_viste || []).length ? `  ·  misurato a ${p.depth_viste.join(', ')} mm` : ''))));
+      }
+    }
+    if (proposta.misure_senza_depth) {
+      card.append(el('div', { class: 'kv' },
+        el('span', { class: 'hint' }, 'fotogrammi senza depth letta'),
+        el('span', { class: 'hint' }, `${proposta.misure_senza_depth} — per quelli vale il ratio mediano`)));
     }
     panel.append(card);
     if ((proposta.incerte || []).length) {
@@ -3963,11 +3988,13 @@ function panelGuides(panel, step) {
     const usa = el('button', {}, 'Porta la proposta nel valore');
     usa.addEventListener('click', () => {
       const angles = proposta.proposte.map((p) => p.angolo);
-      // #22 vuole un gruppo per depth, ognuno con un valore per angolo. Senza la depth di
-      // ciascun fotogramma la stessa distanza vale per tutte: e' un punto di partenza da
-      // correggere depth per depth, non una misura per depth.
+      // #22 vuole un gruppo per depth, ognuno con un valore per angolo. La distanza cresce
+      // con la depth (nel legacy quasi per retta), quindi ogni famiglia porta gia' la sua
+      // colonna: `distanze` ha un valore per depth. Se le depth dei fotogrammi non erano
+      // note la colonna e' lo stesso numero ripetuto, ed e' scritto sotto la proposta.
       const depths = (proposta.depths || []).length ? proposta.depths : [null];
-      const centre = depths.map(() => proposta.proposte.map((p) => p.distanza));
+      const centre = depths.map((_, i) => proposta.proposte.map(
+        (p) => ((p.distanze || [])[i] !== undefined ? p.distanze[i] : p.distanza)));
       area.value = JSON.stringify({ angles, centre_distance: centre }, null, 1);
       toast('valore precompilato: controllalo depth per depth prima di salvare');
     });
