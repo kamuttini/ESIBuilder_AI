@@ -1460,10 +1460,6 @@ function cardTutteLeImmagini(panel) {
       if (!sg.attiva || (guardate.has(nome) && !usate.has(nome))) fig.classList.add('guide-fuori');
       anteprima.title = `${sg.perche} — clicca per aprirla a tutto schermo`;
       azioni.append(b, vietata);
-      if (sg.attiva) {
-        azioni.append(el('span', { class: 'thumb-calibrazione-stato' },
-          'Già segnalata come immagine di calibrazione'));
-      }
       const gb = el('button', { class: 'ghost thumb-guide' },
         sg.attiva ? 'Escludi solo dalla calibrazione' : 'Inserisci nel pool di calibrazione');
       gb.title = sg.attiva
