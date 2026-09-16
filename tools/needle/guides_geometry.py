@@ -135,6 +135,15 @@ def read_ndg(path: Path) -> Optional[List[List[float]]]:
         offset = 0
         (n_angles,) = struct.unpack_from(">i", raw, offset)
         offset += 4
+        if n_angles == -2:
+            # Guida a griglia: due interi di intestazione (-2, 2) e poi il contenuto normale.
+            # La matrice della battaglia navale sta nel .grid accanto, non qui dentro.
+            (grid,) = struct.unpack_from(">i", raw, offset)
+            offset += 4
+            if grid != 2:
+                return None
+            (n_angles,) = struct.unpack_from(">i", raw, offset)
+            offset += 4
         if not 0 < n_angles < 1000:
             return None
         out: List[List[float]] = []
@@ -148,6 +157,36 @@ def read_ndg(path: Path) -> Optional[List[List[float]]]:
         return out
     except struct.error:
         return None
+
+
+def write_ndg(path: Path, distances: Sequence[Sequence[float]], grid: bool = False) -> bool:
+    """Scrive un .ndg come lo scrive il legacy, con le sue stesse regole di validita'.
+
+    QDataStream big endian: i contatori sono interi a 32 bit, i valori sono `float` in C++ ma
+    finiscono nel file a 64 bit, perche' QDataStream scrive in doppia precisione se non gli si
+    dice altro. `grid` antepone i due interi (-2, 2) con cui il legacy riconosce una guida a
+    griglia, e in quel caso accanto ci vuole il .grid con la matrice.
+
+    I due controlli sono quelli di `QFileNdg::writeFile`, e non sono decorativi: un file che
+    non li rispetta viene riletto e *scartato* dal legacy, quindi scriverlo equivale a non
+    scrivere niente. La prima distanza deve essere positiva e la serie strettamente crescente.
+    """
+    righe: List[List[float]] = [[float(v) for v in riga] for riga in distances]
+    if not righe:
+        return False
+    for riga in righe:
+        if not riga or riga[0] <= 0:
+            return False
+        if any(b <= a for a, b in zip(riga, riga[1:])):
+            return False
+
+    pezzi = [struct.pack(">ii", -2, 2)] if grid else []
+    pezzi.append(struct.pack(">i", len(righe)))
+    for riga in righe:
+        pezzi.append(struct.pack(">i", len(riga)))
+        pezzi.append(struct.pack(f">{len(riga)}d", *riga))
+    Path(path).write_bytes(b"".join(pezzi))
+    return True
 
 
 def centre_distance_mm(setup: Setup, depth_index: int, angle_index: int, line_index: int,
