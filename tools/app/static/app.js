@@ -41,7 +41,24 @@ async function api(path, options = {}) {
 
 /* ---------- shell ---------- */
 
+let shellHeaderObserver = null;
+function syncShellLayout() {
+  const header = document.querySelector('header');
+  if (!header) return;
+  const misura = () => {
+    const altezza = Math.ceil(header.getBoundingClientRect().height);
+    if (altezza > 0) document.documentElement.style.setProperty('--header-height', `${altezza}px`);
+  };
+  misura();
+  window.addEventListener('resize', misura, { passive: true });
+  if (window.ResizeObserver) {
+    shellHeaderObserver = new ResizeObserver(misura);
+    shellHeaderObserver.observe(header);
+  }
+}
+
 async function boot() {
+  syncShellLayout();
   state.meta = await api('/meta');
   await refreshProjects();
   $('#new-project').addEventListener('click', createProject);

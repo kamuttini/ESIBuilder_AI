@@ -1,6 +1,8 @@
 :root {
   /* la colonna degli strumenti: fissa, cosi' l'immagine prende tutto il resto */
   --lato-largo: 380px;
+  /* Il JS la riallinea all'altezza vera della barra, anche quando lo stato va a capo. */
+  --header-height: 53px;
   --bg: #12151a;
   --panel: #1a1f27;
   --panel-2: #222834;
@@ -18,12 +20,17 @@
 
 body {
   margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
   background: var(--bg);
   color: var(--text);
   font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
   display: flex;
   align-items: center;
   gap: 18px;
@@ -42,11 +49,24 @@ header {
 .job-status.done { color: var(--ok, #7ee787); }
 .job-status.error { color: var(--err); }
 
-main { display: flex; align-items: flex-start; }
+main {
+  display: flex;
+  align-items: flex-start;
+  min-height: calc(100vh - var(--header-height));
+  min-height: calc(100dvh - var(--header-height));
+}
 
-nav {
+nav#steps {
+  position: sticky;
+  top: var(--header-height);
+  flex: 0 0 260px;
   width: 260px;
-  min-height: calc(100vh - 53px);
+  height: calc(100vh - var(--header-height));
+  height: calc(100dvh - var(--header-height));
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   border-right: 1px solid var(--line);
   background: var(--panel);
   padding: 10px 0;
@@ -547,7 +567,7 @@ button.ghost.sq2.on { border-color: var(--accent); color: var(--text); }
   gap: 14px;
   align-items: start;
 }
-.ov-main { min-width: 0; position: sticky; top: 8px; }
+.ov-main { min-width: 0; position: sticky; top: calc(var(--header-height) + 8px); }
 .ov-side { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 /* L'immagine riempie la sua colonna, in ogni sezione. Lo stage e' il riferimento degli
    overlay: deve coincidere con l'immagine, se no i riquadri cadono spostati. */
@@ -1161,7 +1181,7 @@ img.depth-crop {
   gap: 14px;
   align-items: start;
 }
-.rect-immagine { position: sticky; top: 8px; }
+.rect-immagine { position: sticky; top: calc(var(--header-height) + 8px); }
 .rect-lato { min-width: 0; }
 .rect-lato .proposta { margin-top: 8px; }
 .rect-lato h3 { font-size: 14px; }
