@@ -1623,6 +1623,7 @@ function templateBoxPanel(panel, step, value, key, color, emptyHint) {
   dirty.style.display = 'none';
   const readout = el('div', { class: 'hint' });
   const original = JSON.stringify(cloneBoxes(value));
+  let segnaposto = false;
 
   const describe = (box) => box
     ? `${box.right - box.left + 1} x ${box.bottom - box.top + 1} px ` +
@@ -1642,6 +1643,10 @@ function templateBoxPanel(panel, step, value, key, color, emptyHint) {
   const applyBoxes = (boxes) => {
     if (boxes[key]) {
       value[key] = { ...(value[key] || { check: 1, params: { threshold: 0 } }), ...boxes[key] };
+      if (segnaposto) {
+        segnaposto = false;
+        host.querySelectorAll('.segnaposto').forEach((n) => n.remove());
+      }
     }
     refresh();
   };
@@ -1652,17 +1657,20 @@ function templateBoxPanel(panel, step, value, key, color, emptyHint) {
       host.append(el('p', { class: 'hint' }, 'nessuna anteprima: lancia prima l\'analisi.'));
       return;
     }
+    // Il riquadro c'e' sempre, anche quando la rete non ha proposto niente: prima la
+    // sezione restava monca, con un pulsante in mezzo, e non somigliava a quella
+    // dell'ecografo dove la rete propone quasi sempre. Questo pero' non e' una proposta:
+    // e' un punto di partenza da trascinare, e il cartiglio sopra l'editor lo dice
+    // finche' non lo si tocca.
     if (!value[key]) {
-      const crea = el('button', { class: 'ghost' }, 'Disegna il box qui sopra');
-      crea.addEventListener('click', () => {
-        const w = Math.round((sampleSize?.[0] || 1920) * 0.08);
-        const h = Math.round((sampleSize?.[1] || 1080) * 0.03);
-        value[key] = { top: 10, left: 10, bottom: 10 + h, right: 10 + w,
-                       check: 1, params: { threshold: 0 } };
-        renderEditor();
-      });
-      host.append(el('p', { class: 'hint' }, emptyHint), el('div', { class: 'row' }, crea));
-      return;
+      const w = Math.round((sampleSize?.[0] || 1920) * 0.08);
+      const h = Math.round((sampleSize?.[1] || 1080) * 0.03);
+      value[key] = { top: 10, left: 10, bottom: 10 + h, right: 10 + w,
+                     check: 1, params: { threshold: 0 } };
+      segnaposto = true;
+    }
+    if (segnaposto) {
+      host.append(el('p', { class: 'hint segnaposto', style: 'color:var(--warn)' }, emptyHint));
     }
 
     const editor = createBoxEditor({
@@ -1727,7 +1735,8 @@ function panelVendor(panel, step) {
     'e\' il riquadro che contiene la scritta del modello a schermo: ESI lo cerca per capire ' +
     'che e\' quella macchina.'));
   templateBoxPanel(panel, step, value, 'rect_name_echo', '#40d0ff',
-    'nessun box proposto per questo vendor: disegnalo tu attorno alla scritta del modello.');
+    'nessun box proposto per questo vendor: questo e\' un riquadro di partenza, '
+    + 'trascinalo sulla scritta del modello.');
   templateBlockEditor(panel, value, 'rect_name_echo', '#13',
     'le coordinate si modificano sopra, qui restano i parametri di match');
   panel.append(saveRow(step.id, () => value));
@@ -1758,11 +1767,12 @@ function panelProbe(panel, step) {
 
   panel.append(el('h3', {}, 'Template col nome della sonda (#14)'));
   panel.append(el('p', { class: 'hint' },
-    'il riquadro con la sigla della sonda a schermo. Lo propone la rete #14; dove non ' +
-    'riconosce la scritta lascia il campo vuoto invece di tirare a indovinare, e allora ' +
-    'il box si disegna a mano.'));
+    'e\' il riquadro che contiene la sigla della sonda a schermo: ESI lo cerca per capire ' +
+    'che e\' quella sonda. Lo propone la rete #14; dove non riconosce la scritta il ' +
+    'riquadro parte da un angolo e lo sistemi tu.'));
   templateBoxPanel(panel, step, value, 'rect_name_probe', '#d29922',
-    'la rete non ha riconosciuto la sigla della sonda: disegna tu il box attorno alla scritta.');
+    'la rete non ha riconosciuto la sigla della sonda: questo e\' un riquadro di partenza, '
+    + 'trascinalo sulla sigla a schermo.');
   templateBlockEditor(panel, value, 'rect_name_probe', '#14',
     'le coordinate si modificano sopra, qui restano i parametri di match');
   panel.append(saveRow(step.id, () => value));
