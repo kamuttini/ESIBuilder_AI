@@ -1420,6 +1420,13 @@ img.depth-crop {
   border-color: #3fb950; box-shadow: 0 0 0 1px #3fb950 inset;
 }
 .immagini-grid .thumb-voce.guide-usata .thumb-guide-targa { color: #3fb950; border-color: #3fb950; }
+/* Proposta dalla ricerca ma non ancora misurata: si vede da lontano come l'usata, in un
+   colore diverso. Prima aveva solo la targhetta, e fra novantaquattro miniature una
+   targhetta piccola in alto a sinistra non e' un'evidenza: era da cercare. */
+.immagini-grid .thumb-voce.guide-proposta {
+  border-color: #58a6ff; box-shadow: 0 0 0 1px #58a6ff inset;
+}
+.immagini-grid .thumb-voce.guide-proposta .thumb-guide-targa { color: #58a6ff; border-color: #58a6ff; }
 .immagini-grid .thumb-voce.guide-mano { border-style: dashed; border-color: #d29922; }
 .immagini-grid .thumb-voce.guide-mano .thumb-guide-targa { color: #d29922; border-color: #d29922; }
 .immagini-grid .thumb-voce.guide-fuori img { opacity: .62; }

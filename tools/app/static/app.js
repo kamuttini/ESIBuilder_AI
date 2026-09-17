@@ -1327,6 +1327,7 @@ function cardTutteLeImmagini(panel) {
   panel.append(card);
   let dati = null;
   let mostrate = 120;
+  let soloPool = false;   // mostra solo il materiale delle linee guida
 
   const escludi = async (nomi, ricarica = true) => {
     const esito = await api(`/projects/${state.projectId}/duplicates/drop`,
@@ -1415,8 +1416,20 @@ function cardTutteLeImmagini(panel) {
         + 'solo dalla calibrazione; sulle altre trovi «Inserisci nel pool di calibrazione». '
         + 'La misura va poi rilanciata dallo step Linee guida.'));
     }
+    /* Segnalarle non basta quando sono undici su novantaquattro: restano da cercare.
+       Questo le mette da sole, e il conto resta scritto sul pulsante. */
+    const nelPool = (nome) => (usate.has(nome) || propostaRete.has(nome) || manoDentro.has(nome))
+      && !manoFuori.has(nome);
+    const quante = nomi.filter(nelPool).length;
+    if (quante) {
+      const filtro = el('button', { class: 'ghost' + (soloPool ? ' on' : '') },
+        soloPool ? `mostra tutte le ${nomi.length}` : `mostra solo le ${quante} per le linee guida`);
+      filtro.addEventListener('click', () => { soloPool = !soloPool; disegna(); });
+      card.append(el('div', { class: 'row' }, filtro));
+    }
+    const elencate = soloPool ? nomi.filter(nelPool) : nomi;
     const thumbs = el('div', { class: 'thumbs immagini-grid' });
-    for (const nome of nomi.slice(0, mostrate)) {
+    for (const nome of elencate.slice(0, mostrate)) {
       const anteprima = el('img', { src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
                     loading: 'lazy', alt: nome, title: 'apri a tutto schermo' });
       anteprima.addEventListener('click', () => visoreImmagini(
@@ -1463,6 +1476,7 @@ function cardTutteLeImmagini(panel) {
       const sg = statoGuide(nome);
       if (sg.targa) media.append(el('span', { class: 'thumb-guide-targa', title: sg.perche }, sg.targa));
       if (usate.has(nome) && !manoFuori.has(nome)) fig.classList.add('guide-usata');
+      else if (propostaRete.has(nome) && !manoFuori.has(nome)) fig.classList.add('guide-proposta');
       if (sg.mano) fig.classList.add('guide-mano');
       if (!sg.attiva || (guardate.has(nome) && !usate.has(nome))) fig.classList.add('guide-fuori');
       anteprima.title = `${sg.perche} — clicca per aprirla a tutto schermo`;
@@ -1484,10 +1498,10 @@ function cardTutteLeImmagini(panel) {
       thumbs.append(fig);
     }
     card.append(thumbs);
-    if (nomi.length > mostrate) {
+    if (elencate.length > mostrate) {
       const ancora = el('button', { class: 'ghost' },
-        `Mostra le altre ${nomi.length - mostrate}`);
-      ancora.addEventListener('click', () => { mostrate = nomi.length; disegna(); });
+        `Mostra le altre ${elencate.length - mostrate}`);
+      ancora.addEventListener('click', () => { mostrate = elencate.length; disegna(); });
       card.append(el('div', { class: 'row' }, ancora));
     }
     const fuori = dati.out || [];
