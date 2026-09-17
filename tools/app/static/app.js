@@ -4532,6 +4532,83 @@ function panelGuides(panel, step) {
      per angolo: e' un dato dell'anagrafica, non una cosa da scoprire guardando. Quale immagine
      per quale angolo lo sceglie chi guarda; quante sono, no. */
   const kit = state.ndg;
+
+  /* La scelta delle immagini, uno slot per angolo del kit.
+
+     Il numero di angoli lo dice l'anagrafica, quale immagine sta su quale angolo lo sa solo
+     chi guarda: e' la stessa divisione di lavoro del vecchio ESIBuilder, dove la sessione
+     chiedeva una immagine per angolo e l'operatore la sceglieva. Un angolo ne accetta piu'
+     di una: sono le sue depth, e con due la colonna di #22 smette di essere estrapolata. */
+  if (kit && kit.count) {
+    const scelte = stored.assegnazioni || {};
+    const sezione = el('div', { class: 'card' });
+    sezione.append(el('h3', { style: 'margin-top:0' },
+      `Immagini per gli aghi — ${kit.count} angoli sul kit NDG ${kit.id}`));
+    sezione.append(el('p', { class: 'hint' },
+      'scegli quale fotogramma usare per ogni angolo della guida. Il pool viene dalla ricerca '
+      + 'nello step Import e analisi. Un angolo puo\' averne piu\' di uno, uno per depth: '
+      + 'con due o piu\' depth la distanza #22 viene stimata invece che estrapolata.'));
+    const corpo = el('div', {});
+    sezione.append(corpo);
+    panel.append(sezione);
+
+    const disegnaSlot = (pool, assegnate) => {
+      corpo.replaceChildren();
+      const usate = new Set(Object.values(assegnate).flat());
+      for (const angolo of kit.angles) {
+        const riga = el('div', { class: 'kv' });
+        const sue = assegnate[angolo] || [];
+        riga.append(el('span', {}, `angolo ${angolo}`));
+        const destra = el('span', { class: 'row', style: 'flex-wrap:wrap;gap:6px' });
+        for (const nome of sue) {
+          const togli = el('button', { class: 'ghost sq2', title: 'toglilo da questo angolo' }, '×');
+          togli.addEventListener('click', async () => {
+            togli.disabled = true;
+            try {
+              await api(`/projects/${state.projectId}/guides/assign`,
+                { body: { angle: angolo, clear: '1' } });
+              for (const altro of sue) { if (altro !== nome) await assegna(angolo, altro); }
+              await reload();
+            } catch (errore) { toast(errore.message, true); togli.disabled = false; }
+          });
+          destra.append(el('span', { class: 'chip on' }, nome.split('/').pop()), togli);
+        }
+        const scegli = el('select', {});
+        scegli.append(el('option', { value: '' }, sue.length ? '+ aggiungi una depth…' : '— scegli —'));
+        for (const nome of pool) {
+          if (usate.has(nome)) continue;
+          scegli.append(el('option', { value: nome }, nome.split('/').pop()));
+        }
+        scegli.addEventListener('change', async () => {
+          if (!scegli.value) return;
+          try { await assegna(angolo, scegli.value); await reload(); }
+          catch (errore) { toast(errore.message, true); }
+        });
+        destra.append(scegli);
+        riga.append(destra);
+        corpo.append(riga);
+      }
+      const mancano = kit.angles.filter((a) => !(assegnate[a] || []).length).length;
+      corpo.append(el('p', { class: 'hint', style: mancano ? 'color:var(--warn)' : '' },
+        mancano ? `mancano ${mancano} angoli su ${kit.count}: la misura userà i fotogrammi `
+          + 'proposti dalla ricerca finché la scelta non è completa'
+          : 'tutti gli angoli assegnati: la misura userà esattamente questi fotogrammi'));
+    };
+
+    const assegna = (angolo, nome) => api(`/projects/${state.projectId}/guides/assign`,
+      { body: { angle: angolo, name: nome } });
+
+    disegnaSlot([], scelte);
+    api(`/projects/${state.projectId}/images`)
+      .then((r) => {
+        const g = r.guides || {};
+        const pool = [...new Set([...(g.usate || []), ...(g.proposte || []), ...(g.include || [])])]
+          .filter((n) => !(g.exclude || []).includes(n));
+        disegnaSlot(pool.length ? pool : (r.names || []), scelte);
+      })
+      .catch(() => { /* il pool non e' indispensabile: gli slot restano, vuoti */ });
+  }
+
   if (kit && kit.count) {
     const trovate = ((proposta && proposta.proposte) || []).length;
     const card = el('div', { class: 'card' });
@@ -4614,7 +4691,8 @@ function panelGuides(panel, step) {
     }
     for (const [i, p] of (proposta.proposte).entries()) {
       card.append(el('div', { class: 'kv' },
-        el('span', {}, `famiglia ${i + 1} — #23 angolo`),
+        el('span', {}, p.angolo_kit ? `angolo ${p.angolo_kit} — #23 misurato`
+          : `famiglia ${i + 1} — #23 angolo`),
         el('span', {}, `${p.angolo.toFixed(2)}°  ·  #22 ${p.distanza.toFixed(2)} mm  ·  `
           + `${p.fotogrammi} fotogrammi, dispersione ${p.dispersione}° — ${p.verdetto}`)));
       if (p.scala_confermata === false) {

@@ -4762,36 +4762,10 @@ def _retta_in_depth(punti: Sequence[Tuple[float, float]]) -> Tuple[float, float,
             "pendenza tipica (una sola depth)")
 
 
-def _famiglie_da_misure(misure: Sequence[Dict], depths: Sequence[float],
-                        con_stato_scala: bool, cieca: bool) -> Tuple[List[Dict], List[Dict]]:
-    """Dalle misure per fotogramma alle famiglie di linee guida: una voce di #23, una colonna
-    di #22.
-
-    Sta fuori dal job perche' la stessa cosa serve due volte: quando si misura, e quando si
-    corregge una riga a mano -- e correggere non deve voler dire rimisurare tutto da capo.
-    """
-    # Due misure finiscono nella stessa famiglia se hanno lo stesso angolo -- ma *mai* se
-    # vengono da due fotogrammi presi alla stessa depth. La sessione di calibrazione del
-    # vecchio ESIBuilder e' una griglia angolo x depth con una immagine per casella: due
-    # immagini alla stessa depth sono due angoli diversi, anche quando il rilevatore le
-    # misura vicine. Senza questa regola, correggere una riga di tre gradi poteva farla
-    # cadere dentro la tolleranza della riga accanto e far sparire un angolo intero di #23.
-    gruppi: List[List[Dict]] = []
-    for m in sorted(misure, key=lambda m: m["angle"]):
-        sua = m.get("depth_mm")
-        for gruppo in gruppi:
-            mediana = sorted(g["angle"] for g in gruppo)[len(gruppo) // 2]
-            if abs(m["angle"] - mediana) > 4.0:
-                continue
-            if sua is not None and any(g.get("depth_mm") == sua for g in gruppo):
-                continue
-            gruppo.append(m)
-            break
-        else:
-            gruppi.append([m])
-    gruppi.sort(key=lambda g: -len(g))
-
-    proposte = []
+def _voci_famiglie(gruppi: Sequence[Sequence[Dict]], depths: Sequence[float],
+                   con_stato_scala: bool) -> List[Dict]:
+    """Da gruppi di misure alle voci della proposta: una riga di #23, una colonna di #22."""
+    proposte: List[Dict] = []
     for gruppo in gruppi:
         angoli = sorted(g["angle"] for g in gruppo)
         distanze = sorted(g["distance"] for g in gruppo)
@@ -4812,6 +4786,8 @@ def _famiglie_da_misure(misure: Sequence[Dict], depths: Sequence[float],
 
         a_mano = sum(1 for g in gruppo if g.get("corretto"))
         proposte.append({
+            # l'etichetta dell'angolo sul kit, quando le immagini sono state assegnate a mano
+            "angolo_kit": next((str(g.get("angolo_kit")) for g in gruppo if g.get("angolo_kit")), ""),
             "angolo": round(angoli[len(angoli) // 2], 3),
             "distanza": round(mediana_distanza, 3),
             "distanze": colonna,
@@ -4848,6 +4824,49 @@ def _famiglie_da_misure(misure: Sequence[Dict], depths: Sequence[float],
             "ratio_usato": sorted({round(float(g.get("ratio_usato") or 0.0), 6)
                                    for g in gruppo}),
         })
+
+    return proposte
+
+
+def _famiglie_da_misure(misure: Sequence[Dict], depths: Sequence[float],
+                        con_stato_scala: bool, cieca: bool,
+                        per_etichetta: bool = False) -> Tuple[List[Dict], List[Dict]]:
+    """Dalle misure per fotogramma alle famiglie di linee guida: una voce di #23, una colonna
+    di #22.
+
+    Sta fuori dal job perche' la stessa cosa serve due volte: quando si misura, e quando si
+    corregge una riga a mano -- e correggere non deve voler dire rimisurare tutto da capo.
+    """
+    # Due misure finiscono nella stessa famiglia se hanno lo stesso angolo -- ma *mai* se
+    # vengono da due fotogrammi presi alla stessa depth. La sessione di calibrazione del
+    # vecchio ESIBuilder e' una griglia angolo x depth con una immagine per casella: due
+    # immagini alla stessa depth sono due angoli diversi, anche quando il rilevatore le
+    # misura vicine. Senza questa regola, correggere una riga di tre gradi poteva farla
+    # cadere dentro la tolleranza della riga accanto e far sparire un angolo intero di #23.
+    gruppi: List[List[Dict]] = []
+    if per_etichetta:
+        # L'angolo del kit e' stato scelto a mano: raggruppare per somiglianza sarebbe
+        # rimettere in discussione una decisione gia' presa.
+        per_nome: Dict[str, List[Dict]] = {}
+        for m in misure:
+            per_nome.setdefault(str(m.get("angolo_kit") or "?"), []).append(m)
+        gruppi = [v for _, v in sorted(per_nome.items())]
+        return _voci_famiglie(gruppi, depths, con_stato_scala), []
+
+    for m in sorted(misure, key=lambda m: m["angle"]):
+        sua = m.get("depth_mm")
+        for gruppo in gruppi:
+            mediana = sorted(g["angle"] for g in gruppo)[len(gruppo) // 2]
+            if abs(m["angle"] - mediana) > 4.0:
+                continue
+            if sua is not None and any(g.get("depth_mm") == sua for g in gruppo):
+                continue
+            gruppo.append(m)
+            break
+        else:
+            gruppi.append([m])
+    gruppi.sort(key=lambda g: -len(g))
+    proposte = _voci_famiglie(gruppi, depths, con_stato_scala)
 
     # Una famiglia vista in un solo fotogramma era da nascondere finche' i fotogrammi si
     # pescavano a passo fisso: dodici ne producevano nove, cioe' nessuna informazione. Con
@@ -4913,7 +4932,18 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int,
             dentro_cartelle.extend(sorted(n for n in nomi if n.startswith(prefisso)))
 
         scelta = _selezione_guide(project)
-        if tutti:
+        assegnazioni = {k: [str(n) for n in v]
+                        for k, v in ((project.step_value("guides") or {}).get("assegnazioni") or {}).items()
+                        if v}
+        if assegnazioni and not tutti:
+            # Le immagini le ha scelte chi guarda, una (o piu' depth) per angolo del kit: qui
+            # non c'e' niente da indovinare, e il raggruppamento non serve -- l'angolo di ogni
+            # misura e' gia' scritto accanto al fotogramma.
+            candidati = [n for nomi_angolo in assegnazioni.values() for n in nomi_angolo
+                         if n in nomi]
+            scelta_fotogrammi = (f"scelti a mano, {len(assegnazioni)} angoli su "
+                                 f"{len(candidati)} fotogrammi")
+        elif tutti:
             candidati: List[str] = dentro_cartelle
             scelta_fotogrammi = f"tutti i fotogrammi delle cartelle proposte ({len(candidati)})"
         else:
@@ -4960,6 +4990,7 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int,
         senza_depth = 0
         for done, nome in enumerate(candidati, 1):
             rx, ry, profonda, stato_ratio = ratios.per(nome)
+            etichetta = next((k for k, v in assegnazioni.items() if nome in v), "")
             mano = corrette.get(nome)
             gruppo = orientamenti.get(nome, "")
             linee_mano = _linee_corrette(mano)
@@ -4978,6 +5009,7 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int,
                 trovato["ratio_usato"] = ry
                 trovato["ratio_x_usato"] = rx
                 trovato["orientamento"] = gruppo
+                trovato["angolo_kit"] = etichetta
                 misure.append(trovato)
                 senza_depth += profonda is None
             if done % 5 == 0:
@@ -5001,7 +5033,8 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int,
                     "questo step non copre ancora")
             raise ValueError("nessun ago rilevato nei fotogrammi di calibrazione")
 
-        solide, incerte = _famiglie_da_misure(misure, depths, bool(stati_ratio), cieca=False)
+        solide, incerte = _famiglie_da_misure(misure, depths, bool(stati_ratio), cieca=False,
+                                              per_etichetta=bool(assegnazioni))
 
         risultato = {
             "proposte": solide,
@@ -5157,6 +5190,46 @@ def api_guides_correction(project_id: str):
     finale = _write_step(project_id, "guides", salva, invalidate=False)
     return jsonify({"proposal": finale.get("proposal") or {},
                     "corrette": len(correzioni)})
+
+
+@app.post("/api/projects/<project_id>/guides/assign")
+def api_guides_assign(project_id: str):
+    """Assegna un fotogramma a un angolo del kit, o lo toglie.
+
+    Quanti angoli ha il kit lo dice l'anagrafica; quale immagine sta su quale angolo lo sa
+    solo chi guarda, ed e' la stessa divisione di lavoro del vecchio ESIBuilder -- la
+    sessione chiedeva una immagine per angolo e l'operatore la sceglieva.
+
+    Un angolo puo' tenere piu' di una immagine: sono le sue depth. Cosi' la colonna di #22
+    smette di essere estrapolata e diventa una retta stimata sui dati.
+    """
+    project = _project(project_id)
+    dati = _payload()
+    angolo = str(dati.get("angle") or "").strip()
+    nome = str(dati.get("name") or "").strip()
+    if not angolo:
+        return jsonify({"error": "manca l'angolo"}), 400
+    kit = _kit_del_progetto(project)
+    if kit and kit.get("angles") and angolo not in kit["angles"]:
+        return jsonify({"error": f"l'angolo {angolo} non e' fra quelli del kit"}), 400
+    if nome and nome not in set(project.dedup_names()):
+        return jsonify({"error": "immagine non nel progetto"}), 400
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        mappa = {k: list(v) for k, v in (value.get("assegnazioni") or {}).items()}
+        # una immagine sta su un angolo solo: assegnarla altrove la toglie da dove era
+        if nome:
+            for chiave in list(mappa):
+                mappa[chiave] = [n for n in mappa[chiave] if n != nome]
+            mappa.setdefault(angolo, []).append(nome)
+        elif str(dati.get("clear") or ""):
+            mappa.pop(angolo, None)
+        mappa = {k: v for k, v in mappa.items() if v}
+        value["assegnazioni"] = mappa
+        return value
+
+    valore = _write_step(project_id, "guides", mutate, invalidate=False)
+    return jsonify({"assegnazioni": valore.get("assegnazioni") or {}})
 
 
 @app.post("/api/projects/<project_id>/guides/selection")
