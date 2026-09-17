@@ -1233,3 +1233,87 @@ Output: `artifacts/71_monitor/index.html` (piu' lo store `metrics.jsonl`,
 `runs.jsonl`, `review_reasons.jsonl`, `collect_report.json`).
 
 Dettagli, formati riconosciuti e come estenderlo: `tools/monitor/README.md`.
+## 22) Template sonda (riga #14 `RECT_NAME_PROBE`)
+
+### 22.1 Dataset con ground truth per-frame
+
+La GT non viene copiata dal `.fss` su tutti i frame: il crop di riferimento
+`DB_echo/<setup>/probe_name.png` viene ritrovato in ogni acquisizione con template
+matching, quindi ogni immagine ha il suo box esatto. Relazione misurata fra `.fss`
+e crop (valida su 368/390 configurazioni del volume `SSD_esi1_n1`):
+
+```
+crop top-left = (riga14_left + 3, riga14_top + 3)
+crop size     = (larghezza_riga14 - 5, altezza_riga14 - 5)
+```
+
+I frame in cui il nome sonda non compare diventano negativi (box vuoto), utili per
+insegnare alla rete ad astenersi.
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/ultrasound/prepare_probe_template_dataset.py \
+  --dataset-root /Volumes/SSD_esi1_n1 \
+  --output-dir artifacts/20_datasets/probe_template_line14_20260917 \
+  --max-images-per-folder 250 \
+  --workers 10
+```
+
+Output principali:
+
+- `manifest_probe_template.csv` (1 riga per immagine: box ricostruito, box `.fss`, score, IoU)
+- `folders_probe_template.csv` (1 riga per configurazione, con `gt_status` e `group_id`)
+- `review_queue.csv` (configurazioni da rivedere: `fss_mismatch`, `low_hit_rate`, ...)
+- `summary.json`, `split_summary.txt`
+
+Gli split sono leak-free a livello di **layout**, non di cartella: le cartelle sono
+unite in componenti connesse per "stessa UI" (vendor + risoluzione + box riga #13) e
+"stesso nome macchina normalizzato", cosi le coppie L/T della stessa macchina non
+finiscono in split diversi.
+
+### 22.2 Training detector (heatmap CenterNet-style)
+
+Il box e minuscolo (mediana 74x25 px su 1920x1080, 0,09% del frame): un regressore
+bbox con pooling globale non ha la risoluzione spaziale per piazzarlo. Qui la rete e
+ResNet18 + decoder FPN a stride 4 con teste heatmap + offset + size; il picco della
+heatmap fornisce anche la confidenza. Nessuna augmentation di flip: il testo
+specchiato non esiste in una UI reale.
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/ultrasound/train_probe_template_net.py \
+  --manifest artifacts/20_datasets/probe_template_line14_20260917/manifest_probe_template.csv \
+  --output-dir artifacts/30_models/probe_template_line14_20260917/generic \
+  --image-size 512 --batch-size 16 --epochs 10 \
+  --max-images-per-folder 40 --num-workers 6
+```
+
+Aggiungendo `--vendors Esaote` (o un elenco separato da virgole) si addestra la
+variante per-vendor sugli stessi split, per il confronto generica vs per-vendor.
+
+Output: `best_model.pt`, `metrics.json`, `predictions_test.csv`,
+`folder_predictions_test.csv` (box mediano per cartella, IoU contro la riga #14 legacy
+ed errore massimo per coordinata).
+
+### 22.3 Review della ground truth segnalata
+
+```bash
+OldSoftwareEsiBuilder/.venv-mps/bin/python tools/review_html/build_probe_template_review_html.py \
+  --folders-csv artifacts/20_datasets/probe_template_line14_20260917/folders_probe_template.csv \
+  --output artifacts/40_outputs_eval/probe_template_line14_review_20260917/index.html
+```
+
+Pagina autoconsistente: per ogni configurazione segnalata mostra lo zoom con il box
+legacy (rosso) e quello ricostruito dal crop (verde), il crop di riferimento e i
+numeri. Le decisioni si esportano in CSV dal browser, non viene scritto nulla sul
+dataset.
+
+### 22.4 Baseline del resolver storico (confronto)
+
+```bash
+cd tools/ultrasound && OldSoftwareEsiBuilder/.venv-mps/bin/python eval_line14_resolver_baseline.py \
+  --folders-csv ../../artifacts/20_datasets/probe_template_line14_20260917/folders_probe_template.csv \
+  --output-json ../../artifacts/40_outputs_eval/probe_template_line14_review_20260917/resolver_baseline_test.json
+```
+
+Riproduce la priorita di chiavi di `RectNameProbeResolver` (vendor+probe+video ->
+vendor+probe -> probe+video -> probe, nessun fallback cieco) usando lo split train
+come storico: misura quanto varrebbe oggi la riga #14 su macchine mai configurate.
