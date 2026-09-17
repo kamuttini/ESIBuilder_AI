@@ -1765,6 +1765,23 @@ function panelProbe(panel, step) {
         : (value.rect_name_probe_reason || '—')],
   ]);
 
+  // I progetti importati prima che la rete esistesse non hanno mai eseguito il modulo:
+  // lo si lancia da soli alla prima apertura della sezione, una volta sola. `_ts` dice se
+  // e' gia' girato, cosi' «non ha trovato niente» non si confonde con «mai eseguito».
+  if (!value.rect_name_probe && !value.rect_name_probe_ts && !state.templateSondaInCorso) {
+    state.templateSondaInCorso = true;
+    panel.append(el('p', { class: 'hint' }, 'calcolo del template della sonda in corso…'));
+    api(`/projects/${state.projectId}/probe/template`, { body: {} })
+      .then((esito) => {
+        toast(esito.box
+          ? `template sonda proposto (confidenza ${esito.score ?? '—'})`
+          : (esito.reason || esito.skipped || 'la rete non ha riconosciuto la sigla'));
+        return reload();
+      })
+      .catch((error) => toast(error.message, true))
+      .finally(() => { state.templateSondaInCorso = false; });
+  }
+
   panel.append(el('h3', {}, 'Template col nome della sonda (#14)'));
   panel.append(el('p', { class: 'hint' },
     'e\' il riquadro che contiene la sigla della sonda a schermo: ESI lo cerca per capire ' +

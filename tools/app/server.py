@@ -1840,6 +1840,68 @@ def _run_planes(job_id: str, project_id: str) -> None:
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
 
+def _aggiorna_template_sonda(project_id: str, job_id: Optional[str] = None,
+                             sample: int = 12) -> Dict:
+    """Il template della sonda (#14) come gli altri moduli: gira da solo, non a richiesta.
+
+    Stava solo dentro l'analisi dell'import, e un progetto importato prima che la rete
+    esistesse restava senza box per sempre, a meno di reimportarlo da capo. Le regole sono
+    quelle della #13: un box confermato a mano non si tocca, salvo che sia finito fuori dal
+    fotogramma dopo una rotazione.
+    """
+    project = _project(project_id)
+    passo = project.steps.get("probe") or {}
+    attuale = project.step_value("probe").get("rect_name_probe")
+    a_mano = bool(passo.get("user_edited"))
+    fotogramma = project.step_value("import").get("image_sample_size") or []
+    fuori = bool(attuale) and not _box_nel_fotogramma(attuale, fotogramma)
+    if attuale and a_mano and not fuori:
+        return {"skipped": "box confermato a mano"}
+
+    try:
+        immagini = _immagini_da_misurare(project)
+    except (FileNotFoundError, ValueError) as errore:
+        return {"skipped": str(errore)}
+    fotogrammi = sample_paths(immagini, sample)
+    if not fotogrammi:
+        return {"skipped": "nessun fotogramma da analizzare"}
+
+    if job_id:
+        _job_update(job_id, stage="template sonda (#14)")
+    line14 = _inference_engine().predict_line14(fotogrammi)
+
+    def mutate(_p: Project, value: Dict) -> Dict:
+        if line14.get("box"):
+            value["rect_name_probe"] = {
+                **line14["box"], "check": 1, "params": {"threshold": 0.0},
+            }
+            value["rect_name_probe_source"] = line14.get("source")
+            value["rect_name_probe_score"] = line14.get("score")
+            value["rect_name_probe_agreement"] = line14.get("agreement_iou")
+            value["rect_name_probe_replaced"] = (
+                "il box corretto a mano cadeva fuori dal fotogramma: rifatto dalla rete"
+                if fuori and a_mano else ""
+            )
+        value["rect_name_probe_reason"] = line14.get("reason")
+        # Marca che il modulo e' girato: distingue «non ha trovato niente» da «non e' mai
+        # stato eseguito», e senza questa differenza l'interfaccia non saprebbe se lanciarlo.
+        value["rect_name_probe_ts"] = datetime.now().isoformat(timespec="seconds")
+        return value
+
+    valore = _write_step(
+        project_id, "probe", mutate,
+        status="proposed" if line14.get("box") else "empty", source="model",
+        confidence=line14.get("score"),
+    )
+    return {
+        "box": valore.get("rect_name_probe"),
+        "score": line14.get("score"),
+        "agreement_iou": line14.get("agreement_iou"),
+        "images": line14.get("images"),
+        "reason": line14.get("reason"),
+    }
+
+
 def _automatic_stages(project: Project) -> List[str]:
     """Gli stadi che possono essere aggiornati senza sostituire lavoro gia' confermato.
 
@@ -1876,6 +1938,12 @@ def _run_auto_pipeline(job_id: str, project_id: str) -> None:
         # Il riconoscimento L/T e' utile anche sulle sonde singole come controllo visivo;
         # solo una sonda biplana con entrambi i piani blocca i moduli in attesa dello split.
         _predict_planes(job_id, project_id)
+        # Il template della sonda non dipende dal rettangolo ne' dal piano: si calcola
+        # anche quando i moduli a valle restano fermi in attesa della divisione L/T.
+        try:
+            _aggiorna_template_sonda(project_id, job_id)
+        except Exception as errore:  # noqa: BLE001
+            _job_update(job_id, stage=f"template sonda non calcolato: {errore}")
         project = _project(project_id)
         reason = _advanced_stages_block_reason(project)
         if reason:
@@ -1900,6 +1968,16 @@ def _schedule_auto_pipeline(project_id: str) -> Optional[str]:
     except FileNotFoundError:
         return None
     return _start_job(_run_auto_pipeline, project_id)
+
+
+@app.post("/api/projects/<project_id>/probe/template")
+def api_probe_template(project_id: str):
+    """Ricalcola la riga #14 senza reimportare: serve ai progetti nati prima della rete."""
+    _project(project_id)
+    try:
+        return jsonify(_aggiorna_template_sonda(project_id))
+    except (FileNotFoundError, ValueError) as errore:
+        return jsonify({"error": str(errore)}), 400
 
 
 @app.post("/api/projects/<project_id>/planes/correct")
@@ -6449,12 +6527,14 @@ def _run_rect_specularity(job_id: str, project_id: str, per_group: int) -> None:
 
 
 def _write_step(project_id: str, step_id: str, mutate, status: str = "proposed",
-                source: str = "model", invalidate: bool = True) -> Dict:
+                source: str = "model", invalidate: bool = True,
+                confidence: Optional[float] = None) -> Dict:
     """Read-modify-write serializzato per uno step qualunque."""
     with _step_write_lock:
         project = _project(project_id)
         value = mutate(project, dict(project.step_value(step_id)))
-        project.set_step(step_id, value, status=status, source=source, invalidate=invalidate)
+        project.set_step(step_id, value, status=status, source=source,
+                         confidence=confidence, invalidate=invalidate)
         return value
 
 
