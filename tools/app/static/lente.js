@@ -24,6 +24,12 @@ const Lente = (() => {
   let padrone = '';       // quale sezione la sta usando
   let sospesa = false;    // la sezione e' cambiata e la nuova non si e' ancora fatta viva
   let trascinando = false;
+  /* «Appena l'immagine c'e', inquadra il riquadro». Serve un flag e non una chiamata
+     diretta perche' l'ordine non e' garantito: il pulsante passa il contesto *prima* di
+     aprire la finestra, e li' non c'era ancora niente da inquadrare. Risultato: la lente
+     si apriva sull'immagine intera al 58%, dove non c'e' niente da scorrere - e sembrava
+     che l'inseguimento del puntatore non funzionasse. */
+  let daInquadrare = false;
   let nodi = [];          // i rettangoli disegnati: si spostano invece di rifarli
   /* La lente segue il puntatore dell'altra finestra: e' il modo in cui si guarda
      ingrandito quello che si sta facendo sull'immagine grande.
@@ -435,6 +441,7 @@ const Lente = (() => {
       ev.preventDefault();
       cambiaZoom(ev.deltaY < 0 ? +1 : -1, ev);
     }, { passive: false });
+    daInquadrare = true;
     disegna();
     return true;
   };
@@ -623,6 +630,10 @@ const Lente = (() => {
       sc.append(n);
       nodi.push(n);
     }
+    if (daInquadrare && img.complete && img.naturalWidth) {
+      daInquadrare = false;
+      vaiAlRiquadro();      // rifa' il disegno con lo zoom giusto, e poi centra
+    }
     if (principale) scrividettaglio(d, principale.box);
     else {
       // Senza riquadro (lo studio del righello, per esempio) il cartiglio dice comunque
@@ -699,15 +710,10 @@ const Lente = (() => {
     }
     sospesa = false;
     if (viva()) win.document.body.classList.remove('sospesa');
-    disegna();
     // Entrando in una sezione nuova (o su un'altra immagine) si parte inquadrando il
     // riquadro: e' quello che si e' venuti a guardare. Da li' in poi comanda l'utente.
-    if (viva() && ctx && (cambiaSezione || (ctx.name && ctx.name !== primaImmagine))) {
-      const img = immagine();
-      const parti = () => vaiAlRiquadro();
-      if (img.complete && img.naturalWidth) parti();
-      else img.addEventListener('load', parti, { once: true });
-    }
+    if (cambiaSezione || (ctx && ctx.name && ctx.name !== primaImmagine)) daInquadrare = true;
+    disegna();
   };
 
   const attiva = (source) => viva() && !sospesa && ((source || '') === padrone);
