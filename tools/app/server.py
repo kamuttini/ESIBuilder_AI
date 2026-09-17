@@ -1476,6 +1476,10 @@ def api_project(project_id: str):
             # Gli step che hanno misurato prima dell'ultimo cambio all'elenco delle
             # immagini: hanno dentro il contributo di immagini che non ci sono piu'.
             "stale_after_images": _da_rifare_dopo_le_immagini(project),
+            # Quanti angoli ha il kit di guida aghi, cioe' quante immagini di calibrazione
+            # servono: una per angolo. Si sa dall'anagrafica appena si sceglie l'ID NDG,
+            # prima di misurare e prima ancora di avere il file .ndg sotto mano.
+            "ndg": _kit_del_progetto(project),
             "images_changed_at": (project.step_value("import") or {}).get("images_changed_at") or "",
             # La selezione della rotazione mostra solo un lotto: non si trasferiscono migliaia
             # di nomi nel JSON di ogni refresh, ma si puo' comunque correggere una o piu'
@@ -4625,6 +4629,59 @@ def _selezione_guide(project: Project) -> Dict[str, List[str]]:
     return {"include": dentro, "exclude": fuori}
 
 
+class RatioDelleDepth:
+    """I millimetri per pixel di ogni fotogramma, dalla depth che gli e' stata letta.
+
+    Sta in una classe perche' serve in due posti: quando si misura e quando si salva una
+    correzione. Finche' la correzione si fidava dei ratio scritti dentro la proposta,
+    correggere una proposta vecchia -- calcolata prima che le tracce li portassero -- dava
+    zero: `atan2(dy*0, dx*0)` e' zero, e la distanza moltiplicata per zero pure. Un ago
+    ridisegnato a mano finiva salvato come #23 0.00 e #22 0.00.
+    """
+
+    def __init__(self, project: Project) -> None:
+        scala = project.step_value("depth_scale") or {}
+        self.depths = [float(v) for v in (scala.get("depths") or [])]
+        self.ratio_x, self.ratio_y, self.fonte, self.stati = _ratios_di_scala(scala)
+        self.per_depth = _depth_per_fotogramma(scala)
+        self.rif_y = sorted(self.ratio_y)[len(self.ratio_y) // 2] if self.ratio_y else 0.0
+        self.rif_x = sorted(self.ratio_x)[len(self.ratio_x) // 2] if self.ratio_x else self.rif_y
+
+    def ok(self) -> bool:
+        return bool(self.ratio_y)
+
+    def per(self, nome: str) -> Tuple[float, float, Optional[float], str]:
+        profonda = self.per_depth.get(nome)
+        if profonda is None or not self.depths:
+            return self.rif_x, self.rif_y, None, ""
+        i = min(range(len(self.depths)), key=lambda k: abs(self.depths[k] - profonda))
+        rx = self.ratio_x[i] if i < len(self.ratio_x) and self.ratio_x[i] else self.rif_x
+        ry = self.ratio_y[i] if i < len(self.ratio_y) and self.ratio_y[i] else self.rif_y
+        return rx, ry, profonda, (self.stati[i] if i < len(self.stati) else "")
+
+
+def _kit_del_progetto(project: Project) -> Optional[Dict]:
+    """Il kit di guida aghi di questo progetto, dal foglio NDG dell'anagrafica.
+
+    Serve un numero solo -- quanti angoli ha il kit -- ma e' il numero che dice quante
+    immagini di calibrazione bisogna scegliere, una per angolo. Sceglierle resta di chi
+    guarda; sapere quante sono no, quello e' un dato e sta gia' scritto.
+    """
+    # i codici stanno in `project.codes`, non nel valore dello step: lo step tiene solo lo
+    # stato della conferma
+    grezzo = (project.codes or {}).get("id_ndg")
+    if grezzo in (None, ""):
+        return None
+    try:
+        id_ndg = int(grezzo)
+    except (TypeError, ValueError):
+        return None
+    try:
+        return _registry().ndg_angles(id_ndg)
+    except Exception:  # anagrafica assente o malformata: il progetto si apre lo stesso
+        return None
+
+
 def _linee_corrette(mano: Optional[Dict]) -> List[List[float]]:
     """Le rette di una correzione, nelle due forme che il file puo' avere.
 
@@ -4815,12 +4872,10 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int,
                 or (project.step_value("import") or {}).get("rect_echo"))
         if not rect:
             raise ValueError("serve prima il rettangolo ecografico")
-        scala = project.step_value("depth_scale") or {}
-        depths = [float(v) for v in (scala.get("depths") or [])]
-        ratio_x, ratio_y, fonte_ratio, stati_ratio = _ratios_di_scala(scala)
-        if not ratio_y:
+        ratios = RatioDelleDepth(project)
+        depths, fonte_ratio, stati_ratio = ratios.depths, ratios.fonte, ratios.stati
+        if not ratios.ok():
             raise ValueError("servono i millimetri per pixel: lancia lo step depth e scala")
-        per_depth = _depth_per_fotogramma(scala)
         orientamenti = _orientamento_per_fotogramma(project)
 
         # i fotogrammi di calibrazione li ha gia' trovati lo scan dell'import
@@ -4895,17 +4950,7 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int,
         # del riquadro depth l'ha coperto: fra la prima e l'ultima depth il rapporto cambia
         # anche di cinque volte, e col ratio mediano la distanza #22 nasceva sbagliata dello
         # stesso fattore. Dove la depth non si sa, resta il mediano, e la proposta lo dice.
-        riferimento = sorted(ratio_y)[len(ratio_y) // 2]
-        rif_x = sorted(ratio_x)[len(ratio_x) // 2] if ratio_x else riferimento
-
-        def ratio_del_fotogramma(nome: str) -> Tuple[float, float, Optional[float], str]:
-            profonda = per_depth.get(nome)
-            if profonda is None or not depths:
-                return rif_x, riferimento, None, ""
-            indice = min(range(len(depths)), key=lambda i: abs(depths[i] - profonda))
-            rx = ratio_x[indice] if indice < len(ratio_x) and ratio_x[indice] else rif_x
-            ry = ratio_y[indice] if indice < len(ratio_y) and ratio_y[indice] else riferimento
-            return rx, ry, profonda, (stati_ratio[indice] if indice < len(stati_ratio) else "")
+        riferimento = ratios.rif_y
 
         # Una retta corretta a mano non si rimisura: il rilevatore su quel fotogramma ha gia'
         # dato la sua risposta ed e' stata scartata da chi guardava.
@@ -4914,7 +4959,7 @@ def _run_guides_proposal(job_id: str, project_id: str, per_folder: int,
         misure = []
         senza_depth = 0
         for done, nome in enumerate(candidati, 1):
-            rx, ry, profonda, stato_ratio = ratio_del_fotogramma(nome)
+            rx, ry, profonda, stato_ratio = ratios.per(nome)
             mano = corrette.get(nome)
             gruppo = orientamenti.get(nome, "")
             linee_mano = _linee_corrette(mano)
@@ -5058,10 +5103,16 @@ def api_guides_correction(project_id: str):
     # si ricostruiscono le misure di tutti i fotogrammi e si ricalcolano le famiglie
     progetto = _project(project_id)
     base = progetto.working_dir()
+    # I ratio vengono dalla scala del progetto, non da quelli scritti dentro la proposta: una
+    # proposta calcolata prima che le tracce li portassero li ha a zero, e con zero angolo e
+    # distanza si annullano -- la retta ridisegnata a mano si salvava come 0.00 e 0.00.
+    ratios = RatioDelleDepth(progetto)
     misure: List[Dict] = []
     for altro, t in per_nome.items():
-        rx = float(t.get("ratio_x") or t.get("ratio_y") or 0.0)
-        ry = float(t.get("ratio_y") or rx)
+        rx, ry, _profonda, _stato = ratios.per(altro)
+        if not ry:
+            rx = float(t.get("ratio_x") or t.get("ratio_y") or 0.0)
+            ry = float(t.get("ratio_y") or rx)
         mano = _linee_corrette(correzioni.get(altro))
         ribaltato = str(t.get("orientamento") or "") in RIBALTATI
         if mano:

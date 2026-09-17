@@ -31,6 +31,8 @@ SHEET_FSS = "FSS"
 
 COL_ECHO_MODEL, COL_ECHO_ID = "A", "B"
 COL_PROBE_MODEL, COL_PROBE_ID = "A", "B"
+# NDG sheet: ID Needle Guide | Codice KIT | Angoli | Descrizione2 | Note
+NDG_COLUMNS = {"id": "A", "kit": "B", "angles": "C", "description": "D", "note": "E"}
 # FSS sheet: modello eco | modello sonda | modello ndg | ID ECHO | ID SONDA | ID NDG | tipo | FSS
 FSS_COLUMNS = {
     "echo_model": "A",
@@ -184,6 +186,43 @@ class Anagrafica:
 
     def match_probe(self, query: str, limit: int = 5) -> List[Match]:
         return self._match_column(SHEET_PROBE, COL_PROBE_MODEL, COL_PROBE_ID, query, limit)
+
+    def ndg_rows(self) -> List[Dict[str, str]]:
+        out = []
+        for row in self._data_rows(SHEET_NDG):
+            entry = {key: row.get(col, "") for key, col in NDG_COLUMNS.items()}
+            if entry["id"].lstrip("-").isdigit():
+                out.append(entry)
+        return out
+
+    def ndg_angles(self, id_ndg: int) -> Optional[Dict]:
+        """Gli angoli di un kit: quanti sono, e come si chiamano nel foglio NDG.
+
+        Il numero di angoli e' il numero di immagini di calibrazione che servono, una per
+        angolo: e' la stessa cosa che il `.ndg` dice con il suo primo intero, ma si sa
+        **prima** di avere il file e prima di misurare qualsiasi cosa.
+
+        Le etichette si contano separando sulle virgole, ma solo dopo aver tolto le parentesi:
+        diverse righe scrivono le distanze dei fori li' dentro ("0 (distanze fori: 5,10,15)")
+        e quelle virgole non sono angoli. Contate cosi', le 54 righe che hanno un `.ndg`
+        nell'archivio tornano tutte con il numero di angoli del file, senza eccezioni.
+        """
+        for row in self.ndg_rows():
+            if int(row["id"]) != int(id_ndg):
+                continue
+            grezzo = (row.get("angles") or "").strip().lstrip("'")
+            senza_parentesi = re.sub(r"\([^)]*\)", "", grezzo)
+            etichette = [v.strip() for v in senza_parentesi.split(",") if v.strip()]
+            return {
+                "id": int(row["id"]),
+                "kit": row.get("kit", ""),
+                "angles": etichette,
+                "count": len(etichette),
+                "raw": grezzo,
+                "description": row.get("description", ""),
+                "note": row.get("note", ""),
+            }
+        return None
 
     def fss_rows(self) -> List[Dict[str, str]]:
         out = []

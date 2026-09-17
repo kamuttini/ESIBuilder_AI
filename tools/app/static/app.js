@@ -142,6 +142,7 @@ async function openProject(projectId) {
   state.splitPending = data.split_pending || null;
   state.splitOther = data.split_other || null;
   state.staleAfterImages = data.stale_after_images || [];
+  state.ndg = data.ndg || null;
   state.imagesChangedAt = data.images_changed_at || '';
   state.rotationImages = data.rotation_images || [];
   state.fssPath = data.fss_path;
@@ -1397,6 +1398,12 @@ function cardTutteLeImmagini(panel) {
       + 'depth e scala — e la mette da parte per la riga #15. Clicca una miniatura '
       + 'per aprirla a tutto schermo; usa le frecce per scorrere le immagini.'
       + (proibite.size ? ` Adesso ne hai ${proibite.size} marcate proibite.` : '')));
+    if (state.ndg && state.ndg.count) {
+      card.append(el('p', { class: 'hint' },
+        `il kit NDG ${state.ndg.id} ha ${state.ndg.count} angoli `
+        + `(${state.ndg.angles.join(', ')}): servono ${state.ndg.count} immagini di `
+        + 'calibrazione, una per angolo.'));
+    }
     if (usate.size || guardate.size || propostaRete.size) {
       card.append(el('p', { class: 'hint' },
         `linee guida: ${usate.size ? `${usate.size} usate per #22 e #23` : 'nessuna ancora usata'}`
@@ -4504,6 +4511,41 @@ function panelGuides(panel, step) {
     + 'la prima linea incrocia la verticale centrale (#22), misurati sugli aghi dei fotogrammi di '
     + 'calibrazione. Ogni misura si vede disegnata sopra il suo fotogramma, e va confermata: '
     + 'sui dati etichettati a mano il 45% cade entro un grado e il 71% entro tre.'));
+
+  /* Quante immagini servono, prima ancora di misurarle.
+
+     Il kit di guida aghi ha un numero fisso di angoli e la calibrazione ne vuole una immagine
+     per angolo: e' un dato dell'anagrafica, non una cosa da scoprire guardando. Quale immagine
+     per quale angolo lo sceglie chi guarda; quante sono, no. */
+  const kit = state.ndg;
+  if (kit && kit.count) {
+    const trovate = ((proposta && proposta.proposte) || []).length;
+    const card = el('div', { class: 'card' });
+    card.append(el('div', { class: 'kv' },
+      el('span', {}, `kit NDG ${kit.id}`),
+      el('span', {}, `${kit.count} angoli (${kit.angles.join(', ')})`
+        + `  ·  servono ${kit.count} immagini di calibrazione, una per angolo`)));
+    if (kit.kit) {
+      card.append(el('div', { class: 'kv' },
+        el('span', { class: 'hint' }, '  codice kit'),
+        el('span', { class: 'hint' }, kit.kit + (kit.description ? ` — ${kit.description}` : ''))));
+    }
+    if (proposta) {
+      const manca = kit.count - trovate;
+      card.append(el('div', { class: 'kv' },
+        el('span', { style: manca ? 'color:var(--warn)' : '' }, 'famiglie trovate'),
+        el('span', { style: manca ? 'color:var(--warn)' : '' },
+          `${trovate} su ${kit.count}`
+          + (manca > 0 ? ` — ne mancano ${manca}: aggiungi i fotogrammi mancanti dall'import`
+            : manca < 0 ? ` — ${-manca} di troppo: due misure sullo stesso angolo, o un ago sbagliato`
+              : ' — tutte'))));
+    }
+    panel.append(card);
+  } else if (kit) {
+    panel.append(el('p', { class: 'hint' },
+      `il kit NDG ${kit.id} non ha gli angoli scritti nel foglio NDG dell'anagrafica: `
+      + 'quante immagini servano va deciso a mano'));
+  }
 
   const stato = el('span', { class: 'hint' });
   const misura = async (bottone, corpo, messaggio) => {
