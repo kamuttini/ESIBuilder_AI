@@ -4215,6 +4215,7 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
   };
 
   const auto = el('button', { class: 'ghost' }, 'Torna all\'automatico');
+  const parallelo = el('button', { class: 'ghost' }, 'Rendi parallelo');
   const salvataggio = el('span', { class: 'hint' });
   let attesa = null;          // timer del salvataggio automatico
   let ultimaProposta = null;  // l'ultima ricalcolata, per aggiornare il pannello alla chiusura
@@ -4227,6 +4228,10 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     }
     scelta.value = String(Math.min(quale, Math.max(0, stati.length - 1)));
     scelta.style.display = stati.length > 1 ? '' : 'none';
+    parallelo.style.display = stati.length > 1 ? '' : 'none';
+    parallelo.title = stati.length > 1
+      ? `da' all'altro ago l'inclinazione dell'ago ${quale + 1}, lasciandolo dov'e'`
+      : '';
   };
 
   const mostra = () => {
@@ -4356,6 +4361,22 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     programmaSalvataggio();
   };
 
+  /* Due aghi nella stessa immagine sono sempre paralleli: e' una proprieta' della guida, non
+     una coincidenza. Il rilevatore lo sa gia' -- tiene un secondo ago solo se e' entro otto
+     gradi dal primo -- ma una correzione a mano puo' farli divergere, e correggere due volte
+     lo stesso angolo e' lavoro inutile. Qui l'altro ago prende l'inclinazione di quello
+     scelto e resta dov'e': cambia il suo #23, non il suo #22. */
+  const rendiParallelo = () => {
+    const stati = prendi();
+    if (stati.length < 2) return;
+    const riferimento = stati[quale];
+    for (let i = 0; i < stati.length; i += 1) {
+      if (i !== quale) stati[i] = { ...stati[i], ang: riferimento.ang };
+    }
+    mostra();
+    programmaSalvataggio();
+  };
+
   const bottoncino = (testo, titolo, azione) => {
     const b = el('button', { class: 'ghost sq2', title: titolo }, testo);
     b.addEventListener('click', azione);
@@ -4431,6 +4452,7 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     attesa = setTimeout(() => { attesa = null; salvaOra(); }, 700);
   };
 
+  parallelo.addEventListener('click', rendiParallelo);
   auto.addEventListener('click', async () => {
     if (attesa) { clearTimeout(attesa); attesa = null; }
     rette = null;
@@ -4461,7 +4483,7 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
       () => sposta(-passo)),
     bottoncino('↓', 'abbassa la retta: #22 aumenta del passo scelto, in millimetri',
       () => sposta(passo)),
-    passoScelta, misura, salvataggio, auto, chiudi);
+    passoScelta, parallelo, misura, salvataggio, auto, chiudi);
   pieno.append(testa, scena);
   document.body.append(pieno);
   window.addEventListener('keydown', tasti);
@@ -4596,8 +4618,9 @@ function panelGuides(panel, step) {
       + 'LRUD, dove l\'immagine e\' ribaltata. In giallo la verticale centrale e il punto in cui '
       + 'la retta la incrocia, che e\' esattamente cio\' che #22 misura. Clicca una miniatura '
       + 'per vederla a tutto schermo: li\' la retta si corregge — le frecce tonde la ruotano, '
-      + 'su e giu\' la alzano e la abbassano, e il punto giallo si trascina. Le correzioni si '
-      + 'salvano da sole; «Torna all\'automatico» rimette la misura del rilevatore.'));
+      + 'su e giu\' la alzano e la abbassano, e il punto giallo si trascina. Con due aghi, '
+      + '«Rendi parallelo» copia l\'inclinazione sull\'altro. Le correzioni si salvano da sole; '
+      + '«Torna all\'automatico» rimette la misura del rilevatore.'));
     panel.append(el('p', { class: 'hint' }, proposta.avvertenza || ''));
 
     const usa = el('button', {}, 'Porta la proposta nel valore');
