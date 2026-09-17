@@ -96,7 +96,8 @@ CODE_IMPACT: Dict[str, tuple[str, ...]] = {
 ECHO_PROBE_SPLIT: Dict[str, tuple[str, ...]] = {
     "vendor": ("rect_name_echo", "rect_name_echo_source", "rect_name_echo_agreement",
                "rect_name_echo_reason", "preview_image"),
-    "probe": ("rect_name_probe", "preview_image"),
+    "probe": ("rect_name_probe", "rect_name_probe_source", "rect_name_probe_score",
+              "rect_name_probe_agreement", "rect_name_probe_reason", "preview_image"),
     "rect": ("rect_echo", "margin_percent", "rect_model", "rect_source",
              "rect_agreement_iou", "preview_image"),
 }

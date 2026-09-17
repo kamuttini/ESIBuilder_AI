@@ -60,6 +60,7 @@ class ModelPaths:
     su_giu: Optional[Path] = None
     needle: Optional[Path] = None
     line13_by_vendor: Dict[str, Path] = field(default_factory=dict)
+    line14: Optional[Path] = None
 
     @classmethod
     def from_active_pipeline(cls, root: Path, models_30: Optional[Path] = None) -> "ModelPaths":
@@ -84,6 +85,9 @@ class ModelPaths:
                 / "91_needle_models/resnet18_256_cpu/best_model.pt"
             ),
             line13_by_vendor=_load_line13_map(Path(root) / "maps" / "vendor_line13_template_map.json"),
+            # #14 e' una rete sola per tutti i vendor: separare per marchio non
+            # guadagna nulla (13 vittorie, 12 sconfitte, 23 pari su 48 cartelle).
+            line14=models / "probe_template_line14" / "best_model.pt",
         )
 
     def missing(self) -> List[str]:
@@ -113,6 +117,7 @@ class Engine:
         self._needle = None
         self._needle_size = 0
         self._line13: Dict[str, tuple] = {}
+        self._line14 = None
 
     # -- setup -------------------------------------------------------------
     def _setup(self):
@@ -683,6 +688,133 @@ class Engine:
             "images_kept": len(kept),
             "agreement_iou": _median_iou(kept, median),
             "source": "vendor_line13_model",
+        }
+
+    # -- #14 template sonda -------------------------------------------------
+    def _load_line14(self):
+        if self._line14 is not None:
+            return self._line14
+        path = self.paths.line14
+        if path is None or not Path(path).is_file():
+            return None
+        torch = self._setup()
+        from train_probe_template_net import ProbeTemplateNet
+
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        model = ProbeTemplateNet(pretrained=False)
+        model.load_state_dict(checkpoint["model_state"])
+        model.eval().to(self._device)
+        self._line14 = (model, int(checkpoint.get("image_size") or 512), Path(path))
+        return self._line14
+
+    def _tensor_letterbox(self, path: Path, size: int):
+        """Come il trainer: si rimpicciolisce mantenendo le proporzioni e si appoggia
+        in alto a sinistra su una tela quadrata nera. Il resize quadrato di `_tensor`
+        deformerebbe i fotogrammi verticali (1024x1280) e sposterebbe il box."""
+        self._setup()
+        from PIL import Image
+        from torchvision.transforms import functional as TF
+
+        with Image.open(path) as raw:
+            image = raw.convert("RGB")
+            width, height = image.size
+            scale = size / max(width, height)
+            resized = image.resize(
+                (max(1, round(width * scale)), max(1, round(height * scale))), Image.BILINEAR
+            )
+            canvas = Image.new("RGB", (size, size), (0, 0, 0))
+            canvas.paste(resized, (0, 0))
+        tensor = TF.normalize(TF.to_tensor(canvas), IMAGENET_MEAN, IMAGENET_STD)
+        return tensor, width, height, scale
+
+    def predict_line14(
+        self,
+        paths: Sequence[Path],
+        batch: int = 8,
+        min_score: float = 0.20,
+        consensus_min_iou: float = 0.35,
+        consensus_min_keep: int = 3,
+    ) -> Dict:
+        """#14 con la rete unica: picco della heatmap per fotogramma, poi mediana e
+        consenso IoU come per la #13.
+
+        `min_score` scarta i fotogrammi in cui la rete non ha trovato la scritta (le
+        schermate senza nome sonda, e le UI mai viste in training). Misurato su 61
+        cartelle di test mai viste: sopra 0.20 il box e' corretto nel 91% dei casi,
+        sotto quasi sempre sbagliato. E' la soglia da tarare sull'uso reale.
+        """
+        torch = self._setup()
+        loaded = self._load_line14()
+        if loaded is None:
+            return {"box": None, "reason": "modello #14 non installato"}
+        model, size, path = loaded
+        from train_probe_template_net import decode_batch
+
+        boxes: List[Dict] = []
+        scores: List[float] = []
+        scanned = 0
+        for start in range(0, len(paths), batch):
+            tensors, geometry = [], []
+            for image_path in paths[start : start + batch]:
+                try:
+                    tensor, width, height, scale = self._tensor_letterbox(image_path, size)
+                except Exception:
+                    continue
+                tensors.append(tensor)
+                geometry.append((width, height, scale))
+            if not tensors:
+                continue
+            with torch.no_grad():
+                heat, offset, extent = model(torch.stack(tensors).to(self._device))
+            frame_scores, frame_boxes = decode_batch(heat, offset, extent)
+            scanned += len(geometry)
+            for index, (width, height, scale) in enumerate(geometry):
+                score = float(frame_scores[index])
+                if score < min_score:
+                    continue
+                x1, y1, x2, y2 = [float(v) / scale for v in frame_boxes[index]]
+                left, right = sorted((x1, x2))
+                top, bottom = sorted((y1, y2))
+                boxes.append({
+                    "top": int(round(max(0.0, top))),
+                    "left": int(round(max(0.0, left))),
+                    "bottom": int(round(min(float(height), bottom))),
+                    "right": int(round(min(float(width), right))),
+                })
+                scores.append(score)
+
+        if not boxes:
+            return {
+                "box": None,
+                "images": scanned,
+                "images_kept": 0,
+                "source": "line14_model",
+                "model": str(path),
+                "reason": "la rete non ha trovato la scritta della sonda in nessun fotogramma",
+            }
+
+        median = {
+            side: int(round(statistics.median(box[side] for box in boxes)))
+            for side in ("top", "left", "bottom", "right")
+        }
+        kept = [box for box in boxes if _iou(box, median) >= consensus_min_iou]
+        if len(kept) >= consensus_min_keep:
+            median = {
+                side: int(round(statistics.median(box[side] for box in kept)))
+                for side in ("top", "left", "bottom", "right")
+            }
+        else:
+            kept = boxes
+
+        return {
+            "box": median,
+            "images": scanned,
+            "images_kept": len(kept),
+            "score": round(statistics.median(scores), 4),
+            "agreement_iou": _median_iou(kept, median),
+            "model": str(path),
+            "source": "line14_model",
+            "reason": "",
         }
 
     # -- rect --------------------------------------------------------------

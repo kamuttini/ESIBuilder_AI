@@ -340,6 +340,9 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         _job_update(job_id, stage="template ecografo (#13)")
         line13 = engine.predict_line13(picked, vendor.get("vendor"))
 
+        _job_update(job_id, stage="template sonda (#14)")
+        line14 = engine.predict_line14(picked)
+
         plane: Dict = {}
         if box and registry.get("biplane"):
             _job_update(job_id, stage="piano L/T")
@@ -429,13 +432,33 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
             confidence=line13.get("agreement_iou"),
         )
 
-        # --- sonda (#14): il template col nome della sonda, oggi senza rete
+        # --- sonda (#14): il template col nome della sonda, proposto dalla rete unica
         probe_value = dict(project.step_value("probe"))
         probe_value["preview_image"] = anteprima
+        # Stessa cautela della #13: un box corretto a mano si tiene, a meno che non sia
+        # finito fuori dal fotogramma (succede dopo una rotazione).
+        attuale_sonda = probe_value.get("rect_name_probe")
+        a_mano_sonda = bool((project.steps.get("probe") or {}).get("user_edited"))
+        fuori_sonda = bool(attuale_sonda) and not _box_nel_fotogramma(attuale_sonda, fotogramma)
+        if line14.get("box") and (not attuale_sonda or not a_mano_sonda or fuori_sonda):
+            probe_value["rect_name_probe"] = {
+                **line14["box"],
+                "check": 1,
+                "params": {"threshold": 0.0},
+            }
+            probe_value["rect_name_probe_source"] = line14.get("source")
+            probe_value["rect_name_probe_score"] = line14.get("score")
+            probe_value["rect_name_probe_agreement"] = line14.get("agreement_iou")
+            probe_value["rect_name_probe_replaced"] = (
+                "il box corretto a mano cadeva fuori dal fotogramma: rifatto dalla rete"
+                if fuori_sonda and a_mano_sonda else ""
+            )
+        probe_value["rect_name_probe_reason"] = line14.get("reason")
         project.set_step(
             "probe", probe_value,
             status="proposed" if probe_value.get("rect_name_probe") else "empty",
             source="model",
+            confidence=line14.get("score"),
         )
 
         project = _project(project_id)

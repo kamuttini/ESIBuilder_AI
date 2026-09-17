@@ -1750,14 +1750,19 @@ function panelProbe(panel, step) {
     ['piano L/T (rete)', plane.plane
       ? `${plane.plane} (confidenza ${plane.confidence ?? '—'})` : '—'],
     ['tipo sonda nei codici', (state.project.codes || {}).probe_type ?? '—'],
+    ['template #14 proposto da',
+      value.rect_name_probe_source
+        ? `rete #14 · confidenza ${value.rect_name_probe_score ?? '—'} · accordo IoU ${value.rect_name_probe_agreement ?? '—'}`
+        : (value.rect_name_probe_reason || '—')],
   ]);
 
   panel.append(el('h3', {}, 'Template col nome della sonda (#14)'));
   panel.append(el('p', { class: 'hint' },
-    'il riquadro con la sigla della sonda a schermo. Il resolver storico avrebbe bisogno ' +
-    'del corpus legacy .fss, oggi non disponibile: qui il box si disegna a mano.'));
+    'il riquadro con la sigla della sonda a schermo. Lo propone la rete #14; dove non ' +
+    'riconosce la scritta lascia il campo vuoto invece di tirare a indovinare, e allora ' +
+    'il box si disegna a mano.'));
   templateBoxPanel(panel, step, value, 'rect_name_probe', '#d29922',
-    'nessun box per la sonda: disegnalo tu attorno alla sigla a schermo.');
+    'la rete non ha riconosciuto la sigla della sonda: disegna tu il box attorno alla scritta.');
   templateBlockEditor(panel, value, 'rect_name_probe', '#14',
     'le coordinate si modificano sopra, qui restano i parametri di match');
   panel.append(saveRow(step.id, () => value));

@@ -23,7 +23,7 @@ Poi apri `http://127.0.0.1:8800/`. I progetti finiscono in `artifacts/80_app_pro
 | `rotation.py` | rotazione OSD con tesseract (>=2 voti, >=60% di supporto), 4 processi in parallelo |
 | `timestamp_detection.py` | proposta OCR dell'area data/ora su 8 immagini, con supporto spaziale e confidenza |
 | `anagrafica.py` | lettura/scrittura di `encoding_struct*.xlsx`: ID da modelli, candidati per sonda, nuova riga con backup |
-| `inference.py` | vendor, sonda, rettangolo (routing per vendor), template #13, piano L/T e su/giu dai checkpoint della pipeline attiva |
+| `inference.py` | vendor, sonda, rettangolo (routing per vendor), template #13 e #14, piano L/T e su/giu dai checkpoint della pipeline attiva |
 | `stages.py` | marker di orientamento, depth e scala come sottoprocessi con `pipeline_context.json`, piu' i parser dalle righe del modulo al valore dello step |
 | `probe_shape.py` | misura geometrica lineare/convex — **non agganciata**, i numeri misurati sono nel docstring |
 | `server.py` | API Flask + servizio della UI |
@@ -144,9 +144,14 @@ Durante l'import data e ora vengono cercate automaticamente dopo la rotazione: u
 affidabile entra subito nella deduplicazione, ma il riquadro rosa resta visibile e correggibile.
 La ricerca puo' essere rilanciata o disattivata esplicitamente per il singolo progetto.
 
-`#14 RECT_NAME_PROBE` resta vuoto: il resolver storico legge i `.fss` legacy indicati in
-`references/.../manifest_rect_echo.csv`, che puntano a `ESIBuilder_AI/Dataset/` — cartella oggi
-assente (0 su 426 percorsi risolve).
+`#14 RECT_NAME_PROBE` lo propone una rete dedicata (`models/probe_template_line14/`, una sola
+per tutti i vendor: separare per marchio non guadagna nulla, misurato su 48 cartelle). E' un
+detector a heatmap: il picco vale come confidenza, e sotto `min_score` la riga resta vuota invece
+di contenere un rettangolo a caso. Su 61 cartelle di test mai viste propone sul 57% con il 91% di
+box corretti; il resto arriva in revisione. Il resolver storico che leggeva i `.fss` legacy da
+`references/.../manifest_rect_echo.csv` resta inutilizzabile (quei percorsi puntano a
+`ESIBuilder_AI/Dataset/`, cartella assente: 0 su 426 risolve) e comunque su macchine nuove
+sbagliava il rettangolo nell'88% dei casi in cui rispondeva.
 
 Non ancora agganciati: soglie e linee guida — quegli step accettano il valore in JSON, nella
 forma che il writer si aspetta. Orientamento, depth e scala girano dai rispettivi moduli
