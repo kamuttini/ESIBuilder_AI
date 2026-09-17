@@ -4552,42 +4552,87 @@ function panelGuides(panel, step) {
     sezione.append(corpo);
     panel.append(sezione);
 
+    // La lente: passando sopra una miniatura se ne vede una grande. Scegliere l'immagine
+    // giusta per un angolo vuol dire guardare l'ago, e in un riquadro da 130 pixel l'ago non
+    // si vede -- il nome del file, ancora meno.
+    const lente = el('div', { class: 'piani-lente' }, el('img', { alt: '' }));
+    lente.style.display = 'none';
+    panel.append(lente);
+    const mostraLente = (nome, evento) => {
+      const img = lente.querySelector('img');
+      const voluta = `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=760`;
+      if (img.getAttribute('src') !== voluta) img.setAttribute('src', voluta);
+      lente.style.display = 'block';
+      const largo = 420, alto = 320;
+      let x = evento.clientX + 18;
+      let y = evento.clientY + 18;
+      if (x + largo > window.innerWidth) x = evento.clientX - largo - 18;
+      if (y + alto > window.innerHeight) y = Math.max(8, window.innerHeight - alto - 8);
+      lente.style.left = `${Math.max(8, x)}px`;
+      lente.style.top = `${y}px`;
+    };
+    const nascondiLente = () => { lente.style.display = 'none'; };
+
     const disegnaSlot = (pool, assegnate) => {
       corpo.replaceChildren();
-      const usate = new Set(Object.values(assegnate).flat());
+      // quale angolo sta ricevendo i clic: sopravvive al ridisegno dopo ogni assegnazione
+      if (!kit.angles.includes(state.__guideAngolo)) state.__guideAngolo = kit.angles[0];
+
+      const dove = {};                       // nome immagine -> angolo a cui e' assegnata
+      for (const [a, nomi] of Object.entries(assegnate)) for (const n of nomi) dove[n] = a;
+
+      const fila = el('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' });
       for (const angolo of kit.angles) {
-        const riga = el('div', { class: 'kv' });
-        const sue = assegnate[angolo] || [];
-        riga.append(el('span', {}, `angolo ${angolo}`));
-        const destra = el('span', { class: 'row', style: 'flex-wrap:wrap;gap:6px' });
-        for (const nome of sue) {
-          const togli = el('button', { class: 'ghost sq2', title: 'toglilo da questo angolo' }, '×');
-          togli.addEventListener('click', async () => {
-            togli.disabled = true;
-            try {
-              await api(`/projects/${state.projectId}/guides/assign`,
-                { body: { angle: angolo, clear: '1' } });
-              for (const altro of sue) { if (altro !== nome) await assegna(angolo, altro); }
-              await reload();
-            } catch (errore) { toast(errore.message, true); togli.disabled = false; }
-          });
-          destra.append(el('span', { class: 'chip on' }, nome.split('/').pop()), togli);
-        }
-        const scegli = el('select', {});
-        scegli.append(el('option', { value: '' }, sue.length ? '+ aggiungi una depth…' : '— scegli —'));
-        for (const nome of pool) {
-          if (usate.has(nome)) continue;
-          scegli.append(el('option', { value: nome }, nome.split('/').pop()));
-        }
-        scegli.addEventListener('change', async () => {
-          if (!scegli.value) return;
-          try { await assegna(angolo, scegli.value); await reload(); }
-          catch (errore) { toast(errore.message, true); }
-        });
-        destra.append(scegli);
-        riga.append(destra);
-        corpo.append(riga);
+        const quante = (assegnate[angolo] || []).length;
+        const chip = el('button',
+          { class: 'chip' + (angolo === state.__guideAngolo ? ' on' : ''),
+            title: 'scegli questo angolo, poi clicca l\'immagine qui sotto' },
+          `angolo ${angolo}${quante ? ` · ${quante}` : ''}`);
+        chip.addEventListener('click', () => { state.__guideAngolo = angolo; disegnaSlot(pool, assegnate); });
+        fila.append(chip);
       }
+      corpo.append(fila);
+      corpo.append(el('p', { class: 'hint' },
+        `clicca l'immagine da usare per l'angolo ${state.__guideAngolo}; `
+        + 'passaci sopra per vederla grande. Cliccandone una gia\' assegnata la togli.'));
+
+      const griglia = el('div', { class: 'thumbs' });
+      for (const nome of pool) {
+        const suo = dove[nome];
+        const fig = el('figure', { class: 'thumb-voce' + (suo ? ' guide-usata' : ''), style: 'margin:0' });
+        const img = el('img', {
+          src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(nome)}&w=260`,
+          loading: 'lazy', alt: nome });
+        img.style.cursor = 'pointer';
+        img.addEventListener('mousemove', (evento) => mostraLente(nome, evento));
+        img.addEventListener('mouseleave', nascondiLente);
+        img.addEventListener('click', async () => {
+          nascondiLente();
+          try {
+            if (suo === state.__guideAngolo) {
+              // toglierla: si riscrive l'angolo senza di lei
+              const restano = (assegnate[state.__guideAngolo] || []).filter((n) => n !== nome);
+              await api(`/projects/${state.projectId}/guides/assign`,
+                { body: { angle: state.__guideAngolo, clear: '1' } });
+              for (const altro of restano) await assegna(state.__guideAngolo, altro);
+            } else {
+              await assegna(state.__guideAngolo, nome);
+            }
+            await reload();
+          } catch (errore) { toast(errore.message, true); }
+        });
+        fig.append(img);
+        if (suo) fig.append(el('span', { class: 'thumb-guide-targa' }, `angolo ${suo}`));
+        fig.append(el('figcaption', {}, nome.split('/').pop()));
+        griglia.append(fig);
+      }
+      if (!pool.length) {
+        corpo.append(el('p', { class: 'hint' },
+          'nessun fotogramma nel pool: lancia la ricerca nello step Import e analisi, '
+          + 'oppure aggiungine a mano dalla galleria delle immagini'));
+      }
+      corpo.append(griglia);
+
       const mancano = kit.angles.filter((a) => !(assegnate[a] || []).length).length;
       corpo.append(el('p', { class: 'hint', style: mancano ? 'color:var(--warn)' : '' },
         mancano ? `mancano ${mancano} angoli su ${kit.count}: la misura userà i fotogrammi `
