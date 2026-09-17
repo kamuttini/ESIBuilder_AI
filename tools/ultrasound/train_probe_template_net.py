@@ -164,20 +164,46 @@ class ProbeTemplateDataset(Dataset):
         self.augment = augment
         self.normalize = transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
         self.out_size = image_size // STRIDE
+        self.read_failures = 0
 
     def __len__(self) -> int:
         return len(self.rows)
 
+    def _read(self, row: SampleRow):
+        """The dataset lives on a USB volume: a read can fail once and succeed right after.
+        Losing a whole run to one hiccup is not acceptable, so retry, then move on."""
+        for attempt in range(3):
+            try:
+                with Image.open(row.image_path) as img:
+                    image = img.convert("RGB")
+                return image
+            except (OSError, ValueError) as exc:
+                if attempt == 2:
+                    self.read_failures += 1
+                    if self.read_failures <= 5:
+                        print(f"  [lettura fallita] {row.image_path}: {exc}", flush=True)
+                    return None
+                time.sleep(0.2)
+        return None
+
     def __getitem__(self, idx: int):  # type: ignore[override]
         row = self.rows[idx]
-        with Image.open(row.image_path) as img:
-            image = img.convert("RGB")
-            width, height = image.size
-            scale = self.image_size / max(width, height)
-            new_w, new_h = max(1, int(round(width * scale))), max(1, int(round(height * scale)))
-            image = image.resize((new_w, new_h), Image.BILINEAR)
-            canvas = Image.new("RGB", (self.image_size, self.image_size), (0, 0, 0))
-            canvas.paste(image, (0, 0))
+        image = self._read(row)
+        if image is None:
+            # The neighbour keeps the batch full with real data; only if that fails too
+            # does the sample become an empty frame, which is a harmless negative.
+            row = self.rows[(idx + 1) % len(self.rows)]
+            image = self._read(row)
+        if image is None:
+            row = replace(row, has_template=0)
+            image = Image.new("RGB", (self.image_size, self.image_size), (0, 0, 0))
+
+        width, height = image.size
+        scale = self.image_size / max(width, height)
+        new_w, new_h = max(1, int(round(width * scale))), max(1, int(round(height * scale)))
+        image = image.resize((new_w, new_h), Image.BILINEAR)
+        canvas = Image.new("RGB", (self.image_size, self.image_size), (0, 0, 0))
+        canvas.paste(image, (0, 0))
 
         tensor = transforms.functional.to_tensor(canvas)
         if self.augment:
