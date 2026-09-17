@@ -70,7 +70,9 @@ def main() -> int:
     ap.add_argument("--root", type=Path, required=True)
     ap.add_argument("--output", type=Path, required=True)
     ap.add_argument("--per-acquisizione", type=int, default=6)
-    ap.add_argument("--width", type=int, default=420)
+    ap.add_argument("--width", type=int, default=900,
+                    help="una copia sola, grande: la griglia la rimpicciolisce con il CSS e "
+                         "il pieno schermo la usa com'e'")
     ap.add_argument("--tutte-le-cartelle", action="store_true",
                     help="non solo quelle che si chiamano biopsia: serve per i negativi")
     args = ap.parse_args()
@@ -94,6 +96,7 @@ def main() -> int:
     for v in voci:
         corpo.append(
             f'<figure class="v" data-n="{v["n"]}" data-file="{html.escape(v["file"])}">'
+            f'<button class="lente" title="a tutto schermo">⤢</button>'
             f'<img src="data:image/jpeg;base64,{v["img"]}" loading="lazy">'
             f'<figcaption>{v["n"]} · {html.escape(v["acq"][:38])}'
             f'<br><span class="c">{html.escape(v["cartella"][:30])}</span></figcaption>'
@@ -121,8 +124,19 @@ TEMPLATE = """<!doctype html><meta charset="utf-8">
  button:hover{border-color:#58a6ff}
  .griglia{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px}
  figure{margin:0;background:#161b22;border:2px solid #30363d;border-radius:8px;padding:6px;
-        cursor:pointer}
+        cursor:pointer;position:relative}
  figure img{width:100%;display:block;border-radius:4px}
+ .lente{position:absolute;top:10px;right:10px;opacity:0;font-size:16px;padding:2px 7px}
+ figure:hover .lente{opacity:1}
+ #pieno{position:fixed;inset:0;background:rgba(2,6,12,.96);z-index:20;display:none;
+        flex-direction:column}
+ #pieno.on{display:flex}
+ #pienoTesta{display:flex;gap:8px;align-items:center;padding:10px 14px;
+             border-bottom:1px solid #30363d;background:#161b22;flex-wrap:wrap}
+ #pienoScena{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:10px}
+ #pienoScena img{max-width:100%;max-height:100%;object-fit:contain}
+ button.si{border-color:#3fb950;color:#3fb950}
+ button.no{border-color:#f85149;color:#f85149}
  figcaption{font-size:11px;color:#8b949e;margin-top:4px}
  .c{color:#6e7681}
  figure.si{border-color:#3fb950}
@@ -141,6 +155,18 @@ TEMPLATE = """<!doctype html><meta charset="utf-8">
   <textarea id="uscita" placeholder="qui compare il JSON da copiare"></textarea>
 </div>
 <div class="griglia">__CORPO__</div>
+<div id="pieno">
+  <div id="pienoTesta">
+    <button onclick="vai(-1)">‹</button>
+    <button onclick="vai(1)">›</button>
+    <span id="pienoInfo"></span>
+    <button class="si" onclick="segnaPieno('si')">sì (S)</button>
+    <button class="no" onclick="segnaPieno('no')">no (N)</button>
+    <button onclick="segnaPieno(null)">non deciso (D)</button>
+    <button onclick="chiudiPieno()">chiudi (Esc)</button>
+  </div>
+  <div id="pienoScena"><img id="pienoImg" alt=""></div>
+</div>
 <script>
 const CHIAVE = 'biopsia___CHIAVE__';
 const stato = JSON.parse(localStorage.getItem(CHIAVE) || '{}');
@@ -149,6 +175,7 @@ function aggiorna(){
   let si=0,no=0;
   for(const v of Object.values(stato)){ if(v==='si')si++; else if(v==='no')no++; }
   conto.textContent = `${si} sì · ${no} no · ${__TOTALE__-si-no} da vedere`;
+  scrivi();
 }
 for(const fig of document.querySelectorAll('figure')){
   const n = fig.dataset.n;
@@ -163,14 +190,62 @@ for(const fig of document.querySelectorAll('figure')){
     aggiorna();
   });
 }
-aggiorna();
-function esporta(){
+/* Il JSON si riscrive a ogni clic.
+
+   Prima lo compilava solo il pulsante «Esporta», quindi dopo averlo premuto una volta il
+   riquadro restava fermo su una fotografia vecchia mentre si continuava a etichettare: sembrava
+   che le scelte non entrassero. Adesso quello che si vede e' sempre quello che c'e'. */
+function testoEtichette(){
   const righe = [];
   for(const fig of document.querySelectorAll('figure')){
     const v = stato[fig.dataset.n];
     if(v) righe.push({file: fig.dataset.file, pallini: v === 'si'});
   }
-  const testo = JSON.stringify({chiave: CHIAVE, etichette: righe}, null, 1);
+  return JSON.stringify({chiave: CHIAVE, etichette: righe}, null, 1);
+}
+function scrivi(){ document.getElementById('uscita').value = testoEtichette(); }
+
+/* A tutto schermo, con le stesse scelte sotto mano: i pallini sono piccoli e in un riquadro
+   da trecento pixel non si vedono, ed e' proprio quello che bisogna guardare per rispondere. */
+const figure = [...document.querySelectorAll('figure')];
+let corrente = -1;
+function apriPieno(i){
+  corrente = Math.max(0, Math.min(i, figure.length - 1));
+  const fig = figure[corrente];
+  document.getElementById('pienoImg').src = fig.querySelector('img').src;
+  const n = fig.dataset.n;
+  const eti = stato[n] === 'si' ? 'sì' : stato[n] === 'no' ? 'no' : 'non deciso';
+  document.getElementById('pienoInfo').textContent =
+    `${corrente + 1} di ${figure.length} · ${fig.querySelector('figcaption').textContent.trim()} · ${eti}`;
+  document.getElementById('pieno').classList.add('on');
+}
+function chiudiPieno(){ document.getElementById('pieno').classList.remove('on'); corrente = -1; }
+function vai(d){ if(corrente >= 0) apriPieno((corrente + d + figure.length) % figure.length); }
+function segnaPieno(v){
+  if(corrente < 0) return;
+  const fig = figure[corrente];
+  const n = fig.dataset.n;
+  fig.classList.remove('si','no');
+  if(v){ stato[n] = v; fig.classList.add(v); } else { delete stato[n]; }
+  localStorage.setItem(CHIAVE, JSON.stringify(stato));
+  aggiorna(); apriPieno(corrente);
+}
+for(const [i, fig] of figure.entries()){
+  fig.querySelector('.lente').addEventListener('click', (e) => { e.stopPropagation(); apriPieno(i); });
+}
+window.addEventListener('keydown', (e) => {
+  if(!document.getElementById('pieno').classList.contains('on')) return;
+  if(e.key === 'Escape'){ e.preventDefault(); chiudiPieno(); }
+  else if(e.key === 'ArrowLeft'){ e.preventDefault(); vai(-1); }
+  else if(e.key === 'ArrowRight'){ e.preventDefault(); vai(1); }
+  else if(e.key === 's' || e.key === 'S'){ e.preventDefault(); segnaPieno('si'); vai(1); }
+  else if(e.key === 'n' || e.key === 'N'){ e.preventDefault(); segnaPieno('no'); vai(1); }
+  else if(e.key === 'd' || e.key === 'D'){ e.preventDefault(); segnaPieno(null); }
+});
+
+aggiorna();
+function esporta(){
+  const testo = testoEtichette();
   document.getElementById('uscita').value = testo;
   if(navigator.clipboard) navigator.clipboard.writeText(testo).catch(()=>{});
   const a = document.createElement('a');
