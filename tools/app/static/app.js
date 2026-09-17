@@ -4444,23 +4444,22 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
   chiudi.addEventListener('click', chiudiOra);
 
   const passoScelta = el('select', {
-    title: 'quanto muove ogni pulsante: gradi per le frecce, millimetri per il meno e il piu\'' });
+    title: 'quanto muove ogni freccia: gradi per quelle tonde, millimetri per su e giu\'' });
   for (const v of [0.1, 0.5, 1, 2]) passoScelta.append(el('option', { value: v }, `passo ${v}`));
   passoScelta.value = String(passo);
   passoScelta.addEventListener('change', () => { passo = Number(passoScelta.value) || 0.5; });
 
-  /* Frecce per l'angolo, meno e piu' per la quota.
+  /* Quattro frecce: due che girano, due che alzano e abbassano.
 
-     Prima c'erano due coppie di meno-e-piu' e nessuna delle due diceva da sola in che verso
-     avrebbe mosso la retta: bisognava premere per scoprirlo. Le frecce lo dicono, e il meno
-     e il piu' restano dove il verso e' gia' nel numero -- #22 e' una distanza dall'alto,
-     quindi piu' grande vuol dire piu' in basso. */
+     Erano due coppie di meno-e-piu', e nessuna delle due diceva da sola in che verso avrebbe
+     mosso la retta -- bisognava premere per scoprirlo. La forma della freccia lo dice, e le
+     due famiglie non si confondono: tonde per l'angolo, dritte per la quota. */
   testa.append(indietro, avanti, info, vedi, scelta,
     bottoncino('↺', 'ruota in senso antiorario, del passo scelto in gradi', () => ruota(-passo)),
     bottoncino('↻', 'ruota in senso orario, del passo scelto in gradi', () => ruota(passo)),
-    bottoncino('−', 'alza la retta: #22 diminuisce del passo scelto, in millimetri',
+    bottoncino('↑', 'alza la retta: #22 diminuisce del passo scelto, in millimetri',
       () => sposta(-passo)),
-    bottoncino('+', 'abbassa la retta: #22 aumenta del passo scelto, in millimetri',
+    bottoncino('↓', 'abbassa la retta: #22 aumenta del passo scelto, in millimetri',
       () => sposta(passo)),
     passoScelta, misura, salvataggio, auto, chiudi);
   pieno.append(testa, scena);
@@ -4596,8 +4595,8 @@ function panelGuides(panel, step) {
       + 'quello piu\' vicino alla sonda: la linea piu\' alta in NF e LR, la piu\' bassa in UD e '
       + 'LRUD, dove l\'immagine e\' ribaltata. In giallo la verticale centrale e il punto in cui '
       + 'la retta la incrocia, che e\' esattamente cio\' che #22 misura. Clicca una miniatura '
-      + 'per vederla a tutto schermo: li\' la retta si corregge — le frecce la ruotano, il meno '
-      + 'e il piu\' la alzano e la abbassano, e il punto giallo si trascina. Le correzioni si '
+      + 'per vederla a tutto schermo: li\' la retta si corregge — le frecce tonde la ruotano, '
+      + 'su e giu\' la alzano e la abbassano, e il punto giallo si trascina. Le correzioni si '
       + 'salvano da sole; «Torna all\'automatico» rimette la misura del rilevatore.'));
     panel.append(el('p', { class: 'hint' }, proposta.avvertenza || ''));
 
