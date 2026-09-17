@@ -4214,9 +4214,10 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     };
   };
 
-  const salva = el('button', { class: 'ghost' }, 'Salva la correzione');
   const auto = el('button', { class: 'ghost' }, 'Torna all\'automatico');
-  const annulla = el('button', { class: 'ghost' }, 'Annulla');
+  const salvataggio = el('span', { class: 'hint' });
+  let attesa = null;          // timer del salvataggio automatico
+  let ultimaProposta = null;  // l'ultima ricalcolata, per aggiornare il pannello alla chiusura
 
   const aggiornaScelta = (stati) => {
     scelta.replaceChildren();
@@ -4248,11 +4249,9 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
         + `#23 ${n.angolo.toFixed(2)}°  ·  #22 ${n.distanza.toFixed(2)} mm`
         + (quale > 0 ? ' (non scrive le righe)' : '')
         + `  ·  ${t.orientamento || 'orientamento non noto'}`
-        + (rette ? '  · modificata, non ancora salvata' : t.corretto ? '  · corretta a mano' : '');
+        + (t.corretto && !rette ? '  · corretta a mano' : '');
     } else misura.textContent = '';
     vedi.textContent = disegno ? 'disegno: acceso' : 'disegno: spento';
-    salva.disabled = !rette;
-    annulla.disabled = !rette;
     auto.disabled = !t.corretto;
     indietro.disabled = elenco.length < 2;
     avanti.disabled = elenco.length < 2;
@@ -4301,7 +4300,12 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
       }
       aggiornaDisegno();
     });
-    const fine = () => { modo = null; mostra(); };
+    const fine = () => {
+      const stava = modo;
+      modo = null;
+      mostra();
+      if (stava) programmaSalvataggio();
+    };
     figura.addEventListener('pointerup', fine);
     figura.addEventListener('pointercancel', fine);
   };
@@ -4320,11 +4324,8 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     if (s) {
       const n = numeri(t, s);
       misura.textContent = (rette.length > 1 ? `ago ${quale + 1}: ` : '')
-        + `#23 ${n.angolo.toFixed(2)}°  ·  #22 ${n.distanza.toFixed(2)} mm`
-        + '  · modificata, non ancora salvata';
+        + `#23 ${n.angolo.toFixed(2)}°  ·  #22 ${n.distanza.toFixed(2)} mm`;
     }
-    salva.disabled = false;
-    annulla.disabled = false;
   };
 
   // Ruota di `gradi` intorno al punto sulla verticale, quindi #22 non si muove.
@@ -4339,6 +4340,7 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     const inMm = Math.atan2(Math.sin(s.ang) * ry, Math.cos(s.ang) * rx) + gradi * Math.PI / 180;
     stati[quale] = { ...s, ang: Math.atan2(Math.sin(inMm) / ry, Math.cos(inMm) / rx) };
     mostra();
+    programmaSalvataggio();
   };
 
   // Sposta la retta lungo la verticale senza ruotarla: cambia solo #22, in millimetri.
@@ -4351,6 +4353,7 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     const cy = s.cy + mm / ry;
     stati[quale] = { ...s, cy: Math.min(rect.bottom, Math.max(rect.top, cy)) };
     mostra();
+    programmaSalvataggio();
   };
 
   const bottoncino = (testo, titolo, azione) => {
@@ -4359,13 +4362,22 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     return b;
   };
 
-  const vai = (delta) => {
+  const vai = async (delta) => {
     if (elenco.length < 2) return;
-    rette = null; quale = 0;
+    await salvaOra();
+    quale = 0;
     indice = (indice + delta + elenco.length) % elenco.length;
+    salvataggio.textContent = '';
     mostra();
   };
-  const chiudiOra = () => { window.removeEventListener('keydown', tasti); pieno.remove(); };
+  const chiudiOra = async () => {
+    window.removeEventListener('keydown', tasti);
+    await salvaOra();
+    pieno.remove();
+    // il pannello si aggiorna una volta sola, alla fine: ricaricarlo a ogni ritocco vorrebbe
+    // dire ridisegnare tutte le famiglie mentre si sta ancora correggendo
+    if (ultimaProposta && onCorretto) onCorretto(ultimaProposta);
+  };
   const tasti = (evento) => {
     if (evento.key === 'ArrowLeft') { evento.preventDefault(); vai(-1); }
     else if (evento.key === 'ArrowRight') { evento.preventDefault(); vai(1); }
@@ -4375,35 +4387,56 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
     }
   };
 
-  const manda = async (corpo, messaggio) => {
-    salva.disabled = true; auto.disabled = true;
+  const manda = async (corpo) => {
+    auto.disabled = true;
+    salvataggio.textContent = 'salvo…';
     try {
       const esito = await api(`/projects/${state.projectId}/guides/correction`, { body: corpo });
-      rette = null; quale = 0;
+      rette = null;
       // le tracce tornano ricalcolate: si riprendono per nome, cosi' il visore mostra il
       // risultato del salvataggio invece dei numeri di prima
       const proposta = esito.proposal || {};
+      ultimaProposta = proposta;
       const fresche = (proposta.proposte || []).concat(proposta.incerte || [])
         .flatMap((f) => f.tracce || []);
       elenco = elenco.map((t) => fresche.find((n) => n.image === t.image) || t);
-      toast(messaggio);
-      if (onCorretto) onCorretto(proposta);
-    } catch (errore) { toast(errore.message, true); }
+      const ora = new Date();
+      salvataggio.textContent = 'salvato alle '
+        + `${String(ora.getHours()).padStart(2, '0')}:${String(ora.getMinutes()).padStart(2, '0')}`;
+    } catch (errore) {
+      // la modifica resta in mano: il prossimo ritocco riprova, e intanto si vede che non e'
+      // andata giu' -- un salvataggio automatico che fallisce in silenzio e' peggio di nessuno
+      salvataggio.textContent = `non salvata: ${errore.message}`;
+      toast(errore.message, true);
+    }
     finally { mostra(); }
   };
 
-  salva.addEventListener('click', () => {
+  /* Il salvataggio e' automatico, ma non a ogni clic.
+
+     Ogni salvataggio fa ricalcolare al server tutte le famiglie, e una raffica di ritocchi da
+     mezzo grado ne farebbe uno per clic. Si aspetta che la mano si fermi; e si salva comunque
+     subito quando si cambia fotogramma o si chiude, perche' li' la modifica andrebbe persa. */
+  const salvaOra = async () => {
+    if (attesa) { clearTimeout(attesa); attesa = null; }
+    if (!rette) return;
     const t = traccia();
     const linee = statiDi(t).map(estremi).filter(Boolean);
-    if (!linee.length) return;
-    manda({ name: t.image, linee },
-      'retta corretta: la proposta e\' stata ricalcolata');
+    if (!linee.length) { rette = null; return; }
+    await manda({ name: t.image, linee });
+  };
+  const programmaSalvataggio = () => {
+    salvataggio.textContent = 'modificata…';
+    if (attesa) clearTimeout(attesa);
+    attesa = setTimeout(() => { attesa = null; salvaOra(); }, 700);
+  };
+
+  auto.addEventListener('click', async () => {
+    if (attesa) { clearTimeout(attesa); attesa = null; }
+    rette = null;
+    await manda({ name: traccia().image, reset: true });
+    salvataggio.textContent = 'tornata alla misura automatica';
   });
-  auto.addEventListener('click', () => {
-    manda({ name: traccia().image, reset: true },
-      'torna alla misura automatica su questo fotogramma');
-  });
-  annulla.addEventListener('click', () => { rette = null; mostra(); });
   vedi.addEventListener('click', () => { disegno = !disegno; mostra(); });
   scelta.addEventListener('change', () => { quale = Number(scelta.value) || 0; mostra(); });
   indietro.addEventListener('click', () => vai(-1));
@@ -4429,7 +4462,7 @@ function visoreTracce(tracce, partenza, rect, onCorretto) {
       () => sposta(-passo)),
     bottoncino('+', 'abbassa la retta: #22 aumenta del passo scelto, in millimetri',
       () => sposta(passo)),
-    passoScelta, misura, salva, annulla, auto, chiudi);
+    passoScelta, misura, salvataggio, auto, chiudi);
   pieno.append(testa, scena);
   document.body.append(pieno);
   window.addEventListener('keydown', tasti);
@@ -4564,7 +4597,8 @@ function panelGuides(panel, step) {
       + 'LRUD, dove l\'immagine e\' ribaltata. In giallo la verticale centrale e il punto in cui '
       + 'la retta la incrocia, che e\' esattamente cio\' che #22 misura. Clicca una miniatura '
       + 'per vederla a tutto schermo: li\' la retta si corregge — le frecce la ruotano, il meno '
-      + 'e il piu\' la alzano e la abbassano, e il punto giallo si trascina.'));
+      + 'e il piu\' la alzano e la abbassano, e il punto giallo si trascina. Le correzioni si '
+      + 'salvano da sole; «Torna all\'automatico» rimette la misura del rilevatore.'));
     panel.append(el('p', { class: 'hint' }, proposta.avvertenza || ''));
 
     const usa = el('button', {}, 'Porta la proposta nel valore');
