@@ -1,67 +1,58 @@
-/* La lente: una finestra a parte dove si vede ingrandito il riquadro che si sta disegnando.
+/* La lente: una finestra a parte dove si lavora sull'immagine ingrandita.
 
-   A grandezza naturale un riquadro di 30x18 px non si giudica - e' il problema che si
-   ripresenta a ogni box, dalla depth al template dell'ecografo. Lo zoom dentro alla pagina
-   aiuta, ma ruba spazio proprio all'immagine su cui si sta lavorando. Con due schermi la
-   risposta giusta e' un'altra finestra: si trascina sul secondo monitor e resta li'.
+   Prima era una finestrella ritagliata attorno al bersaglio: il server mandava una striscia
+   di pochi pixel e la vista inseguiva il riquadro o il puntatore. Rispondeva bene a «guarda
+   qui», malissimo a «fammi girare per l'immagine»: ogni spostamento chiedeva un ritaglio
+   nuovo, lo zoom era limitato a quella striscia, e la vista tornava dove voleva lei.
 
-   Il ritaglio non si ricarica a ogni pixel di trascinamento. Si tiene una finestra piu'
-   larga del riquadro e la si rifa' solo quando il riquadro ne esce: dentro, a muoversi e'
-   soltanto il rettangolo disegnato sopra, che costa niente.
+   Adesso e' un visore dell'immagine **intera**. Si carica una volta a grandezza naturale e
+   da li' in poi tutto succede nel browser: pan trascinando, zoom con la rotella sul punto
+   sotto al cursore, riquadro che si ridisegna da capo o si aggiusta per i bordi. Nessuna
+   richiesta al server mentre si lavora, e nessuna vista che si sposta da sola.
 
-   La scala del ritaglio si **misura** (larghezza dell'immagine diviso larghezza della
-   finestra in pixel nativi) invece di darla per buona: il server la finestra la taglia sui
-   bordi, e assumerla porta il rettangolo fuori posto proprio dove serve di piu'. */
+   La geometria e' diretta: un punto nativo (x, y) sta a (x·zoom, y·zoom) dentro la scena.
+   Niente finestra di ritaglio da sottrarre, niente scala da misurare a posteriori. */
 
 const Lente = (() => {
   let win = null;
-  let ctx = null;         // {projectId, name, size, boxes:[{box,color,label}], caption}
-  let finestra = null;    // [x0, y0, x1, y1] in coordinate native
-  let nomeInFinestra = '';
-  let miraInFinestra = null;   // la zona inquadrata l'ultima volta che si e' rifatta
-  let zoomManuale = null;   // null = si adatta alla finestra
-  let finestraManuale = false;  // la vista l'ha spostata lei: non inseguire piu' la mira
-  let latoScelto = null;        // il bordo che le frecce muovono
-  let miraScelta = '';          // quale bersaglio della barra e' acceso
-  let padrone = '';             // quale sezione la sta usando
-  let sospesa = false;          // la sezione e' cambiata e la nuova non si e' ancora fatta viva
-  let ritaglioRotto = '';       // il ritaglio che non si e' caricato, per non ridisegnarci sopra
-  let zoomServito = 0;      // l'ingrandimento gia' chiesto al server, per non richiederlo
-  /* La lente che segue il puntatore.
-
-     Con due schermi la lente sta di lato e si guarda l'immagine grande: muovendo il mouse
-     sopra a un dettaglio si vorrebbe vederlo ingrandito li', subito, senza prima dire alla
-     lente dove andare. E' il gesto di chi cerca - passo sopra, guardo, passo oltre - e
-     senza di questo la lente serviva solo a guardare una cosa che si era gia' trovata.
-
-     Segue un punto, non un riquadro: la finestra si rifa' solo quando il punto esce dalla
-     zona gia' inquadrata, se no ci si muove dentro e non si ricarica niente. */
-  let segueIlPuntatore = true;
-  let puntoSeguito = null;    // {x, y} in coordinate native
-  let seguitoInAttesa = null; // l'ultimo punto arrivato, disegnato al prossimo frame
-  let frameChiesto = false;   // c'e' gia' un disegno prenotato: non prenotarne un altro
+  let ctx = null;         // {projectId, name, size, boxes:[{box,color,label}], ...}
+  let zoom = null;        // null = adatta l'immagine intera alla finestra
+  let nomeCaricato = '';
+  let erroreImmagine = '';
+  let latoScelto = null;  // il bordo che le frecce muovono
+  let miraScelta = '';    // quale bersaglio della barra e' acceso
+  let padrone = '';       // quale sezione la sta usando
+  let sospesa = false;    // la sezione e' cambiata e la nuova non si e' ancora fatta viva
+  let trascinando = false;
+  let nodi = [];          // i rettangoli disegnati: si spostano invece di rifarli
+  /* La lente che segue il puntatore dell'altra finestra. Comoda per cercare, ma in mezzo
+     mentre si lavora: adesso parte spenta e la si accende quando serve. */
+  let segueIlPuntatore = false;
+  let seguitoInAttesa = null;
+  let frameChiesto = false;
 
   const NOMI_LATO = { n: 'bordo alto', s: 'bordo basso', w: 'bordo sx', e: 'bordo dx',
                       nw: 'angolo ↖', ne: 'angolo ↗', sw: 'angolo ↙', se: 'angolo ↘',
                       move: 'tutto il riquadro' };
+
+  const ALTEZZA_TESTE = 84;   // barre in cima: quanto spazio tolgono alla vista
 
   const viva = () => !!(win && !win.closed && win.document && win.document.getElementById('crop'));
 
   const DOC = `<!doctype html><html lang="it"><head><meta charset="utf-8">
 <title>Lente — ESIBuilder AI</title><style>
   :root { color-scheme: dark; }
-  /* scorrevole e non tagliato: ingrandendo oltre la finestra il ritaglio deve potersi
-     scorrere, se no lo zoom serve solo a nascondere quello che si voleva vedere. */
   body { margin: 0; background: #0d1117; color: #c9d1d9;
          font: 13px ui-monospace, Menlo, monospace; overflow: auto; }
+  #barre { position: sticky; top: 0; z-index: 5; background: #0d1117; }
   #testa { padding: 6px 10px; border-bottom: 1px solid #30363d; display: flex;
-           gap: 10px; align-items: baseline; justify-content: space-between; }
+           gap: 10px; align-items: baseline; justify-content: space-between;
+           flex-wrap: wrap; }
   #titolo { font-weight: 600; }
   #dettaglio { color: #8b949e; }
-  #scena { position: relative; display: inline-block; }
-  /* Nessun limite di larghezza: la misura la decide lo zoom, e la scala del rettangolo
-     disegnato sopra non si rompe perche' viene misurata ogni volta invece che calcolata. */
-  #crop { display: block; image-rendering: pixelated; }
+  #scena { position: relative; }
+  /* I pixel si vedono: a 800% serve il pixel, non la sfocatura dell'interpolazione. */
+  #crop { display: block; image-rendering: pixelated; user-select: none; -webkit-user-drag: none; }
   #zoombar { display: flex; gap: 4px; align-items: center; }
   #mire { display: flex; gap: 3px; flex-wrap: wrap; padding: 5px 10px;
           border-bottom: 1px solid #30363d; }
@@ -71,7 +62,8 @@ const Lente = (() => {
   #mire button:hover { background: #21262d; color: #c9d1d9; }
   #mire button.on { background: #1f6feb; border-color: #1f6feb; color: #fff; }
   #coord { color: #6e7681; font-variant-numeric: tabular-nums; }
-  #scena { cursor: grab; }
+  #scena { cursor: crosshair; }
+  #scena.sposta { cursor: grab; }
   #scena.trascina { cursor: grabbing; }
   #zoombar button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
                     border-radius: 5px; padding: 1px 8px; font: inherit; cursor: pointer; }
@@ -80,11 +72,7 @@ const Lente = (() => {
   #fattore { min-width: 46px; text-align: right; color: #8b949e; }
   .riq { position: absolute; border: 2px solid #3fb950; box-sizing: border-box;
          box-shadow: 0 0 0 1px rgba(0,0,0,.75); pointer-events: none; }
-  /* Il riquadro su cui si sta lavorando si trascina anche da qui: e' il posto dove si vede
-     davvero dove cade il bordo, quindi e' il posto dove ha senso spostarlo. */
   .riq.viva { pointer-events: auto; cursor: move; }
-  /* Quello che si sta tirando adesso: tratteggiato, per non confonderlo con i riquadri
-     che ci sono gia'. */
   .riq.disegno { border: 2px dashed #58a6ff; background: rgba(88,166,255,.12); }
   .man { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px;
          border: 2px solid #0d1117; border-radius: 3px; background: #3fb950;
@@ -93,9 +81,8 @@ const Lente = (() => {
   .man.w, .man.e { cursor: ew-resize; }
   .man.nw, .man.se { cursor: nwse-resize; }
   .man.ne, .man.sw { cursor: nesw-resize; }
-  /* I lati si afferrano lungo **tutto** il bordo, non solo nelle maniglie: ingrandendo a
-     800% le maniglie degli angoli finiscono fuori dalla finestra, e restava un rettangolo
-     che si vedeva ma non si poteva prendere. */
+  /* I lati si afferrano lungo tutto il bordo, non solo nelle maniglie: a 800% le maniglie
+     degli angoli finiscono fuori dalla vista e resterebbe un riquadro che non si prende. */
   .lato { position: absolute; pointer-events: auto; }
   .lato.n, .lato.s { left: 0; right: 0; height: 11px; cursor: ns-resize; }
   .lato.n { top: -5px; } .lato.s { bottom: -5px; }
@@ -104,9 +91,6 @@ const Lente = (() => {
   .lato.scelto { background: rgba(31, 111, 235, .35); }
   .riq b { position: absolute; top: -17px; left: -2px; font-size: 11px; font-weight: 600;
            background: #0d1117; padding: 0 3px; white-space: nowrap; }
-  /* Assi e corde: la lente non serve solo ai riquadri. Sul rettangolo ecografico quello
-     che si guarda e' dove cade il bordo rispetto alla corda del ventaglio, e senza la
-     corda disegnata dentro non c'e' niente da confrontare. */
   .asse { position: absolute; pointer-events: none; }
   .asse.v { top: 0; bottom: 0; width: 0; border-left: 1px dashed currentColor; }
   .asse.o { left: 0; right: 0; height: 0; border-top: 1px dashed currentColor; }
@@ -117,94 +101,240 @@ const Lente = (() => {
                       font-size: 11px; font-weight: 600; color: #0d1117;
                       background: currentColor; padding: 0 3px; white-space: nowrap; }
   #vuoto { padding: 18px; color: #8b949e; }
-  /* La sezione e' cambiata: quello che si vede e' di prima. Dirlo e' meglio che lasciare
-     credere che si stia guardando la sezione nuova - e nel frattempo si smette di poterci
-     lavorare, se no si scriverebbe su un pannello che non c'e' piu'. */
   #sospeso { display: none; padding: 7px 10px; background: rgba(210, 153, 34, .14);
              border-bottom: 1px solid #d29922; color: #d29922; font-size: 12px; }
   body.sospesa #scena { opacity: .45; pointer-events: none; }
   body.sospesa #sospeso { display: block; }
 </style></head><body>
-<div id="sospeso">questa e' la sezione di prima: apri la lente dalla sezione in cui stai
-lavorando, oppure torna indietro.</div>
-<div id="mire"></div>
-<div id="testa"><span id="titolo">lente</span>
-  <span id="zoombar"><button id="meno" title="rimpicciolisci (rotella)">\u2212</button>
-    <span id="fattore"></span>
-    <button id="piu" title="ingrandisci (rotella)">+</button>
-    <button id="adatta" title="torna a riempire la finestra">adatta</button>
-    <button id="segui" title="la lente segue il puntatore sull'altra finestra">segue</button></span>
-  <span id="coord"></span>
-  <span id="dettaglio"></span></div>
-<div id="scena"><img id="crop" alt=""></div>
+<div id="barre">
+  <div id="sospeso">questa e' la sezione di prima: aprine una che usa la lente, oppure
+  torna indietro.</div>
+  <div id="mire"></div>
+  <div id="testa"><span id="titolo">lente</span>
+    <span id="zoombar"><button id="meno" title="rimpicciolisci (rotella o −)">−</button>
+      <span id="fattore"></span>
+      <button id="piu" title="ingrandisci (rotella o +)">+</button>
+      <button id="tutta" title="tutta l'immagine (tasto 0)">tutta</button>
+      <button id="vaialbox" title="torna sul riquadro (tasto b)">al riquadro</button>
+      <button id="segui" title="segue il puntatore sull'altra finestra (tasto f)">segue</button></span>
+    <span id="coord"></span>
+    <span id="dettaglio"></span></div>
+</div>
+<div id="scena"><img id="crop" alt="" draggable="false"></div>
 <div id="vuoto">niente da ingrandire: scegli un riquadro nella pagina principale.</div>
 </body></html>`;
 
-  /* Lo zoom. Il server ingrandisce fino a 8 volte; oltre si continua via CSS sugli stessi
-     pixel - moltiplicarli ancora non aggiunge informazione, ma e' quello che serve per
-     lavorare su un bordo. La scala del rettangolo si misura, quindi non c'e' niente da
-     tenere in sincrono a mano. */
-  const PASSI_ZOOM = [0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32];
+  const PASSI_ZOOM = [0.1, 0.15, 0.25, 0.35, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8, 12, 16, 24, 32];
 
-  const zoomAuto = () => {
-    if (!finestra || !viva()) return 4;
-    const largo = Math.max(1, finestra[2] - finestra[0]);
-    const alto = Math.max(1, finestra[3] - finestra[1]);
-    // Puo' scendere sotto 1: «tutto il rettangolo» e' 1100 px e in una finestra da 900
-    // non ci sta - rifiutarsi di rimpicciolire vorrebbe dire non mostrarlo mai intero.
-    return Math.max(0.15, Math.min(32,
-      Math.min((win.innerWidth - 8) / largo, (win.innerHeight - 72) / alto)));
+  const misura = () => (ctx && ctx.size) || [0, 0];
+
+  /* Lo zoom che fa stare l'immagine intera nella finestra: e' il punto di partenza e quello
+     a cui si torna con «tutta». */
+  const zoomTutta = () => {
+    const [W, H] = misura();
+    if (!viva() || !W || !H) return 1;
+    return Math.max(0.05, Math.min(
+      (win.innerWidth - 4) / W, (win.innerHeight - ALTEZZA_TESTE) / H));
   };
 
-  const fattore = () => zoomManuale || zoomAuto();
+  const fattore = () => zoom || zoomTutta();
 
-  /* Il punto nativo sotto a un evento del puntatore: serve sia alle coordinate sia allo
-     zoom ancorato. Senza finestra o senza ritaglio non c'e' punto, e chi chiama lo sa. */
+  const scena = () => win.document.getElementById('scena');
+  const immagine = () => win.document.getElementById('crop');
+
+  /* Il punto nativo sotto a un evento del puntatore. */
   const puntoNativo = (ev) => {
-    if (!viva() || !finestra) return null;
-    const img = win.document.getElementById('crop');
-    const r = img.getBoundingClientRect();
-    const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
+    if (!viva()) return null;
+    const r = immagine().getBoundingClientRect();
+    const s = fattore();
     if (!s) return null;
-    return { x: finestra[0] + (ev.clientX - r.left) / s, y: finestra[1] + (ev.clientY - r.top) / s };
+    return { x: (ev.clientX - r.left) / s, y: (ev.clientY - r.top) / s };
   };
 
-  /* Zoom col punto fermo sotto al cursore. Ingrandendo dal centro, il dettaglio che si
-     stava guardando scappava via e lo si inseguiva scorrendo: due gesti per farne uno.
-     Si segna dove cade il punto adesso, si cambia scala, e si riporta li' lo scorrimento. */
-  const zoomAncorato = (verso, ev) => {
-    const punto = ev ? puntoNativo(ev) : null;
-    if (!punto) { cambiaZoom(verso); return; }
-    const primaX = ev.clientX;
-    const primaY = ev.clientY;
-    cambiaZoom(verso);
-    if (!viva() || !finestra) return;
-    const img = win.document.getElementById('crop');
-    const r = img.getBoundingClientRect();
-    const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
-    if (!s) return;
-    const dopoX = r.left + (punto.x - finestra[0]) * s;
-    const dopoY = r.top + (punto.y - finestra[1]) * s;
-    win.scrollBy(Math.round(dopoX - primaX), Math.round(dopoY - primaY));
+  /* Porta un punto nativo sotto a una posizione della finestra, scorrendo. */
+  const portaSotto = (nat, clientX, clientY) => {
+    if (!viva()) return;
+    const r = immagine().getBoundingClientRect();
+    const s = fattore();
+    win.scrollBy(Math.round(r.left + nat.x * s - clientX),
+                 Math.round(r.top + nat.y * s - clientY));
   };
 
-  /* Spostare la vista di tanti pixel nativi, tenendola dentro all'immagine. Lo usano sia
-     le frecce sia il trascinamento, cosi' il limite ai bordi e' scritto una volta sola. */
-  const spostaVista = (dx, dy) => {
-    if (!finestra || !ctx) return;
-    const [W, H] = ctx.size || [0, 0];
-    const largo = finestra[2] - finestra[0];
-    const alto = finestra[3] - finestra[1];
-    let x0 = Math.round(finestra[0] + dx);
-    let y0 = Math.round(finestra[1] + dy);
-    x0 = Math.max(0, Math.min(x0, (W || x0 + largo) - largo));
-    y0 = Math.max(0, Math.min(y0, (H || y0 + alto) - alto));
-    if (x0 === finestra[0] && y0 === finestra[1]) return;
-    finestra = [x0, y0, x0 + largo, y0 + alto];
-    finestraManuale = true;
-    miraScelta = '';
-    zoomServito = 0;
+  const centraSu = (box) => {
+    if (!viva() || !box) return;
+    const s = fattore();
+    const cx = ((box.left + box.right) / 2) * s;
+    const cy = ((box.top + box.bottom) / 2) * s;
+    win.scrollTo(Math.max(0, cx - win.innerWidth / 2),
+                 Math.max(0, cy - (win.innerHeight - ALTEZZA_TESTE) / 2));
+  };
+
+  /* Quanto ingrandire per vedere bene un riquadro: sta comodo in circa un terzo della
+     finestra, senza esagerare su un riquadro gia' grande. */
+  const zoomPerBox = (box) => {
+    if (!viva() || !box) return 4;
+    const largo = Math.max(4, box.right - box.left);
+    const alto = Math.max(4, box.bottom - box.top);
+    return Math.max(0.2, Math.min(16,
+      Math.min((win.innerWidth * 0.55) / largo, (win.innerHeight * 0.45) / alto)));
+  };
+
+  const vaiAlRiquadro = () => {
+    const principale = ((ctx && ctx.boxes) || []).find((b) => b.box);
+    const mira = (principale && principale.box) || (ctx && ctx.focus);
+    if (!mira) return;
+    zoom = zoomPerBox(mira);
     disegna();
+    centraSu(mira);
+  };
+
+  const cambiaZoom = (verso, ev) => {
+    const ora = fattore();
+    const nat = ev ? puntoNativo(ev) : null;
+    const clientX = ev ? ev.clientX : (viva() ? win.innerWidth / 2 : 0);
+    const clientY = ev ? ev.clientY : (viva() ? win.innerHeight / 2 : 0);
+    const vicino = PASSI_ZOOM.reduce((a, b) => (Math.abs(b - ora) < Math.abs(a - ora) ? b : a));
+    const k = PASSI_ZOOM.indexOf(vicino);
+    // Fra due passi, il primo scatto porta sul passo dalla parte giusta invece di saltarlo.
+    let prossimo = k + verso;
+    if (verso > 0 && vicino > ora) prossimo = k;
+    if (verso < 0 && vicino < ora) prossimo = k;
+    zoom = PASSI_ZOOM[Math.max(0, Math.min(PASSI_ZOOM.length - 1, prossimo))];
+    const centro = nat || (() => {
+      // Senza puntatore si tiene fermo il centro della vista.
+      const r = immagine().getBoundingClientRect();
+      const s = ora;
+      return { x: (win.innerWidth / 2 - r.left) / s, y: (win.innerHeight / 2 - r.top) / s };
+    })();
+    disegna();
+    portaSotto(centro, clientX, clientY);
+  };
+
+  /* Spostare la vista trascinando lo sfondo, col tasto centrale o con alt. Il tasto
+     sinistro serve a disegnare: e' il gesto che si fa cento volte. */
+  const attaccaSpostamento = (nodo) => {
+    nodo.addEventListener('pointerdown', (ev) => {
+      if (!viva() || !ctx) return;
+      if (ev.target !== nodo && ev.target.id !== 'crop') return;
+      const spostaComunque = ev.button === 1 || ev.altKey || ev.shiftKey;
+      const puoDisegnare = !!(ctx.onDraw || ctx.onChange) && !sospesa;
+      ev.preventDefault();
+      if (ev.button === 0 && puoDisegnare && !spostaComunque) {
+        disegnaNuovo(nodo, ev);
+        return;
+      }
+      if (ev.button === 0 && !puoDisegnare && ctx.onPunto && !spostaComunque) {
+        indicaPunto(nodo, ev);
+        return;
+      }
+      const da = { x: ev.clientX, y: ev.clientY };
+      nodo.classList.add('trascina');
+      try { nodo.setPointerCapture(ev.pointerId); } catch (_) { /* pazienza */ }
+      const muovi = (e) => {
+        win.scrollBy(da.x - e.clientX, da.y - e.clientY);
+        da.x = e.clientX;
+        da.y = e.clientY;
+      };
+      const molla = () => {
+        nodo.classList.remove('trascina');
+        nodo.removeEventListener('pointermove', muovi);
+        nodo.removeEventListener('pointerup', molla);
+        nodo.removeEventListener('pointercancel', molla);
+      };
+      nodo.addEventListener('pointermove', muovi);
+      nodo.addEventListener('pointerup', molla);
+      nodo.addEventListener('pointercancel', molla);
+    });
+  };
+
+  /* Un clic che indica un punto (lo zero del righello, una tacca): vale solo dove la
+     sezione lo chiede, e solo se il puntatore non si e' mosso. */
+  const indicaPunto = (nodo, ev) => {
+    const partenza = { x: ev.clientX, y: ev.clientY };
+    let mosso = false;
+    const muovi = (e) => {
+      if (Math.abs(e.clientX - partenza.x) > 2 || Math.abs(e.clientY - partenza.y) > 2) {
+        mosso = true;
+        win.scrollBy(partenza.x - e.clientX, partenza.y - e.clientY);
+        partenza.x = e.clientX;
+        partenza.y = e.clientY;
+      }
+    };
+    const molla = (e) => {
+      nodo.removeEventListener('pointermove', muovi);
+      nodo.removeEventListener('pointerup', molla);
+      nodo.removeEventListener('pointercancel', molla);
+      if (mosso || !e || e.type !== 'pointerup' || !ctx || !ctx.onPunto) return;
+      const nat = puntoNativo(e);
+      if (!nat) return;
+      ctx.onPunto({ x: Math.round(nat.x), y: Math.round(nat.y),
+                    alt: !!e.altKey, shift: !!e.shiftKey, target: miraScelta });
+    };
+    nodo.addEventListener('pointermove', muovi);
+    nodo.addEventListener('pointerup', molla);
+    nodo.addEventListener('pointercancel', molla);
+  };
+
+  /* Ridisegnare il riquadro da capo: si tira un rettangolo sull'immagine e quello diventa
+     il box. E' il gesto piu' veloce per rimettere a posto un box sbagliato di molto -
+     spostare quattro bordi uno a uno, no. */
+  const disegnaNuovo = (nodoScena, ev) => {
+    const d = win.document;
+    const partenza = puntoNativo(ev);
+    if (!partenza) return;
+    let ultimo = partenza;
+    const nodo = d.createElement('div');
+    nodo.className = 'riq disegno';
+    nodoScena.append(nodo);
+    const posa = () => {
+      const s = fattore();
+      nodo.style.left = `${Math.min(partenza.x, ultimo.x) * s}px`;
+      nodo.style.top = `${Math.min(partenza.y, ultimo.y) * s}px`;
+      nodo.style.width = `${Math.abs(ultimo.x - partenza.x) * s}px`;
+      nodo.style.height = `${Math.abs(ultimo.y - partenza.y) * s}px`;
+    };
+    posa();
+    try { nodoScena.setPointerCapture(ev.pointerId); } catch (_) { /* pazienza */ }
+    const muovi = (e) => { ultimo = puntoNativo(e) || ultimo; posa(); };
+    const molla = () => {
+      nodoScena.removeEventListener('pointermove', muovi);
+      nodoScena.removeEventListener('pointerup', molla);
+      nodoScena.removeEventListener('pointercancel', molla);
+      nodo.remove();
+      const [W, H] = misura();
+      const box = {
+        left: Math.round(Math.max(0, Math.min(partenza.x, ultimo.x))),
+        right: Math.round(Math.min(W || 1e9, Math.max(partenza.x, ultimo.x))),
+        top: Math.round(Math.max(0, Math.min(partenza.y, ultimo.y))),
+        bottom: Math.round(Math.min(H || 1e9, Math.max(partenza.y, ultimo.y))),
+      };
+      // Sotto i tre pixel e' un clic, non un rettangolo: cancellare il box per un clic di
+      // troppo sarebbe il modo piu' veloce di perdere il lavoro.
+      if (box.right - box.left < 3 || box.bottom - box.top < 3) return;
+      if (ctx && ctx.onDraw) ctx.onDraw(box);
+      else if (ctx && ctx.onChange) ctx.onChange(box);
+    };
+    nodoScena.addEventListener('pointermove', muovi);
+    nodoScena.addEventListener('pointerup', molla);
+    nodoScena.addEventListener('pointercancel', molla);
+  };
+
+  const attaccaCoordinate = (nodo) => {
+    nodo.addEventListener('pointermove', (ev) => {
+      if (!viva()) return;
+      const nat = puntoNativo(ev);
+      if (!nat) return;
+      win.document.getElementById('coord').textContent =
+        `x ${Math.round(nat.x)} · y ${Math.round(nat.y)}`;
+    });
+    nodo.addEventListener('pointerleave', () => {
+      if (viva()) win.document.getElementById('coord').textContent = '';
+    });
+  };
+
+  const commutaSegui = () => {
+    segueIlPuntatore = !segueIlPuntatore;
+    pittaSegui();
   };
 
   const pittaSegui = () => {
@@ -215,191 +345,27 @@ lavorando, oppure torna indietro.</div>
     b.textContent = segueIlPuntatore ? 'segue' : 'ferma';
   };
 
-  const commutaSegui = () => {
-    segueIlPuntatore = !segueIlPuntatore;
-    // Smettendo di seguire si torna a guardare quello che la sezione indicava: lasciare
-    // la lente dove il puntatore era passato per caso non e' «ferma», e' «persa».
-    if (!segueIlPuntatore) { puntoSeguito = null; miraInFinestra = null; }
-    pittaSegui();
-    disegna(true);
-  };
-
-  const cambiaZoom = (verso) => {
-    const ora = fattore();
-    const vicino = PASSI_ZOOM.reduce((a, b) => (Math.abs(b - ora) < Math.abs(a - ora) ? b : a));
-    const k = PASSI_ZOOM.indexOf(vicino);
-    // Se si sta fra due passi, il primo scatto porta sul passo dalla parte giusta invece
-    // di saltarlo: da 5.2 in giu' si va a 4, non a 3.
-    let prossimo = k + verso;
-    if (verso > 0 && vicino > ora) prossimo = k;
-    if (verso < 0 && vicino < ora) prossimo = k;
-    zoomManuale = PASSI_ZOOM[Math.max(0, Math.min(PASSI_ZOOM.length - 1, prossimo))];
-    disegna(true);
-  };
-
-  /* Spostare la vista trascinando lo sfondo. Senza, per guardare il bordo destro dopo aver
-     guardato il sinistro bisognava passare dalla pagina: la lente era una finestra su un
-     punto solo. La vista spostata a mano resta dov'e' finche' non si sceglie un altro
-     bersaglio - se no tornerebbe indietro al primo ridisegno. */
-  /* Disegnare un rettangolo qui dentro. Un marker di orientamento e' quindici pixel: sulla
-     pagina principale, dove l'immagine sta in mezzo schermo, indicarlo vuol dire tirare un
-     rettangolo di sette pixel e sbagliarlo. Qui e' ingrandito dieci volte, ed e' qui che
-     va disegnato. Chi apre la lente lo abilita passando `onDraw`. */
-  const disegnaNuovo = (scena, ev) => {
-    const d = win.document;
-    const img = d.getElementById('crop');
-    const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
-    const rettangolo = img.getBoundingClientRect();
-    const nativo = (e) => ({
-      x: finestra[0] + (e.clientX - rettangolo.left) / (s || 1),
-      y: finestra[1] + (e.clientY - rettangolo.top) / (s || 1),
-    });
-    const partenza = nativo(ev);
-    let ultimo = partenza;
-    const nodo = d.createElement('div');
-    nodo.className = 'riq disegno';
-    scena.append(nodo);
-    const posa = () => {
-      const x0 = Math.min(partenza.x, ultimo.x);
-      const y0 = Math.min(partenza.y, ultimo.y);
-      nodo.style.left = `${(x0 - finestra[0]) * s}px`;
-      nodo.style.top = `${(y0 - finestra[1]) * s}px`;
-      nodo.style.width = `${Math.abs(ultimo.x - partenza.x) * s}px`;
-      nodo.style.height = `${Math.abs(ultimo.y - partenza.y) * s}px`;
-    };
-    posa();
-    // La presa del puntatore e' un di piu': se il browser la rifiuta si disegna lo stesso.
-    try { scena.setPointerCapture(ev.pointerId); } catch (_) { /* pazienza */ }
-    const muovi = (e) => { ultimo = nativo(e); posa(); };
-    const molla = () => {
-      scena.removeEventListener('pointermove', muovi);
-      scena.removeEventListener('pointerup', molla);
-      scena.removeEventListener('pointercancel', molla);
-      nodo.remove();
-      const largo = Math.abs(ultimo.x - partenza.x);
-      const alto = Math.abs(ultimo.y - partenza.y);
-      if (largo < 3 || alto < 3 || !ctx || !ctx.onDraw) return;
-      puntoSeguito = null;
-      seguitoInAttesa = null;
-      ctx.onDraw({
-        left: Math.round(Math.min(partenza.x, ultimo.x)),
-        right: Math.round(Math.max(partenza.x, ultimo.x)),
-        top: Math.round(Math.min(partenza.y, ultimo.y)),
-        bottom: Math.round(Math.max(partenza.y, ultimo.y)),
-      });
-    };
-    scena.addEventListener('pointermove', muovi);
-    scena.addEventListener('pointerup', molla);
-    scena.addEventListener('pointercancel', molla);
-  };
-
-  const attaccaSpostamento = (scena) => {
-    scena.addEventListener('pointerdown', (ev) => {
-      if (ev.target !== scena && ev.target.id !== 'crop') return;
-      // Senza contesto o senza ritaglio non c'e' niente da spostare: prima bastava un clic
-      // sulla finestra appena aperta per farla saltare su `ctx.size` di un contesto nullo.
-      if (!viva() || !ctx || !finestra) return;
-      ev.preventDefault();
-      // Quando c'e' qualcosa da disegnare, il trascinamento disegna; il tasto centrale e
-      // alt spostano sempre la vista, anche mentre si disegna: sono i due gesti che in
-      // ogni altro programma vogliono dire «sposta», e cercarli qui non deve costare un
-      // pensiero.
-      const spostaComunque = ev.button === 1 || ev.altKey;
-      if (ctx.onDraw && ev.button === 0 && !spostaComunque) {
-        disegnaNuovo(scena, ev);
-        return;
-      }
-      const img = win.document.getElementById('crop');
-      const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
-      const da = { x: ev.clientX, y: ev.clientY };
-      const inizio = [...finestra];
-      const [W, H] = ctx.size || [0, 0];
-      // Un clic senza trascinamento e' un punto indicato, non una vista spostata: e' il
-      // gesto con cui si dice «lo zero sta qui», «la tacca sta qui». Lo si riconosce alla
-      // fine, dal fatto che il puntatore non si e' mosso.
-      let mosso = false;
-      scena.classList.add('trascina');
-      scena.setPointerCapture(ev.pointerId);
-      const muovi = (e) => {
-        const dx = Math.round((da.x - e.clientX) / (s || 1));
-        const dy = Math.round((da.y - e.clientY) / (s || 1));
-        const largo = inizio[2] - inizio[0];
-        const alto = inizio[3] - inizio[1];
-        let x0 = inizio[0] + dx, y0 = inizio[1] + dy;
-        x0 = Math.max(0, Math.min(x0, (W || x0 + largo) - largo));
-        y0 = Math.max(0, Math.min(y0, (H || y0 + alto) - alto));
-        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) mosso = true;
-        if (!mosso) return;
-        finestra = [x0, y0, x0 + largo, y0 + alto];
-        finestraManuale = true;
-        miraScelta = '';
-        zoomServito = 0;      // la striscia e' un'altra: va richiesta
-        disegna();
-      };
-      const molla = (e) => {
-        scena.classList.remove('trascina');
-        scena.removeEventListener('pointermove', muovi);
-        scena.removeEventListener('pointerup', molla);
-        scena.removeEventListener('pointercancel', molla);
-        if (mosso || !ctx || !ctx.onPunto || !e || e.type !== 'pointerup') return;
-        const r = img.getBoundingClientRect();
-        puntoSeguito = null;
-        seguitoInAttesa = null;
-        ctx.onPunto({
-          x: Math.round(finestra[0] + (e.clientX - r.left) / (s || 1)),
-          y: Math.round(finestra[1] + (e.clientY - r.top) / (s || 1)),
-          alt: !!e.altKey, shift: !!e.shiftKey, target: miraScelta,
-        });
-      };
-      scena.addEventListener('pointermove', muovi);
-      scena.addEventListener('pointerup', molla);
-      scena.addEventListener('pointercancel', molla);
-    });
-  };
-
-  /* Le coordinate sotto al puntatore. Su un ingrandimento forte il pixel esatto non si
-     conta a occhio, e questo e' il numero che serve per dire «il bordo va a 419». */
-  const attaccaCoordinate = (scena) => {
-    scena.addEventListener('pointermove', (ev) => {
-      if (!finestra || !viva()) return;
-      const img = win.document.getElementById('crop');
-      const r = img.getBoundingClientRect();
-      const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
-      const x = Math.round(finestra[0] + (ev.clientX - r.left) / (s || 1));
-      const y = Math.round(finestra[1] + (ev.clientY - r.top) / (s || 1));
-      win.document.getElementById('coord').textContent = `x ${x} · y ${y}`;
-    });
-    scena.addEventListener('pointerleave', () => {
-      if (viva()) win.document.getElementById('coord').textContent = '';
-    });
-  };
-
-  /* Le frecce muovono di un pixel il lato scelto, shift di dieci. E' il gesto per la
-     rifinitura: si guarda ingrandito e si aggiusta senza trascinare. */
+  /* Le frecce: muovono il lato scelto di un pixel (shift dieci), oppure scorrono la vista
+     quando non c'e' nessun lato scelto. */
   const attaccaTasti = (d) => {
     d.addEventListener('keydown', (ev) => {
       if (!viva()) return;
-      // Zoom e vista rispondono sempre, anche dove non c'e' niente da modificare: sono il
-      // modo di muoversi senza staccare la mano dalla tastiera.
       if (ev.key === '+' || ev.key === '=') { ev.preventDefault(); cambiaZoom(+1); return; }
       if (ev.key === '-' || ev.key === '_') { ev.preventDefault(); cambiaZoom(-1); return; }
-      if (ev.key === '0') { ev.preventDefault(); zoomManuale = null; disegna(true); return; }
+      if (ev.key === '0') { ev.preventDefault(); zoom = null; disegna(); win.scrollTo(0, 0); return; }
+      if (ev.key === 'b' || ev.key === 'B') { ev.preventDefault(); vaiAlRiquadro(); return; }
       if (ev.key === 'f' || ev.key === 'F') { ev.preventDefault(); commutaSegui(); return; }
       const passo = ev.shiftKey ? 10 : 1;
       const delta = { ArrowLeft: [-passo, 0], ArrowRight: [passo, 0],
                       ArrowUp: [0, -passo], ArrowDown: [0, passo] }[ev.key];
       if (!delta) return;
-      // Senza un lato scelto le frecce non avevano nessun effetto: adesso spostano la
-      // vista. Il passo e' piu' largo di quello del bordo - qui si naviga, non si rifinisce.
+      ev.preventDefault();
       if (!ctx || !ctx.onChange || !latoScelto || sospesa) {
-        if (!finestra) return;
-        ev.preventDefault();
-        spostaVista(delta[0] * 8, delta[1] * 8);
+        win.scrollBy(delta[0] * 12, delta[1] * 12);
         return;
       }
-      ev.preventDefault();
-      const box = { ...(ctx.boxes[0] || {}).box };
-      const [W, H] = ctx.size || [0, 0];
+      const box = { ...((ctx.boxes[0] || {}).box) };
+      const [W, H] = misura();
       const n = { ...box };
       if (latoScelto === 'move') {
         const largo = box.right - box.left, alto = box.bottom - box.top;
@@ -423,34 +389,35 @@ lavorando, oppure torna indietro.</div>
   const apri = () => {
     if (viva()) { win.focus(); return true; }
     win = window.open('', 'esibuilder-lente',
-      'width=1040,height=780,menubar=no,toolbar=no,location=no,status=no');
+      'width=1120,height=820,menubar=no,toolbar=no,location=no,status=no');
     if (!win) return false;
     win.document.open();
     win.document.write(DOC);
     win.document.close();
-    finestra = null;
-    nomeInFinestra = '';
-    // La finestra puo' essere ridimensionata o spostata su un altro schermo: il ritaglio
-    // si rifa' per riempirla, se no si resta con l'ingrandimento della vecchia dimensione.
-    win.addEventListener('resize', () => { finestra = null; disegna(); });
+    nomeCaricato = '';
+    erroreImmagine = '';
+    win.addEventListener('resize', () => { if (!zoom) disegna(); });
     win.addEventListener('unload', () => { win = null; sincronizzaBottoni(); });
     const d = win.document;
-    attaccaSpostamento(d.getElementById('scena'));
-    attaccaCoordinate(d.getElementById('scena'));
+    const sc = d.getElementById('scena');
+    attaccaSpostamento(sc);
+    attaccaCoordinate(sc);
     attaccaTasti(d);
     d.body.tabIndex = 0;
     d.body.focus();
     d.getElementById('piu').addEventListener('click', () => cambiaZoom(+1));
     d.getElementById('meno').addEventListener('click', () => cambiaZoom(-1));
-    d.getElementById('adatta').addEventListener('click', () => { zoomManuale = null; disegna(true); });
+    d.getElementById('tutta').addEventListener('click', () => {
+      zoom = null; disegna(); win.scrollTo(0, 0);
+    });
+    d.getElementById('vaialbox').addEventListener('click', vaiAlRiquadro);
     pittaSegui();
     d.getElementById('segui').addEventListener('click', commutaSegui);
-    // La rotella ingrandisce invece di scorrere: in una lente e' quello che si vuole fare.
-    // Con shift resta lo scorrimento, per quando il ritaglio e' piu' grande della finestra.
+    // La rotella ingrandisce sul punto sotto al cursore; con shift resta lo scorrimento.
     d.addEventListener('wheel', (ev) => {
       if (ev.shiftKey) return;
       ev.preventDefault();
-      zoomAncorato(ev.deltaY < 0 ? +1 : -1, ev);
+      cambiaZoom(ev.deltaY < 0 ? +1 : -1, ev);
     }, { passive: false });
     disegna();
     return true;
@@ -458,68 +425,29 @@ lavorando, oppure torna indietro.</div>
 
   const chiudi = () => { if (viva()) win.close(); win = null; };
 
-  /* La finestra del ritaglio: larga attorno al riquadro, e ritagliata sui bordi
-     dell'immagine **spostandola**, non stringendola - la larghezza deve restare quella che
-     il server usera' davvero, se no la scala misurata e quella vera non coincidono. */
-  const nuovaFinestra = (box, size) => {
-    const [w, h] = size;
-    const largo = box.right - box.left;
-    const alto = box.bottom - box.top;
-    // Il margine attorno: generoso per un riquadro piccolo (un marker di 30 px va visto
-    // nel suo contesto), ma con un tetto - su un bersaglio di 180 px un margine di 1.4
-    // volte lo portava a 684, e non restava niente da ingrandire.
-    const mx = Math.min(160, Math.max(40, Math.round(0.35 * largo)));
-    const my = Math.min(160, Math.max(24, Math.round(0.35 * alto)));
-    let x0 = Math.round(box.left - mx);
-    let x1 = Math.round(box.right + mx);
-    let y0 = Math.round(box.top - my);
-    let y1 = Math.round(box.bottom + my);
-    const lw = Math.min(w, x1 - x0);
-    if (x0 < 0) { x0 = 0; x1 = lw; }
-    if (x1 > w) { x1 = w; x0 = w - lw; }
-    const lh = Math.min(h, y1 - y0);
-    if (y0 < 0) { y0 = 0; y1 = lh; }
-    if (y1 > h) { y1 = h; y0 = h - lh; }
-    return [Math.max(0, x0), Math.max(0, y0), Math.min(w, x1), Math.min(h, y1)];
-  };
-
-  let trascinando = false;
-  let nodi = [];          // i rettangoli disegnati, in ordine: servono a non rifarli
-
-  /* Il trascinamento dentro alla lente. Il delta si porta in coordinate native dividendo
-     per la scala **misurata**, la stessa con cui il rettangolo e' stato disegnato: se si
-     usasse lo zoom chiesto al server, contro un bordo il riquadro scapperebbe sotto al
-     cursore. Mentre si trascina la finestra del ritaglio non si rifa', se no la striscia
-     si sposterebbe sotto le dita. */
+  /* Il trascinamento del riquadro e dei suoi bordi. La scala e' lo zoom: non c'e' piu'
+     niente da misurare a posteriori. */
   const attaccaTrascinamento = (nodo, lato) => {
-    const d = win.document;
     nodo.addEventListener('pointerdown', (ev) => {
       if (!ctx || !ctx.onChange || sospesa) return;
       ev.preventDefault();
       ev.stopPropagation();
-      puntoSeguito = null;
-      seguitoInAttesa = null;
-      const img = d.getElementById('crop');
-      const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
+      const s = fattore();
       const partenza = { x: ev.clientX, y: ev.clientY };
-      const box = { ...(ctx.boxes[0] || {}).box };
-      const [w, h] = ctx.size || [0, 0];
+      const box = { ...((ctx.boxes[0] || {}).box) };
+      const [W, H] = misura();
       trascinando = true;
-      latoScelto = lato;      // da qui in poi le frecce muovono questo
-      // La presa del puntatore e' un di piu': se il browser la rifiuta si trascina lo
-      // stesso, invece di lasciare il riquadro fermo senza dire niente.
+      latoScelto = lato;
       try { nodo.setPointerCapture(ev.pointerId); } catch (_) { /* pazienza */ }
       const muovi = (e) => {
         const dx = Math.round((e.clientX - partenza.x) / (s || 1));
         const dy = Math.round((e.clientY - partenza.y) / (s || 1));
         const n = { ...box };
         if (lato === 'move') {
-          // Il riquadro si sposta intero: i lati si limitano insieme, se no contro un bordo
-          // si schiaccerebbe invece di fermarsi.
           const largo = box.right - box.left;
           const alto = box.bottom - box.top;
-          n.left = Math.max(0, Math.min(box.left + dx, (w || box.right) - largo));
-          n.top = Math.max(0, Math.min(box.top + dy, (h || box.bottom) - alto));
+          n.left = Math.max(0, Math.min(box.left + dx, (W || box.right) - largo));
+          n.top = Math.max(0, Math.min(box.top + dy, (H || box.bottom) - alto));
           n.right = n.left + largo;
           n.bottom = n.top + alto;
         } else {
@@ -529,8 +457,8 @@ lavorando, oppure torna indietro.</div>
           if (lato.includes('s')) n.bottom = Math.max(box.bottom + dy, box.top + 2);
           n.left = Math.max(0, n.left);
           n.top = Math.max(0, n.top);
-          if (w) n.right = Math.min(n.right, w);
-          if (h) n.bottom = Math.min(n.bottom, h);
+          if (W) n.right = Math.min(n.right, W);
+          if (H) n.bottom = Math.min(n.bottom, H);
         }
         ctx.onChange({ left: Math.round(n.left), top: Math.round(n.top),
                        right: Math.round(n.right), bottom: Math.round(n.bottom) });
@@ -548,166 +476,98 @@ lavorando, oppure torna indietro.</div>
     });
   };
 
-  const fuoriFinestra = (box) => !finestra
-    || box.left < finestra[0] + 1 || box.right > finestra[2] - 1
-    || box.top < finestra[1] + 1 || box.bottom > finestra[3] - 1;
-
-  const disegna = (centra) => {
+  const disegna = () => {
     if (!viva() || !ctx) return;
     const d = win.document;
-    const img = d.getElementById('crop');
-    const scena = d.getElementById('scena');
-    const principale = (ctx.boxes || []).find((b) => b.box) || null;
-    const bersaglioScelto = (ctx.targets || []).find(
-      (voce) => voce.id === miraScelta && voce.box) || null;
-    // Cosa inquadrare: di solito il riquadro, ma chi chiama puo' dire un'altra zona. Sul
-    // rettangolo ecografico il riquadro e' mezzo schermo - inquadrarlo sarebbe non
-    // ingrandire niente - mentre quello che si guarda e' l'angolo che si sta spostando, o
-    // la corda del ventaglio.
-    // Il punto sotto al puntatore vince su tutto: e' quello che si sta guardando adesso.
-    const mira = (segueIlPuntatore && puntoSeguito)
-      ? { left: puntoSeguito.x - 45, right: puntoSeguito.x + 45,
-          top: puntoSeguito.y - 30, bottom: puntoSeguito.y + 30 }
-      : ((bersaglioScelto && bersaglioScelto.box)
-        || ctx.focus || (principale && principale.box) || null);
-    if (!mira) {
-      scena.style.display = 'none';
-      const v = d.getElementById('vuoto');
-      v.style.display = '';
-      v.textContent = 'niente da ingrandire: scegli un riquadro nella pagina principale.';
+    const img = immagine();
+    const sc = scena();
+    const vuoto = d.getElementById('vuoto');
+
+    if (!ctx.name || !ctx.projectId) {
+      sc.style.display = 'none';
+      vuoto.style.display = '';
+      vuoto.textContent = 'niente da ingrandire: scegli un riquadro nella pagina principale.';
       d.getElementById('titolo').textContent = ctx.name || 'lente';
-      d.getElementById('dettaglio').textContent = '';
       return;
     }
-    // Un ritaglio che non e' arrivato: si dice, e non si disegna niente sopra. Rimettere
-    // la scena a ogni ridisegno lasciava i rettangoli appoggiati sul vuoto.
-    if (ritaglioRotto && ritaglioRotto === ctx.name) {
-      scena.style.display = 'none';
-      const v = d.getElementById('vuoto');
-      v.style.display = '';
-      v.textContent = `non riesco a caricare ${ritaglioRotto.split('/').pop()}: l'immagine `
-        + 'non e\' raggiungibile (disco scollegato o cartella spostata).';
-      d.getElementById('titolo').textContent = (ctx.name || '').split('/').pop();
+    if (erroreImmagine && erroreImmagine === ctx.name) {
+      sc.style.display = 'none';
+      vuoto.style.display = '';
+      vuoto.textContent = `non riesco a caricare ${erroreImmagine.split('/').pop()}: `
+        + 'l\'immagine non e\' raggiungibile (disco scollegato o cartella spostata).';
       return;
     }
-    scena.style.display = '';
-    d.getElementById('vuoto').style.display = 'none';
-    const size = ctx.size || [img.naturalWidth || 1, img.naturalHeight || 1];
+    sc.style.display = '';
+    vuoto.style.display = 'none';
 
-    // Mentre si trascina la finestra resta ferma: rifarla farebbe scappare la striscia
-    // sotto al cursore. Fuori dal trascinamento si insegue il riquadro come prima.
-    // La zona da inquadrare puo' cambiare senza che il riquadro esca dalla finestra (e'
-    // quello che succede passando da un angolo all'altro): allora la finestra si rifa'
-    // lo stesso. Mentre si trascina no, se no la striscia scappa sotto al cursore.
-    // Inseguendo il puntatore la mira si muove **sempre**, quindi confrontarla con quella
-    // di prima direbbe sempre «cambiata» e il ritaglio verrebbe richiesto a ogni frame: una
-    // richiesta al server per ogni pixel di mouse. Finche' il punto sta comodo dentro alla
-    // finestra non c'e' niente da ricaricare - si muovono solo i disegni sopra, che costano
-    // niente. La striscia si rifa' quando il punto si avvicina al bordo.
-    const inseguendo = segueIlPuntatore && !!puntoSeguito;
-    let miraCambiata;
-    if (inseguendo) {
-      const mx = finestra ? (finestra[2] - finestra[0]) * 0.3 : 0;
-      const my = finestra ? (finestra[3] - finestra[1]) * 0.3 : 0;
-      const comodo = !!finestra
-        && puntoSeguito.x > finestra[0] + mx && puntoSeguito.x < finestra[2] - mx
-        && puntoSeguito.y > finestra[1] + my && puntoSeguito.y < finestra[3] - my;
-      miraCambiata = !comodo;
-    } else {
-      miraCambiata = !miraInFinestra
-        || Math.abs(miraInFinestra.left - mira.left) > 2
-        || Math.abs(miraInFinestra.top - mira.top) > 2
-        || Math.abs(miraInFinestra.right - mira.right) > 2
-        || Math.abs(miraInFinestra.bottom - mira.bottom) > 2;
-    }
-    if (finestraManuale && miraCambiata) finestraManuale = false;
-    // Inseguendo, il riquadro attorno al punto sborda dalla finestra molto prima che il
-    // punto ci arrivi: qui comanda solo la regola del «comodo», se no si ricarica lo stesso
-    // a ogni frame.
-    const daRifare = inseguendo ? miraCambiata : (miraCambiata || fuoriFinestra(mira));
-    if (!trascinando && !finestraManuale
-        && (nomeInFinestra !== ctx.name || daRifare)) {
-      finestra = nuovaFinestra(mira, size);
-      if (nomeInFinestra !== ctx.name) ritaglioRotto = '';
-      nomeInFinestra = ctx.name;
-      miraInFinestra = { ...mira };
-      zoomServito = 0;
+    // L'immagine si carica una volta sola, a grandezza naturale: da li' in poi lo zoom e'
+    // solo CSS e non si tocca piu' la rete.
+    if (nomeCaricato !== ctx.name) {
+      nomeCaricato = ctx.name;
+      erroreImmagine = '';
+      const [W] = misura();
+      img.onload = () => { erroreImmagine = ''; disegna(); };
+      img.onerror = () => { erroreImmagine = ctx.name || '?'; disegna(); };
+      img.src = `/api/projects/${ctx.projectId}/image?name=${encodeURIComponent(ctx.name)}`
+        + `&w=${Math.max(320, W || 1920)}`;
     }
 
-    // Il ritaglio si chiede al server ingrandito quanto serve, fino al suo tetto di 8; da
-    // li' in su ci pensa il CSS sugli stessi pixel. Si richiede solo quando il fattore
-    // cambia davvero, non a ogni ridisegno.
-    const largoNativo = Math.max(1, finestra[2] - finestra[0]);
-    const voluto = fattore();
-    const dalServer = Math.max(1, Math.min(8, Math.ceil(voluto)));
-    if (dalServer !== zoomServito) {
-      zoomServito = dalServer;
-      // Il ridisegno dopo il caricamento si aggancia una volta sola, qui: metterlo nel
-      // ramo "non ho ancora una larghezza" ne accumulava uno per ogni trascinamento.
-      img.onload = () => { ritaglioRotto = ''; disegna(); };
-      // Un ritaglio che non arriva (immagine spostata, volume scollegato) lasciava i
-      // rettangoli disegnati sul nulla: sembrava tutto a posto e non lo era.
-      img.onerror = () => { ritaglioRotto = ctx.name || '?'; disegna(); };
-      img.src = `/api/projects/${ctx.projectId}/crop?name=${encodeURIComponent(ctx.name)}`
-        + `&raw=1&zoom=${dalServer}&x0=${finestra[0]}&y0=${finestra[1]}`
-        + `&x1=${finestra[2]}&y1=${finestra[3]}`;
-    }
-    img.style.width = `${Math.round(largoNativo * voluto)}px`;
-    d.getElementById('fattore').textContent = `${Math.round(voluto * 100)}%`;
+    const s = fattore();
+    const [W, H] = misura();
+    img.style.width = `${Math.round((W || img.naturalWidth || 1) * s)}px`;
+    sc.style.width = img.style.width;
+    sc.style.height = `${Math.round((H || img.naturalHeight || 1) * s)}px`;
+    d.getElementById('fattore').textContent = `${Math.round(s * 100)}%`;
+    d.getElementById('titolo').textContent = (ctx.name || '').split('/').pop();
     disegnaMire(d);
 
-    // La scala si misura: e' l'unico modo di essere sicuri che il rettangolo cada dove deve.
-    const larghezzaVista = img.clientWidth || 0;
-    if (larghezzaVista < 4) return;   // si ridisegna da solo al `load`
-    const s = larghezzaVista / Math.max(1, finestra[2] - finestra[0]);
+    const principale = (ctx.boxes || []).find((b) => b.box) || null;
     const dentro = (ctx.boxes || []).filter((v) => v.box);
-
     const posiziona = (nodo, box) => {
-      nodo.style.left = `${(box.left - finestra[0]) * s}px`;
-      nodo.style.top = `${(box.top - finestra[1]) * s}px`;
+      nodo.style.left = `${box.left * s}px`;
+      nodo.style.top = `${box.top * s}px`;
       nodo.style.width = `${(box.right - box.left) * s}px`;
       nodo.style.height = `${(box.bottom - box.top) * s}px`;
     };
 
     // Mentre si trascina i rettangoli si spostano, non si rifanno: rifarli butterebbe via
-    // il nodo che ha la presa del puntatore, e il trascinamento morirebbe al primo pixel.
+    // il nodo che ha la presa del puntatore e il trascinamento morirebbe al primo pixel.
     if (trascinando && nodi.length === dentro.length) {
       dentro.forEach((voce, k) => posiziona(nodi[k], voce.box));
-      scrividettaglio(d, principale ? principale.box : mira);
+      if (principale) scrividettaglio(d, principale.box);
       return;
     }
 
-    for (const vecchio of [...scena.querySelectorAll('.riq, .asse, .corda')]) vecchio.remove();
+    for (const vecchio of [...sc.querySelectorAll('.riq, .asse, .corda')]) vecchio.remove();
     nodi = [];
 
-    // Prima assi e corde, che stanno sotto ai riquadri: sono il contesto, non il soggetto.
     for (const linea of (ctx.lines || [])) {
       const n = d.createElement('div');
       const verticale = linea.x != null;
       n.className = `asse ${verticale ? 'v' : 'o'}`;
       n.style.color = linea.color || '#3fb950';
-      if (verticale) n.style.left = `${(linea.x - finestra[0]) * s}px`;
-      else n.style.top = `${(linea.y - finestra[1]) * s}px`;
+      if (verticale) n.style.left = `${linea.x * s}px`;
+      else n.style.top = `${linea.y * s}px`;
       if (linea.label) {
         const b = d.createElement('i');
         b.textContent = linea.label;
         n.append(b);
       }
-      scena.append(n);
+      sc.append(n);
     }
     for (const seg of (ctx.segments || [])) {
       const n = d.createElement('div');
       n.className = 'corda' + (seg.dashed ? ' tratteggio' : '');
       n.style.color = seg.color || '#ff6040';
-      n.style.left = `${(seg.x1 - finestra[0]) * s}px`;
-      n.style.top = `${(seg.y - finestra[1]) * s}px`;
+      n.style.left = `${seg.x1 * s}px`;
+      n.style.top = `${seg.y * s}px`;
       n.style.width = `${(seg.x2 - seg.x1) * s}px`;
       if (seg.label) {
         const b = d.createElement('i');
         b.textContent = seg.label;
         n.append(b);
       }
-      scena.append(n);
+      sc.append(n);
     }
     for (const voce of dentro) {
       const primo = voce === principale;
@@ -723,8 +583,6 @@ lavorando, oppure torna indietro.</div>
       }
       if (primo && ctx.onChange) {
         attaccaTrascinamento(n, 'move');
-        // I quattro lati, afferrabili lungo tutto il bordo: e' cosi' che si prende un lato
-        // quando l'ingrandimento ha portato gli angoli fuori dalla finestra.
         for (const lato of ['n', 's', 'w', 'e']) {
           const striscia = d.createElement('div');
           striscia.className = `lato ${lato}` + (latoScelto === lato ? ' scelto' : '');
@@ -743,30 +601,24 @@ lavorando, oppure torna indietro.</div>
           n.append(m);
         }
       }
-      scena.append(n);
+      sc.append(n);
       nodi.push(n);
     }
-    d.getElementById('titolo').textContent = (ctx.name || '').split('/').pop();
-    scrividettaglio(d, principale ? principale.box : mira);
-    // Dopo un cambio di zoom il riquadro resta al centro: se no ingrandire lo fa uscire
-    // dallo schermo, ed e' proprio quello che si stava guardando.
-    if (centra) {
-      const cx = (mira.left + mira.right) / 2 - finestra[0];
-      const cy = (mira.top + mira.bottom) / 2 - finestra[1];
-      win.scrollTo(Math.max(0, cx * s - win.innerWidth / 2),
-                   Math.max(0, cy * s - (win.innerHeight - 46) / 2));
+    if (principale) scrividettaglio(d, principale.box);
+    else {
+      // Senza riquadro (lo studio del righello, per esempio) il cartiglio dice comunque
+      // cosa fa il clic: restare con la scritta della sezione di prima confonde e basta.
+      d.getElementById('dettaglio').textContent = (ctx.caption || '')
+        + (ctx.onPunto ? ` · clic: ${ctx.puntoLabel || 'indica il punto'}` : '')
+        + ' · rotella: zoom · trascina: sposta · 0: tutta l\'immagine';
     }
   };
 
-  /* I bersagli: un clic e la lente va li'. Li decide chi la usa - la lente non sa cosa
-     siano un angolo o una corda - e sono la differenza fra una finestra che guarda un punto
-     solo e uno strumento con cui si gira intorno al rettangolo. */
+  /* I bersagli: un clic e la lente va li'. */
   const disegnaMire = (d) => {
     const barra = d.getElementById('mire');
-    const elenco = ctx.targets || [];
+    const elenco = (ctx && ctx.targets) || [];
     if (!elenco.length) {
-      // Svuotarla, non solo nasconderla: i bersagli di una sezione non devono restare
-      // appesi dentro a un'altra, nemmeno invisibili.
       barra.style.display = 'none';
       barra.innerHTML = '';
       barra.dataset.firma = '';
@@ -783,71 +635,62 @@ lavorando, oppure torna indietro.</div>
       if (voce.id === miraScelta) b.className = 'on';
       b.addEventListener('click', () => {
         miraScelta = voce.id;
-        // Un bersaglio scelto esplicitamente deve vincere sull'ultimo punto sul quale e'
-        // passato il mouse. Altrimenti il chip si accende, ma la lente resta dov'era e
-        // sembra che il comando non funzioni.
-        puntoSeguito = null;
-        seguitoInAttesa = null;
-        finestraManuale = false;
         latoScelto = voce.side || null;
-        miraInFinestra = null;      // costringe a rifare la finestra su questo bersaglio
         if (ctx.onTarget) ctx.onTarget(voce);
-        // Il fuoco resterebbe sul chip, e le frecce scorrerebbero la finestra invece di
-        // muovere il lato.
+        // Il fuoco resterebbe sul chip, e le frecce scorrerebbero invece di muovere il lato.
         d.body.focus();
-        disegna(true);
+        if (voce.box) { zoom = zoomPerBox(voce.box); disegna(); centraSu(voce.box); }
+        else disegna();
       });
       barra.append(b);
     }
   };
 
   const scrividettaglio = (d, b) => {
+    if (!b) return;
     d.getElementById('dettaglio').textContent =
       `${b.right - b.left} x ${b.bottom - b.top} px · top ${b.top} left ${b.left} `
       + `bottom ${b.bottom} right ${b.right}`
       + (ctx.caption ? ` · ${ctx.caption}` : '')
-      + (ctx.onChange
-        ? (latoScelto
-          ? ` · frecce: ${NOMI_LATO[latoScelto] || latoScelto} (shift = 10 px)`
-          : ' · trascina un lato per muoverlo, poi le frecce')
-        : '')
-      + (ctx.onDraw ? ' · tira qui dentro per disegnarlo, alt+trascina per spostare la vista' : '')
-      + (ctx.onPunto && !ctx.onDraw
-        ? ` · clic: ${ctx.puntoLabel || 'indica il punto'} · trascina: sposta la vista` : '')
-      + ' · rotella: zoom sul punto · tasto centrale: sposta · +/− e 0: zoom · frecce: '
-      + 'muovono il lato scelto, o la vista se non ce n\'e' + ' uno · f: segui';
+      + (ctx.onChange || ctx.onDraw ? ' · trascina sull\'immagine: ridisegna il riquadro' : '')
+      + (ctx.onChange ? ' · i bordi e le maniglie lo aggiustano' : '')
+      + (latoScelto ? ` · frecce: ${NOMI_LATO[latoScelto] || latoScelto} (shift = 10 px)` : '')
+      + (ctx.onPunto ? ` · clic: ${ctx.puntoLabel || 'indica il punto'}` : '')
+      + ' · rotella: zoom · tasto centrale, alt o shift: sposta · 0: tutta · b: al riquadro';
   };
 
   /* Il contesto arriva da una sezione, e ogni sezione ha il suo `source`. Cambiandolo si
-     riparte da zero: la vista di prima inquadrava un'altra cosa, il bersaglio acceso non
-     esiste piu', il lato scelto nemmeno. Tenerli era il motivo per cui la lente, passando
-     da una sezione all'altra, restava a meta' fra le due. */
+     riparte: l'immagine e' un'altra, il bersaglio acceso non esiste piu', il lato nemmeno.
+     Restando nella stessa sezione invece non si tocca **niente** della vista: lo zoom e la
+     posizione sono dell'utente, e rubarglieli a ogni aggiornamento era il motivo per cui
+     la lente sembrava muoversi da sola. */
   const aggiorna = (nuovo, riparti) => {
     const chi = (nuovo && nuovo.source) || '';
-    if (riparti || chi !== padrone) {
+    const cambiaSezione = riparti || chi !== padrone;
+    const primaImmagine = ctx ? ctx.name : '';
+    ctx = nuovo;
+    if (cambiaSezione) {
       padrone = chi;
-      finestra = null;
-      miraInFinestra = null;
-      nomeInFinestra = '';
       miraScelta = '';
       latoScelto = null;
-      finestraManuale = false;
-      puntoSeguito = null;
-      seguitoInAttesa = null;
-      zoomServito = 0;
       nodi = [];
+      zoom = null;
       const d = viva() ? win.document : null;
       if (d) d.getElementById('mire').dataset.firma = '';
     }
     sospesa = false;
     if (viva()) win.document.body.classList.remove('sospesa');
-    ctx = nuovo;
     disegna();
+    // Entrando in una sezione nuova (o su un'altra immagine) si parte inquadrando il
+    // riquadro: e' quello che si e' venuti a guardare. Da li' in poi comanda l'utente.
+    if (viva() && ctx && (cambiaSezione || (ctx.name && ctx.name !== primaImmagine))) {
+      const img = immagine();
+      const parti = () => vaiAlRiquadro();
+      if (img.complete && img.naturalWidth) parti();
+      else img.addEventListener('load', parti, { once: true });
+    }
   };
 
-  /* I ridisegni automatici (resize, caricamento immagine, risposte asincrone) possono
-     arrivare anche da un pannello che non e' piu' quello aperto. Non devono mai rubare la
-     lente alla sezione scelta dall'utente: solo il suo pulsante puo' cambiare padrone. */
   const attiva = (source) => viva() && !sospesa && ((source || '') === padrone);
   const aggiornaSeAttiva = (nuovo) => {
     if (!nuovo || !attiva(nuovo.source)) return false;
@@ -855,38 +698,25 @@ lavorando, oppure torna indietro.</div>
     return true;
   };
 
-  /* La pagina ha cambiato sezione. Non si sa ancora se la nuova usera' la lente, quindi non
-     si chiude niente: si smette di poterci lavorare e lo si dice. Se la nuova sezione la
-     usa, il suo primo disegno toglie l'avviso da solo. */
   const sospendi = () => {
     if (!ctx) return;
     sospesa = true;
     if (viva()) win.document.body.classList.add('sospesa');
   };
 
-  /* ...e quando la sezione nuova si disegna, la lente passa a lei da sola.
-
-     Prima restava sospesa finche' non si tornava a premere il pulsante, e con due schermi
-     voleva dire che ogni cambio di sezione costava un viaggio con il mouse fino all'altra
-     finestra. Ogni pannello dichiara il suo contesto disegnando il proprio pulsante: e'
-     li' che la lente lo adotta. Se la sezione e' la stessa di prima non si riparte da
-     capo - zoom e vista restano dove li aveva messi l'utente. */
+  /* La sezione nuova si presenta disegnando il suo pulsante, e la lente passa a lei. */
   const offri = (dammiContesto) => {
     if (!viva() || !sospesa || typeof dammiContesto !== 'function') return;
     let nuovo = null;
     try {
       nuovo = dammiContesto();
     } catch (_) {
-      return;   // un pannello a meta' non e' un buon motivo per rompere la lente
+      return;
     }
     if (!nuovo) return;
     aggiorna(nuovo, ((nuovo.source || '') !== padrone));
   };
 
-  /* Il tasto che la apre. `window.open` vuole un gesto dell'utente: da qui in poi gli
-     aggiornamenti arrivano da soli. */
-  /* I tasti che l'hanno aperta: la loro scritta deve dire com'e' adesso. Restava «Lente
-     aperta» anche dopo averla chiusa, e allora il tasto sembrava non fare piu' niente. */
   const bottoni = [];
   const sincronizzaBottoni = () => {
     const aperta = viva();
@@ -899,16 +729,11 @@ lavorando, oppure torna indietro.</div>
   const bottone = (dammiContesto, etichetta) => {
     const testo = etichetta || 'Lente su un\'altra finestra';
     const b = el('button', { class: 'ghost' }, testo);
-    // Disegnare il pulsante e' il modo in cui una sezione dice «la lente qui la uso io»:
-    // se e' aperta e in attesa, se la prende senza che l'utente debba premerlo.
     offri(dammiContesto);
     b.addEventListener('click', () => {
       const nuovo = dammiContesto();
       const eraViva = viva();
       const riparti = !eraViva || sospesa || ((nuovo && nuovo.source) || '') !== padrone;
-      // Alla prima apertura `apri` disegna subito: si prepara prima il contesto, evitando
-      // perfino un lampo del ritaglio precedente. Con una finestra gia' viva si aggiorna
-      // invece dopo averla portata davanti.
       if (!eraViva) aggiorna(nuovo, true);
       if (!apri()) {
         toast('il browser ha bloccato la finestra: permetti i popup per questo sito', true);
@@ -919,7 +744,6 @@ lavorando, oppure torna indietro.</div>
       sincronizzaBottoni();
     });
     bottoni.push([b, testo]);
-    // I tasti di pannelli chiusi non servono piu': si tengono solo quelli ancora in pagina.
     if (bottoni.length > 24) {
       const vivi = bottoni.filter(([n]) => n.isConnected);
       bottoni.length = 0;
@@ -928,12 +752,8 @@ lavorando, oppure torna indietro.</div>
     return b;
   };
 
-  /* Il puntatore si muove sull'altra finestra: qui si insegue, ma a passo di frame.
-
-     Un `pointermove` arriva anche cento volte al secondo e ridisegnare ogni volta vorrebbe
-     dire non disegnare mai. Si tiene l'ultimo punto e si disegna al frame dopo; il ritaglio
-     si ricarica solo quando il punto esce dalla zona gia' inquadrata, che e' la stessa
-     regola di sempre. */
+  /* Il puntatore si muove sull'altra finestra: qui si scorre, ma solo se l'inseguimento
+     e' acceso. A passo di frame, se no si scorre cento volte al secondo. */
   const segui = (x, y, source) => {
     if (!attiva(source) || !segueIlPuntatore) return;
     seguitoInAttesa = { x: Math.round(x), y: Math.round(y) };
@@ -944,12 +764,7 @@ lavorando, oppure torna indietro.</div>
       const punto = seguitoInAttesa;
       seguitoInAttesa = null;
       if (!punto || !viva() || !segueIlPuntatore) return;
-      // Sotto ai tre pixel non e' un movimento: e' la mano che trema sul mouse.
-      if (puntoSeguito && Math.abs(puntoSeguito.x - punto.x) < 3
-          && Math.abs(puntoSeguito.y - punto.y) < 3) return;
-      puntoSeguito = punto;
-      finestraManuale = false;
-      disegna();
+      centraSu({ left: punto.x, right: punto.x, top: punto.y, bottom: punto.y });
     });
   };
   const segueOra = () => segueIlPuntatore;
