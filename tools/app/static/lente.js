@@ -25,9 +25,15 @@ const Lente = (() => {
   let sospesa = false;    // la sezione e' cambiata e la nuova non si e' ancora fatta viva
   let trascinando = false;
   let nodi = [];          // i rettangoli disegnati: si spostano invece di rifarli
-  /* La lente che segue il puntatore dell'altra finestra. Comoda per cercare, ma in mezzo
-     mentre si lavora: adesso parte spenta e la si accende quando serve. */
-  let segueIlPuntatore = false;
+  /* La lente segue il puntatore dell'altra finestra: e' il modo in cui si guarda
+     ingrandito quello che si sta facendo sull'immagine grande.
+
+     Non e' in conflitto col lavorarci dentro: mentre il cursore sta sulla lente, la
+     finestra principale non riceve nessun movimento e quindi `segui` non viene chiamato -
+     pan, zoom e disegno restano dove li mette l'utente. Appena il cursore torna
+     sull'immagine grande, la lente riprende a inseguire. Il pulsante «ferma» serve a
+     bloccarla anche mentre si lavora di la'. */
+  let segueIlPuntatore = true;
   let seguitoInAttesa = null;
   let frameChiesto = false;
 
@@ -35,7 +41,13 @@ const Lente = (() => {
                       nw: 'angolo ↖', ne: 'angolo ↗', sw: 'angolo ↙', se: 'angolo ↘',
                       move: 'tutto il riquadro' };
 
-  const ALTEZZA_TESTE = 84;   // barre in cima: quanto spazio tolgono alla vista
+  /* Quanto spazio tolgono le barre: si misura, perche' cambia quando compaiono i
+     bersagli o l'avviso di sezione cambiata. */
+  const altezzaTeste = () => {
+    if (!viva()) return 84;
+    const b = win.document.getElementById('barre');
+    return (b && b.offsetHeight) || 84;
+  };
 
   const viva = () => !!(win && !win.closed && win.document && win.document.getElementById('crop'));
 
@@ -44,7 +56,11 @@ const Lente = (() => {
   :root { color-scheme: dark; }
   body { margin: 0; background: #0d1117; color: #c9d1d9;
          font: 13px ui-monospace, Menlo, monospace; overflow: auto; }
-  #barre { position: sticky; top: 0; z-index: 5; background: #0d1117; }
+  /* Fissa al viewport, non sticky: lo sticky tiene solo la verticale, e scorrendo verso
+     destra su un'immagine larga ventimila pixel la barra spariva di lato proprio mentre
+     serviva per tornare indietro. */
+  #barre { position: fixed; top: 0; left: 0; right: 0; z-index: 5; background: #0d1117;
+           box-shadow: 0 2px 8px rgba(0,0,0,.55); }
   #testa { padding: 6px 10px; border-bottom: 1px solid #30363d; display: flex;
            gap: 10px; align-items: baseline; justify-content: space-between;
            flex-wrap: wrap; }
@@ -134,7 +150,7 @@ const Lente = (() => {
     const [W, H] = misura();
     if (!viva() || !W || !H) return 1;
     return Math.max(0.05, Math.min(
-      (win.innerWidth - 4) / W, (win.innerHeight - ALTEZZA_TESTE) / H));
+      (win.innerWidth - 4) / W, (win.innerHeight - altezzaTeste()) / H));
   };
 
   const fattore = () => zoom || zoomTutta();
@@ -166,7 +182,7 @@ const Lente = (() => {
     const cx = ((box.left + box.right) / 2) * s;
     const cy = ((box.top + box.bottom) / 2) * s;
     win.scrollTo(Math.max(0, cx - win.innerWidth / 2),
-                 Math.max(0, cy - (win.innerHeight - ALTEZZA_TESTE) / 2));
+                 Math.max(0, cy - (win.innerHeight - altezzaTeste()) / 2));
   };
 
   /* Quanto ingrandire per vedere bene un riquadro: sta comodo in circa un terzo della
@@ -482,6 +498,9 @@ const Lente = (() => {
     const img = immagine();
     const sc = scena();
     const vuoto = d.getElementById('vuoto');
+    // La barra e' fissa e coprirebbe l'inizio dell'immagine: il corpo le lascia il posto.
+    // Si rimisura a ogni disegno perche' l'altezza cambia quando compaiono i bersagli.
+    d.body.style.paddingTop = `${altezzaTeste()}px`;
 
     if (!ctx.name || !ctx.projectId) {
       sc.style.display = 'none';
@@ -755,11 +774,17 @@ const Lente = (() => {
   /* Il puntatore si muove sull'altra finestra: qui si scorre, ma solo se l'inseguimento
      e' acceso. A passo di frame, se no si scorre cento volte al secondo. */
   const segui = (x, y, source) => {
-    if (!attiva(source) || !segueIlPuntatore) return;
+    if (!attiva(source) || !segueIlPuntatore || trascinando) return;
     seguitoInAttesa = { x: Math.round(x), y: Math.round(y) };
     if (frameChiesto) return;
     frameChiesto = true;
-    requestAnimationFrame(() => {
+    // A passo di frame, ma con un ripiego: in una pagina nascosta o occlusa il browser non
+    // chiama mai il frame, e l'inseguimento resterebbe fermo senza dire niente.
+    const pianifica = (fn) => {
+      if (typeof requestAnimationFrame === 'function' && !document.hidden) requestAnimationFrame(fn);
+      else setTimeout(fn, 16);
+    };
+    pianifica(() => {
       frameChiesto = false;
       const punto = seguitoInAttesa;
       seguitoInAttesa = null;
