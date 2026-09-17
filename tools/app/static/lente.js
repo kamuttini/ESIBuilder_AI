@@ -158,6 +158,72 @@ lavorando, oppure torna indietro.</div>
 
   const fattore = () => zoomManuale || zoomAuto();
 
+  /* Il punto nativo sotto a un evento del puntatore: serve sia alle coordinate sia allo
+     zoom ancorato. Senza finestra o senza ritaglio non c'e' punto, e chi chiama lo sa. */
+  const puntoNativo = (ev) => {
+    if (!viva() || !finestra) return null;
+    const img = win.document.getElementById('crop');
+    const r = img.getBoundingClientRect();
+    const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
+    if (!s) return null;
+    return { x: finestra[0] + (ev.clientX - r.left) / s, y: finestra[1] + (ev.clientY - r.top) / s };
+  };
+
+  /* Zoom col punto fermo sotto al cursore. Ingrandendo dal centro, il dettaglio che si
+     stava guardando scappava via e lo si inseguiva scorrendo: due gesti per farne uno.
+     Si segna dove cade il punto adesso, si cambia scala, e si riporta li' lo scorrimento. */
+  const zoomAncorato = (verso, ev) => {
+    const punto = ev ? puntoNativo(ev) : null;
+    if (!punto) { cambiaZoom(verso); return; }
+    const primaX = ev.clientX;
+    const primaY = ev.clientY;
+    cambiaZoom(verso);
+    if (!viva() || !finestra) return;
+    const img = win.document.getElementById('crop');
+    const r = img.getBoundingClientRect();
+    const s = (img.clientWidth || 1) / Math.max(1, finestra[2] - finestra[0]);
+    if (!s) return;
+    const dopoX = r.left + (punto.x - finestra[0]) * s;
+    const dopoY = r.top + (punto.y - finestra[1]) * s;
+    win.scrollBy(Math.round(dopoX - primaX), Math.round(dopoY - primaY));
+  };
+
+  /* Spostare la vista di tanti pixel nativi, tenendola dentro all'immagine. Lo usano sia
+     le frecce sia il trascinamento, cosi' il limite ai bordi e' scritto una volta sola. */
+  const spostaVista = (dx, dy) => {
+    if (!finestra || !ctx) return;
+    const [W, H] = ctx.size || [0, 0];
+    const largo = finestra[2] - finestra[0];
+    const alto = finestra[3] - finestra[1];
+    let x0 = Math.round(finestra[0] + dx);
+    let y0 = Math.round(finestra[1] + dy);
+    x0 = Math.max(0, Math.min(x0, (W || x0 + largo) - largo));
+    y0 = Math.max(0, Math.min(y0, (H || y0 + alto) - alto));
+    if (x0 === finestra[0] && y0 === finestra[1]) return;
+    finestra = [x0, y0, x0 + largo, y0 + alto];
+    finestraManuale = true;
+    miraScelta = '';
+    zoomServito = 0;
+    disegna();
+  };
+
+  const pittaSegui = () => {
+    if (!viva()) return;
+    const b = win.document.getElementById('segui');
+    if (!b) return;
+    b.className = segueIlPuntatore ? 'on' : '';
+    b.textContent = segueIlPuntatore ? 'segue' : 'ferma';
+  };
+
+  const commutaSegui = () => {
+    segueIlPuntatore = !segueIlPuntatore;
+    // Smettendo di seguire si torna a guardare quello che la sezione indicava: lasciare
+    // la lente dove il puntatore era passato per caso non e' «ferma», e' «persa».
+    if (!segueIlPuntatore) { puntoSeguito = null; miraInFinestra = null; }
+    pittaSegui();
+    disegna(true);
+  };
+
   const cambiaZoom = (verso) => {
     const ora = fattore();
     const vicino = PASSI_ZOOM.reduce((a, b) => (Math.abs(b - ora) < Math.abs(a - ora) ? b : a));
@@ -230,10 +296,16 @@ lavorando, oppure torna indietro.</div>
   const attaccaSpostamento = (scena) => {
     scena.addEventListener('pointerdown', (ev) => {
       if (ev.target !== scena && ev.target.id !== 'crop') return;
+      // Senza contesto o senza ritaglio non c'e' niente da spostare: prima bastava un clic
+      // sulla finestra appena aperta per farla saltare su `ctx.size` di un contesto nullo.
+      if (!viva() || !ctx || !finestra) return;
       ev.preventDefault();
-      // Quando c'e' qualcosa da disegnare, il trascinamento disegna; con alt premuto
-      // sposta la vista, che e' il gesto piu' raro dei due mentre si indica un marker.
-      if (ctx && ctx.onDraw && ev.button === 0 && !ev.altKey) {
+      // Quando c'e' qualcosa da disegnare, il trascinamento disegna; il tasto centrale e
+      // alt spostano sempre la vista, anche mentre si disegna: sono i due gesti che in
+      // ogni altro programma vogliono dire «sposta», e cercarli qui non deve costare un
+      // pensiero.
+      const spostaComunque = ev.button === 1 || ev.altKey;
+      if (ctx.onDraw && ev.button === 0 && !spostaComunque) {
         disegnaNuovo(scena, ev);
         return;
       }
@@ -306,11 +378,25 @@ lavorando, oppure torna indietro.</div>
      rifinitura: si guarda ingrandito e si aggiusta senza trascinare. */
   const attaccaTasti = (d) => {
     d.addEventListener('keydown', (ev) => {
-      if (!ctx || !ctx.onChange || !latoScelto || sospesa) return;
+      if (!viva()) return;
+      // Zoom e vista rispondono sempre, anche dove non c'e' niente da modificare: sono il
+      // modo di muoversi senza staccare la mano dalla tastiera.
+      if (ev.key === '+' || ev.key === '=') { ev.preventDefault(); cambiaZoom(+1); return; }
+      if (ev.key === '-' || ev.key === '_') { ev.preventDefault(); cambiaZoom(-1); return; }
+      if (ev.key === '0') { ev.preventDefault(); zoomManuale = null; disegna(true); return; }
+      if (ev.key === 'f' || ev.key === 'F') { ev.preventDefault(); commutaSegui(); return; }
       const passo = ev.shiftKey ? 10 : 1;
       const delta = { ArrowLeft: [-passo, 0], ArrowRight: [passo, 0],
                       ArrowUp: [0, -passo], ArrowDown: [0, passo] }[ev.key];
       if (!delta) return;
+      // Senza un lato scelto le frecce non avevano nessun effetto: adesso spostano la
+      // vista. Il passo e' piu' largo di quello del bordo - qui si naviga, non si rifinisce.
+      if (!ctx || !ctx.onChange || !latoScelto || sospesa) {
+        if (!finestra) return;
+        ev.preventDefault();
+        spostaVista(delta[0] * 8, delta[1] * 8);
+        return;
+      }
       ev.preventDefault();
       const box = { ...(ctx.boxes[0] || {}).box };
       const [W, H] = ctx.size || [0, 0];
@@ -357,26 +443,14 @@ lavorando, oppure torna indietro.</div>
     d.getElementById('piu').addEventListener('click', () => cambiaZoom(+1));
     d.getElementById('meno').addEventListener('click', () => cambiaZoom(-1));
     d.getElementById('adatta').addEventListener('click', () => { zoomManuale = null; disegna(true); });
-    const tastoSegui = d.getElementById('segui');
-    const pittaSegui = () => {
-      tastoSegui.className = segueIlPuntatore ? 'on' : '';
-      tastoSegui.textContent = segueIlPuntatore ? 'segue' : 'ferma';
-    };
     pittaSegui();
-    tastoSegui.addEventListener('click', () => {
-      segueIlPuntatore = !segueIlPuntatore;
-      // Smettendo di seguire si torna a guardare quello che la sezione indicava: lasciare
-      // la lente dove il puntatore era passato per caso non e' «ferma», e' «persa».
-      if (!segueIlPuntatore) { puntoSeguito = null; miraInFinestra = null; }
-      pittaSegui();
-      disegna(true);
-    });
+    d.getElementById('segui').addEventListener('click', commutaSegui);
     // La rotella ingrandisce invece di scorrere: in una lente e' quello che si vuole fare.
     // Con shift resta lo scorrimento, per quando il ritaglio e' piu' grande della finestra.
     d.addEventListener('wheel', (ev) => {
       if (ev.shiftKey) return;
       ev.preventDefault();
-      cambiaZoom(ev.deltaY < 0 ? +1 : -1);
+      zoomAncorato(ev.deltaY < 0 ? +1 : -1, ev);
     }, { passive: false });
     disegna();
     return true;
@@ -739,7 +813,9 @@ lavorando, oppure torna indietro.</div>
         : '')
       + (ctx.onDraw ? ' · tira qui dentro per disegnarlo, alt+trascina per spostare la vista' : '')
       + (ctx.onPunto && !ctx.onDraw
-        ? ` · clic: ${ctx.puntoLabel || 'indica il punto'} · trascina: sposta la vista` : '');
+        ? ` · clic: ${ctx.puntoLabel || 'indica il punto'} · trascina: sposta la vista` : '')
+      + ' · rotella: zoom sul punto · tasto centrale: sposta · +/− e 0: zoom · frecce: '
+      + 'muovono il lato scelto, o la vista se non ce n\'e' + ' uno · f: segui';
   };
 
   /* Il contesto arriva da una sezione, e ogni sezione ha il suo `source`. Cambiandolo si
@@ -788,6 +864,25 @@ lavorando, oppure torna indietro.</div>
     if (viva()) win.document.body.classList.add('sospesa');
   };
 
+  /* ...e quando la sezione nuova si disegna, la lente passa a lei da sola.
+
+     Prima restava sospesa finche' non si tornava a premere il pulsante, e con due schermi
+     voleva dire che ogni cambio di sezione costava un viaggio con il mouse fino all'altra
+     finestra. Ogni pannello dichiara il suo contesto disegnando il proprio pulsante: e'
+     li' che la lente lo adotta. Se la sezione e' la stessa di prima non si riparte da
+     capo - zoom e vista restano dove li aveva messi l'utente. */
+  const offri = (dammiContesto) => {
+    if (!viva() || !sospesa || typeof dammiContesto !== 'function') return;
+    let nuovo = null;
+    try {
+      nuovo = dammiContesto();
+    } catch (_) {
+      return;   // un pannello a meta' non e' un buon motivo per rompere la lente
+    }
+    if (!nuovo) return;
+    aggiorna(nuovo, ((nuovo.source || '') !== padrone));
+  };
+
   /* Il tasto che la apre. `window.open` vuole un gesto dell'utente: da qui in poi gli
      aggiornamenti arrivano da soli. */
   /* I tasti che l'hanno aperta: la loro scritta deve dire com'e' adesso. Restava «Lente
@@ -804,6 +899,9 @@ lavorando, oppure torna indietro.</div>
   const bottone = (dammiContesto, etichetta) => {
     const testo = etichetta || 'Lente su un\'altra finestra';
     const b = el('button', { class: 'ghost' }, testo);
+    // Disegnare il pulsante e' il modo in cui una sezione dice «la lente qui la uso io»:
+    // se e' aperta e in attesa, se la prende senza che l'utente debba premerlo.
+    offri(dammiContesto);
     b.addEventListener('click', () => {
       const nuovo = dammiContesto();
       const eraViva = viva();
@@ -857,6 +955,7 @@ lavorando, oppure torna indietro.</div>
   const segueOra = () => segueIlPuntatore;
 
   return {
-    apri, chiudi, aggiorna, aggiornaSeAttiva, attiva, sospendi, viva, bottone, segui, segueOra,
+    apri, chiudi, aggiorna, aggiornaSeAttiva, attiva, sospendi, offri, viva, bottone,
+    segui, segueOra,
   };
 })();
