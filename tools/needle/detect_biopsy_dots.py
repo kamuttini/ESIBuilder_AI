@@ -48,6 +48,22 @@ def coloured_mask(bgr: np.ndarray, min_saturation: int = 90, min_value: int = 70
     return ((saturation >= min_saturation) & (value >= min_value)).astype(np.uint8) * 255
 
 
+def bright_dot_mask(bgr: np.ndarray, min_contrast: int = 22, max_dot: int = 9) -> np.ndarray:
+    """I pallini chiari, quelli disegnati in bianco invece che a colori.
+
+    Sulle 831 immagini delle cartelle «biopsia» dell'archivio la guida e' colorata solo in due
+    acquisizioni su trentacinque: quasi ovunque i pallini sono bianchi o grigi, e la maschera
+    a saturazione non li vede. Qui si cerca quello che li distingue dal tessuto: sono **piccoli
+    e piu' chiari di quello che hanno intorno**. Il top-hat tiene esattamente questo -- un
+    massimo locale piu' stretto dell'elemento strutturante -- e lascia fuori le bande larghe
+    del tessuto, che a occhio sono altrettanto luminose ma non sono piccole.
+    """
+    grigio = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    elemento = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max_dot, max_dot))
+    tophat = cv2.morphologyEx(grigio, cv2.MORPH_TOPHAT, elemento)
+    return (tophat >= min_contrast).astype(np.uint8) * 255
+
+
 def _ransac_line(points: np.ndarray, tolerance: float, iterations: int = 400,
                  rng: Optional[np.random.Generator] = None):
     """The line most of the dots agree on.
@@ -197,3 +213,101 @@ def detect(bgr: np.ndarray, rect: Tuple[int, int, int, int], min_dots: int = 6,
         span=round(span, 3),
         regularity=round(regularity, 3),
     )
+
+
+def detect_bright(bgr: np.ndarray, rect: Tuple[int, int, int, int], min_dots: int = 6,
+                  max_dot_area: int = 400, tolerance: float = 4.0, min_span: float = 0.30,
+                  max_irregularity: float = 0.55, edge_margin: float = 0.15,
+                  min_background: float = 18.0, min_contrast: int = 22
+                  ) -> Optional[BiopsyGuide]:
+    """La stessa guida, quando i pallini sono bianchi invece che colorati.
+
+    Cambia solo da dove vengono i punti: non piu' i pixel saturi ma i massimi locali stretti
+    (`bright_dot_mask`). I controlli restano quelli, e servono tutti: senza, il righello e le
+    scritte dell'interfaccia passano per guide -- sono anche loro piccoli, chiari e allineati.
+    Il raggruppamento per tinta qui non ha senso e sparisce: in grigio la tinta non distingue
+    niente, e a separare la guida dal resto resta il RANSAC.
+    """
+    left, top, right, bottom = (int(v) for v in rect)
+    h, w = bgr.shape[:2]
+    left, top = max(0, left), max(0, top)
+    right, bottom = min(w, right), min(h, bottom)
+    crop = bgr[top:bottom, left:right]
+    if crop.size == 0:
+        return None
+
+    mask = bright_dot_mask(crop, min_contrast=min_contrast)
+    count, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    punti = []
+    for i in range(1, count):
+        area = stats[i, cv2.CC_STAT_AREA]
+        width, height = stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT]
+        if not (2 <= area <= max_dot_area):
+            continue
+        if max(width, height) > 6 * max(1, min(width, height)):
+            continue
+        punti.append((float(centroids[i][0]), float(centroids[i][1])))
+    if len(punti) < min_dots:
+        return None
+
+    points = np.array(punti, dtype=np.float32)
+    inliers = _ransac_line(points, tolerance)
+    if inliers is None or inliers.sum() < min_dots:
+        return None
+    points = points[inliers]
+
+    vx, vy, x0, y0 = cv2.fitLine(points, cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+    normal = np.array([-vy, vx])
+    straightness = float(np.mean(np.abs((points - np.array([x0, y0])) @ normal)))
+    direzione = np.array([vx, vy])
+    t = (points - np.array([x0, y0])) @ direzione
+    ordine = np.argsort(t)
+    points, t = points[ordine], t[ordine]
+    a, b = points[0], points[-1]
+
+    diagonale = math.hypot(crop.shape[1], crop.shape[0])
+    span = float(t[-1] - t[0]) / max(1.0, diagonale)
+    if span < min_span:
+        return None
+    passi = np.diff(t)
+    regularity = float(np.std(passi) / max(1e-6, float(np.mean(passi))))
+    if regularity > max_irregularity:
+        return None
+
+    # non appoggiata al bordo: il righello sta sul margine, la guida attraversa il tessuto
+    margine = edge_margin
+    dentro = [p for p in points
+              if margine * crop.shape[1] <= p[0] <= (1 - margine) * crop.shape[1]]
+    if len(dentro) < min_dots:
+        return None
+
+    grigio = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    sfondi = []
+    for px, py in points:
+        x, y = int(round(px)), int(round(py))
+        finestra = grigio[max(0, y - 14):y + 15, max(0, x - 14):x + 15]
+        if finestra.size:
+            sfondi.append(float(np.median(finestra)))
+    if sfondi and float(np.median(sfondi)) < min_background:
+        return None
+
+    colori = [crop[int(round(p[1])), int(round(p[0]))] for p in points]
+    mediano = np.median(np.array(colori), axis=0).astype(int)
+    return BiopsyGuide(
+        dots=[(float(p[0]) + left, float(p[1]) + top) for p in points],
+        p1=(float(a[0]) + left, float(a[1]) + top),
+        p2=(float(b[0]) + left, float(b[1]) + top),
+        angle_deg=math.degrees(math.atan2(float(b[1] - a[1]), float(b[0] - a[0]))),
+        straightness=straightness,
+        colour=tuple(int(c) for c in mediano),
+        span=round(span, 3),
+        regularity=round(regularity, 3),
+    )
+
+
+def detect_any(bgr: np.ndarray, rect: Tuple[int, int, int, int], **kwargs) -> Optional[BiopsyGuide]:
+    """Prima a colori, poi in chiaro: sono la stessa guida disegnata in due modi."""
+    colorata = detect(bgr, rect, **{k: v for k, v in kwargs.items() if k != "min_contrast"})
+    if colorata is not None:
+        return colorata
+    return detect_bright(bgr, rect, **kwargs)
