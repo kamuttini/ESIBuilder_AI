@@ -91,3 +91,41 @@ entrambe da Camilla che guardava gli errori, non da caratteristiche progettate a
    acquisizioni, e con altri ~100 il classificatore ha una possibilita' vera.
 2. **Il reticolo della griglia** per le biplane, che e' un blocco a se'.
 3. **La depth per fotogramma**, che oggi e' l'approssimazione piu' grossa della proposta.
+
+## Che cosa succede con più immagini che angoli (misurato il 17/09)
+
+Domanda di Camilla: se le immagini con la sonda in acqua sono più degli angoli del kit, che
+fine fanno? Provato ricostruendo le misure dai 380 setup legacy leggibili — una misura per
+ogni casella angolo × depth, più un'immagine in più — e contando le famiglie che escono.
+
+| caso | famiglie rispetto agli angoli |
+|---|---|
+| una immagine per casella (angolo × depth) | esatte, 380 su 380 |
+| una immagine per angolo, a una sola depth | esatte, 380 su 380 |
+| una in più dello stesso angolo **a un'altra depth** | esatte, 380 su 380 |
+| una in più dello stesso angolo **alla stessa depth** | **+1, in tutti e 380** |
+
+Con rumore del rilevatore (sigma 1.2°, la sua precisione misurata) i risultati non cambiano.
+
+Quindi le immagini in più non danno fastidio, e anzi servono, **finché stanno a depth diverse**:
+entrano nella famiglia del loro angolo e la colonna di #22 passa dall'essere estrapolata con la
+pendenza tipica (0.34 mm di errore) all'essere una retta stimata sui dati (0.056 mm).
+
+Due immagini dello stesso angolo **alla stessa depth** invece diventano sempre due famiglie. È
+la regola «mai due misure della stessa depth nella stessa famiglia», che esiste perché senza di
+lei una correzione a mano può far cadere una riga dentro la tolleranza di quella accanto e far
+sparire un angolo. La si paga qui.
+
+Non è aggirabile guardando i numeri: nell'archivio due linee guida *diverse* possono stare a
+0.01° l'una dall'altra (14% delle coppie adiacenti sta sotto i 3°) e distinguersi solo per #22,
+di 4.11 mm mediani ma con un minimo di 0.30 mm — sotto la precisione con cui il rilevatore
+misura la distanza. Una regola «stessa depth, stesso angolo *e* stessa distanza» non separa i
+due casi.
+
+Provata comunque una regola alternativa che raggruppa su angolo **e** distanza riportata a una
+depth comune con la pendenza tipica: ricostruisce le famiglie giuste nel 67% dei setup contro
+il 100% della regola attuale. Peggiora, e resta quella di adesso.
+
+Quello che si fa invece: lo step dice quante famiglie sono uscite rispetto agli angoli che il
+kit dichiara («4 su 4 — tutte», oppure «5 su 4 — 1 di troppo»), e il fotogramma in eccesso si
+toglie dallo studio con il pulsante sulla sua miniatura nella galleria dell'import.
