@@ -52,6 +52,7 @@ from timestamp_detection import detect_timestamp_box  # noqa: E402
 import marker_refine  # noqa: E402
 import orientation_marker as om  # noqa: E402
 import stages as stages_mod  # noqa: E402
+import thresholds as thresholds_mod  # noqa: E402
 from project import STEPS, Project, expand_rect, list_projects  # noqa: E402
 
 REPO_ROOT = HERE.parents[1]
@@ -10595,6 +10596,443 @@ def api_depth_correct(project_id: str):
                     "corrections": len(value.get("depth_corrections") or {})})
 
 
+# ------------------------------------------------------------------ soglie (TH)
+# Le soglie di match non si digitano: si misurano sulle immagini del progetto come faceva la
+# pagina Thresholds del vecchio ESIBuilder, positivi contro negativi (vedi tools/app/thresholds.py
+# e docs/rect_depth_riga17_logica_2026-09-18.md). Lo stesso giro costruisce la riga #17, che con
+# la depth letta su ogni fotogramma ha gia' tutto: il ritaglio del numero, dove cercarlo per ogni
+# flip, e quali fotogrammi sono positivi (quella depth) e negativi (le altre).
+
+DB_ECHO_DIR = ("templates", "db_echo")
+SOGLIE_CAMPIONE = 40
+
+
+def _db_echo_dir(project: Project) -> Path:
+    return project.root.joinpath(*DB_ECHO_DIR)
+
+
+def _frames_altri_progetti(project: Project, limit: int = 20) -> List[Path]:
+    """Fotogrammi di altri progetti sul disco: i negativi per #13 e #14.
+
+    Su un'altra macchina il logo dell'ecografo e la sigla della sonda non ci sono, o sono
+    altrove: e' il negativo che l'operatore del vecchio tool andava a cercare a mano."""
+    mia = str(project.source.get("folder") or "")
+    fuori: List[Path] = []
+    for voce in list_projects(_projects_root):
+        if voce["project_id"] == project.data.get("project_id"):
+            continue
+        try:
+            altro = _project(voce["project_id"])
+        except Exception:  # noqa: BLE001
+            continue
+        if str(altro.source.get("folder") or "") == mia:
+            continue
+        base = altro.dedup_link_dir()
+        if base is None or not base.is_dir():
+            continue
+        nomi = [n for n in altro.dedup_names() if n not in _orientation_forbidden(altro.step_value("orientation"))]
+        fuori.extend(base / n for n in thresholds_mod.spread(nomi, 4))
+        if len(fuori) >= limit:
+            break
+    return fuori[:limit]
+
+
+def _scrivi_soglie_nello_step(project_id: str, step_id: str, mutate) -> None:
+    """Riscrive il valore di uno step **senza** cambiarne stato, sorgente o dipendenti.
+
+    La soglia e' un attributo del blocco, non un dato geometrico: una #13 confermata resta
+    confermata, e la depth non torna stale perche' la #16 ha avuto la sua TH."""
+    with _step_write_lock:
+        project = _project(project_id)
+        entry = project.steps[step_id]
+        value = mutate(project, dict(project.step_value(step_id)))
+        project.set_step(step_id, value, status=entry.get("status") or "proposed",
+                         source=entry.get("source") or "model",
+                         confidence=entry.get("confidence"), invalidate=False)
+
+
+def _depth_letture(project: Project) -> Dict[str, Dict]:
+    """La depth di ogni fotogramma con il suo riquadro: letture propagate piu' correzioni a mano."""
+    valore = project.step_value("depth_scale")
+    letture: Dict[str, Dict] = {}
+    for nome, lettura in (valore.get("depth_box_reads") or {}).items():
+        try:
+            depth = float(lettura.get("depth_mm"))
+        except (TypeError, ValueError):
+            continue
+        letture[nome] = {"depth_mm": depth, "box": lettura.get("box")}
+    for nome, fix in (valore.get("depth_corrections") or {}).items():
+        try:
+            depth = float(fix.get("depth_mm"))
+        except (TypeError, ValueError):
+            continue
+        letture.setdefault(nome, {"box": None})["depth_mm"] = depth
+    return letture
+
+
+def _run_thresholds(job_id: str, project_id: str) -> None:
+    """Soglie per #13, #14, #16 e costruzione della #17 con le sue soglie."""
+    try:
+        project = _project(project_id)
+        base = project.dedup_link_dir() or _require_folder(project)
+        proibite = _immagini_proibite(project)
+        nomi = [n for n in project.dedup_names() if n not in proibite]
+        if not nomi:
+            raise ValueError("nessuna immagine utilizzabile nel progetto")
+        gruppi = _groups_of_images(project)
+        larghezza, altezza = project.step_value("import").get("image_sample_size") or [0, 0]
+        cache = thresholds_mod.FrameCache()
+        out_dir = _db_echo_dir(project)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        righe: List[Dict] = []
+        tasks: List[thresholds_mod.Task] = []
+        riconoscimento: Dict[str, Dict] = {}
+        percorsi = {n: base / n for n in nomi}
+        ordine = list(marker_refine.GROUP_ORDER)
+
+        def frame_di_riferimento(preferito: Optional[str]) -> Optional[Path]:
+            if preferito and preferito in percorsi and cache.get(percorsi[preferito]) is not None:
+                return percorsi[preferito]
+            for n in nomi:
+                if cache.get(percorsi[n]) is not None:
+                    return percorsi[n]
+            return None
+
+        # --- #13 e #14: un template, positivi = tutta la cartella, negativi = fuori ---------
+        _job_update(job_id, stage="soglie: negativi dagli altri progetti")
+        negativi_esterni = _frames_altri_progetti(project) + [base / n for n in sorted(proibite)]
+        for step_id, chiave, linea, nome_png, etichetta in (
+            ("vendor", "rect_name_echo", 13, "echo_name.png", "template ecografo"),
+            ("probe", "rect_name_probe", 14, "probe_name.png", "template sonda"),
+        ):
+            valore = project.step_value(step_id)
+            box = valore.get(chiave)
+            if not box:
+                continue
+            _job_update(job_id, stage=f"soglie: #{linea} {etichetta}")
+            rif = frame_di_riferimento(valore.get("preview_image"))
+            img = cache.get(rif) if rif is not None else None
+            if img is None:
+                continue
+            template = thresholds_mod.crop_template(img, box)
+            if template is None:
+                righe.append({"key": str(linea), "line": linea, "label": etichetta, "status": "review",
+                              "reason": "box troppo piccolo per ritagliare un template", "threshold": 0.0})
+                continue
+            thresholds_mod.save_png(out_dir / nome_png, template)
+            tasks.append(thresholds_mod.Task(
+                key=str(linea), line=linea, label=etichetta, template=template,
+                template_name=nome_png, box=box,
+                positives=[percorsi[n] for n in thresholds_mod.spread(nomi, SOGLIE_CAMPIONE)],
+                negatives=list(negativi_esterni),
+                # Senza un'altra macchina sul disco il negativo e' il template sul nero: e' quello
+                # che darebbe l'interfaccia di un altro ecografo in quel punto.
+                synthetic_negative=thresholds_mod.synthetic_black_negative(template),
+                drop_weak_negatives=True,
+            ))
+
+        # --- #16: il marker consegnato cercato nell'envelope di ogni gruppo -------------------
+        orient = project.step_value("orientation")
+        blocchi16 = list(orient.get("blocks") or [])
+        marker_path = (orient.get("folder_template") or {}).get("path")
+        marker = thresholds_mod.load_image(Path(marker_path)) if marker_path and Path(marker_path).is_file() else None
+        per_gruppo: Dict[str, List[str]] = {g: [] for g in ordine}
+        for n in nomi:
+            g = gruppi.get(n)
+            if g in per_gruppo:
+                per_gruppo[g].append(n)
+        if marker is not None and len(blocchi16) == len(ordine):
+            for i, g in enumerate(ordine):
+                thresholds_mod.save_png(out_dir / f"orientation_{i}.png", marker)
+                miei = per_gruppo[g]
+                altri = [n for h in ordine if h != g for n in per_gruppo[h]]
+                if not miei:
+                    righe.append({"key": f"16:{g}", "line": 16, "label": "orientamento", "group": g,
+                                  "status": "copied", "reason": "gruppo senza fotogrammi: soglia copiata dal gruppo di riferimento",
+                                  "threshold": None})
+                    continue
+                _job_update(job_id, stage=f"soglie: #16 orientamento {g}")
+                tasks.append(thresholds_mod.Task(
+                    key=f"16:{g}", line=16, label="orientamento", group=g, template=marker,
+                    template_name=f"orientation_{i}.png", box=blocchi16[i],
+                    positives=[percorsi[n] for n in thresholds_mod.spread(miei, SOGLIE_CAMPIONE)],
+                    negatives=[percorsi[n] for n in thresholds_mod.spread(altri, SOGLIE_CAMPIONE)],
+                ))
+        elif blocchi16:
+            righe.append({"key": "16", "line": 16, "label": "orientamento", "status": "review",
+                          "reason": "manca il ritaglio del marker della cartella", "threshold": 0.0})
+
+        # --- #15: le schermate proibite, riconosciute da cio' che le distingue ----------------
+        # Il legacy ritagliava a mano il pezzo di schermo che c'e' solo li' (un avviso, un
+        # banner). Qui lo trova la differenza con i fotogrammi normali, fuori dal rettangolo
+        # ecografico: dentro cambia sempre tutto, fuori cambia solo cio' che rende la schermata
+        # proibita. Positivo: quella schermata; negativi: i fotogrammi normali.
+        rect11 = project.step_value("rect").get("rect_echo")
+        escludi = None
+        if rect11:
+            escludi = expand_rect(rect11, project.step_value("rect").get("margin_percent"),
+                                  width=int(larghezza), height=int(altezza))
+            escludi = thresholds_mod.grow_box(escludi, 4, int(larghezza), int(altezza))
+        proibite_ordinate = sorted(n for n in proibite if (base / n).is_file())
+        riferimenti = [cache.get(percorsi[n]) for n in thresholds_mod.spread(nomi, 3)]
+        riferimenti = [r for r in riferimenti if r is not None]
+        tasks15: List[thresholds_mod.Task] = []
+        for n in proibite_ordinate:
+            _job_update(job_id, stage=f"soglie: #15 schermata proibita {n}")
+            img = cache.get(base / n)
+            box = thresholds_mod.diff_box(img, riferimenti, escludi) if img is not None else None
+            template = thresholds_mod.crop_template(img, box, inset=0) if box else None
+            if template is None:
+                righe.append({"key": f"15:{n}", "line": 15, "label": f"schermata proibita {n}",
+                              "status": "review", "threshold": 0.0,
+                              "reason": "non differisce dai fotogrammi normali fuori dal rettangolo ecografico: nessun template"})
+                continue
+            indice = len(tasks15)
+            nome_png = f"proibited_screen_{indice}_0.png"
+            thresholds_mod.save_png(out_dir / nome_png, template)
+            task = thresholds_mod.Task(
+                key=f"15:{indice}", line=15, label=f"schermata proibita {n}", template=template,
+                template_name=nome_png,
+                box=thresholds_mod.grow_box(box, 3, int(larghezza), int(altezza)),
+                positives=[base / n],
+                negatives=[percorsi[m] for m in thresholds_mod.spread(nomi, SOGLIE_CAMPIONE)],
+                notes=[f"fotogramma: {n}"],
+            )
+            tasks.append(task)
+            tasks15.append(task)
+
+        # --- #17: un template per depth, un box per flip, positivi = quella depth -------------
+        letture = _depth_letture(project)
+        depth_scale = project.step_value("depth_scale")
+        box_cartella = (depth_scale.get("depth_box_template") or {}).get("box")
+        valori: List[float] = [float(v) for v in (depth_scale.get("depths") or [])]
+        if not valori:
+            valori = sorted({round(l["depth_mm"]) for l in letture.values()})
+        per_depth: Dict[int, List[str]] = {k: [] for k in range(len(valori))}
+        for n, lettura in letture.items():
+            if n in proibite or n not in percorsi:
+                continue
+            for k, v in enumerate(valori):
+                if abs(lettura["depth_mm"] - v) < 0.5:
+                    per_depth[k].append(n)
+                    break
+        depth_tasks: Dict[Tuple[int, str], thresholds_mod.Task] = {}
+        gruppi17: List[Optional[List[Optional[Dict]]]] = []
+        if valori and any(per_depth.values()) and (box_cartella or any(l.get("box") for l in letture.values())):
+            for k, v in enumerate(valori):
+                frames_k = per_depth[k]
+                if not frames_k:
+                    righe.append({"key": f"17:{k}", "line": 17, "label": f"depth {v:g} mm", "depth_index": k,
+                                  "depth_mm": v, "status": "review", "threshold": 0.0,
+                                  "reason": "nessun fotogramma letto a questa depth: box e template mancano"})
+                    gruppi17.append(None)
+                    continue
+                _job_update(job_id, stage=f"soglie: #17 depth {v:g} mm")
+                # Il ritaglio viene da un fotogramma NF, come faceva l'operatore. Il riquadro
+                # stretto dell'OCR abbraccia le sole cifre: il template lo allarga di 3 px per
+                # lato (legacy: 19x17 per cifre alte 11), il box di ricerca di 7 (legacy: 28x26).
+                ordinati = sorted(frames_k, key=lambda n: (gruppi.get(n) != "NF", n))
+                template = None
+                for n in ordinati:
+                    img = cache.get(percorsi[n])
+                    stretto = letture[n].get("box") or box_cartella
+                    if img is None or not stretto:
+                        continue
+                    box_t = thresholds_mod.grow_box(stretto, thresholds_mod.TEMPLATE_PAD, int(larghezza), int(altezza))
+                    template = thresholds_mod.crop_template(img, box_t, inset=0)
+                    if template is not None:
+                        break
+                if template is None:
+                    righe.append({"key": f"17:{k}", "line": 17, "label": f"depth {v:g} mm", "depth_index": k,
+                                  "depth_mm": v, "status": "review", "threshold": 0.0,
+                                  "reason": "riquadro troppo piccolo per ritagliare il numero"})
+                    gruppi17.append(None)
+                    continue
+                thresholds_mod.save_png(out_dir / f"depth_{k}.png", template)
+                blocchi_k: List[Optional[Dict]] = []
+                for g in ordine:
+                    miei = [n for n in frames_k if gruppi.get(n) == g]
+                    if not miei and not gruppi:
+                        miei = frames_k  # senza orientamento tutti i frame valgono per ogni flip
+                    if not miei:
+                        blocchi_k.append(None)
+                        continue
+                    box_g = thresholds_mod.union_box([letture[n].get("box") or box_cartella for n in miei])
+                    box_g = thresholds_mod.grow_box(box_g, thresholds_mod.SEARCH_PAD, int(larghezza), int(altezza))
+                    altri = [n for j, fr in per_depth.items() if j != k for n in fr
+                             if gruppi.get(n) == g or not gruppi]
+                    if not altri:
+                        altri = [n for j, fr in per_depth.items() if j != k for n in fr]
+                    task = thresholds_mod.Task(
+                        key=f"17:{k}:{g}", line=17, label=f"depth {v:g} mm", group=g,
+                        depth_index=k, depth_mm=v, template=template, template_name=f"depth_{k}.png",
+                        box=box_g,
+                        positives=[percorsi[n] for n in thresholds_mod.spread(miei, SOGLIE_CAMPIONE)],
+                        negatives=[percorsi[n] for n in thresholds_mod.spread(altri, SOGLIE_CAMPIONE)],
+                    )
+                    tasks.append(task)
+                    depth_tasks[(k, g)] = task
+                    blocchi_k.append({"task": task.key})
+                gruppi17.append(blocchi_k)
+
+        # --- misura --------------------------------------------------------------------------
+        _job_update(job_id, stage=f"soglie: misuro {len(tasks)} template", total=len(tasks), done=0)
+        esiti: Dict[str, Dict] = {}
+        for i, task in enumerate(tasks):
+            esiti[task.key] = thresholds_mod.evaluate(task, cache)
+            _job_update(job_id, done=i + 1)
+        righe.extend(esiti[t.key] for t in tasks)
+
+        # --- scrittura nei blocchi -----------------------------------------------------------
+        def soglia(key: str) -> Optional[float]:
+            e = esiti.get(key)
+            return None if e is None else float(e["threshold"])
+
+        for step_id, chiave, linea in (("vendor", "rect_name_echo", 13), ("probe", "rect_name_probe", 14)):
+            th = soglia(str(linea))
+            if th is None:
+                continue
+
+            def metti(_p: Project, value: Dict, chiave=chiave, th=th) -> Dict:
+                blocco = dict(value.get(chiave) or {})
+                params = dict(blocco.get("params") or {})
+                params.update({"threshold": th, "channel": constants.DEFAULT_CHANNEL,
+                               "p1": constants.DEFAULT_P1, "p2": constants.DEFAULT_P2})
+                blocco["params"] = params
+                blocco.setdefault("match_method", constants.DEFAULT_MATCH_METHOD)
+                value[chiave] = blocco
+                return value
+
+            _scrivi_soglie_nello_step(project_id, step_id, metti)
+
+        if marker is not None and len(blocchi16) == len(ordine):
+            soglie16 = {g: soglia(f"16:{g}") for g in ordine}
+            riferimento = next((soglie16[g] for g in ordine if soglie16[g] is not None), None)
+
+            def metti16(_p: Project, value: Dict) -> Dict:
+                blocchi = [dict(b) for b in (value.get("blocks") or [])]
+                for i, g in enumerate(ordine):
+                    if i >= len(blocchi):
+                        break
+                    th = soglie16[g] if soglie16[g] is not None else riferimento
+                    if th is None:
+                        continue
+                    params = dict(blocchi[i].get("params") or {})
+                    params.update({"threshold": th, "channel": constants.DEFAULT_CHANNEL,
+                                   "p1": constants.DEFAULT_P1, "p2": constants.DEFAULT_P2})
+                    blocchi[i]["params"] = params
+                    blocchi[i].setdefault("match_method", constants.DEFAULT_MATCH_METHOD)
+                value["blocks"] = blocchi
+                return value
+
+            _scrivi_soglie_nello_step(project_id, "orientation", metti16)
+
+            if per_gruppo and any(per_gruppo.values()):
+                blocchi_ric = {}
+                for i, g in enumerate(ordine):
+                    th = soglie16[g] if soglie16[g] is not None else riferimento
+                    if th is not None:
+                        blocchi_ric[g] = {"template": marker, "box": blocchi16[i], "threshold": th}
+                frames = [(percorsi[n], g) for g in ordine for n in per_gruppo[g]]
+                riconoscimento["16"] = thresholds_mod.recognise(frames, blocchi_ric, cache)
+
+        if tasks15:
+            gruppi15 = [[thresholds_mod.block_dict(t.box, soglia(t.key) or 0.0)] for t in tasks15]
+            fotogrammi15 = [t.notes[0].split(": ", 1)[-1] for t in tasks15]
+
+            def metti15(_p: Project, value: Dict) -> Dict:
+                value["groups"] = gruppi15
+                value["frames"] = fotogrammi15
+                value["source"] = "thresholds"
+                value["at"] = datetime.now().isoformat(timespec="seconds")
+                return value
+
+            _write_step(project_id, "proibited", metti15, status="proposed", source="model")
+
+        groups17: List[List[Dict]] = []
+        completa = bool(gruppi17) and all(g is not None for g in gruppi17)
+        if completa:
+            for k, blocchi_k in enumerate(gruppi17):
+                pronti = [(g, depth_tasks[(k, g)]) for g in ordine if (k, g) in depth_tasks]
+                if not pronti:
+                    completa = False
+                    break
+                g_rif, t_rif = pronti[0]
+                blocchi_out: List[Dict] = []
+                for g in ordine:
+                    task = depth_tasks.get((k, g), t_rif)
+                    th = soglia(task.key) or 0.0
+                    blocchi_out.append(thresholds_mod.block_dict(task.box, th))
+                groups17.append(blocchi_out)
+        if completa and groups17:
+            def metti17(_p: Project, value: Dict) -> Dict:
+                value["groups"] = groups17
+                value["source"] = "thresholds"
+                value["depths"] = valori
+                value["at"] = datetime.now().isoformat(timespec="seconds")
+                return value
+
+            _write_step(project_id, "depth_find", metti17, status="proposed", source="model")
+            # la prova di ESI: ogni fotogramma letto, riconosciuto dalla sua depth e solo da quella
+            frames = []
+            blocchi_ric = {}
+            for k, v in enumerate(valori):
+                for g in ordine:
+                    task = depth_tasks.get((k, g))
+                    if task is None:
+                        continue
+                    blocchi_ric[f"{v:g}"] = {"template": task.template, "box": task.box,
+                                             "threshold": soglia(task.key) or 0.0}
+                for n in per_depth[k]:
+                    frames.append((percorsi[n], f"{v:g}"))
+            riconoscimento["17"] = thresholds_mod.recognise(frames, blocchi_ric, cache)
+        elif valori:
+            righe.append({"key": "17", "line": 17, "label": "riga #17", "status": "review", "threshold": 0.0,
+                          "reason": "riga non emessa: manca template o box per almeno una depth"})
+
+        in_review = [r for r in righe if r.get("status") == "review"]
+        stato = "proposed" if any(r.get("status") == "ok" for r in righe) else "blocked"
+
+        def metti_soglie(_p: Project, value: Dict) -> Dict:
+            return {
+                "at": datetime.now().isoformat(timespec="seconds"),
+                "rows": righe,
+                "review": [{"key": r.get("key"), "reason": r.get("reason")} for r in in_review],
+                "recognition": {k: {"counts": v["counts"], "total": v["total"], "failures": v["failures"]}
+                                for k, v in riconoscimento.items()},
+                "templates_dir": str(out_dir),
+                "method": {"mm": constants.DEFAULT_MATCH_METHOD, "p1": constants.DEFAULT_P1,
+                           "p2": constants.DEFAULT_P2, "fraction": thresholds_mod.DEFAULT_FRACTION},
+            }
+
+        valore_step = _write_step(project_id, "thresholds", metti_soglie, status=stato, source="model")
+        _job_update(job_id, status="done", stage="fatto",
+                    result={"rows": len(righe), "review": len(in_review),
+                            "recognition": valore_step.get("recognition")})
+    except Exception as error:  # noqa: BLE001
+        _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
+@app.post("/api/projects/<project_id>/thresholds/run")
+def api_thresholds_run(project_id: str):
+    """Misura le soglie TH di #13 #14 #16 e costruisce la #17 dalle depth lette."""
+    project = _project(project_id)
+    if not project.dedup_names():
+        return jsonify({"error": "importa prima una cartella"}), 400
+    return jsonify({"job_id": _start_job(_run_thresholds, project_id)})
+
+
+@app.get("/api/projects/<project_id>/thresholds/template")
+def api_thresholds_template(project_id: str):
+    """Uno dei ritagli che finiranno in DB_echo, per vederlo nella sezione Soglie."""
+    project = _project(project_id)
+    nome = Path(request.args.get("name") or "").name
+    percorso = _db_echo_dir(project) / nome
+    if not nome or not percorso.is_file():
+        return jsonify({"error": "ritaglio non trovato"}), 404
+    return send_file(percorso, mimetype="image/png", max_age=0)
+
+
 # -- .fss ------------------------------------------------------------------
 @app.get("/api/projects/<project_id>/preview")
 def api_preview(project_id: str):
@@ -10627,8 +11065,19 @@ def api_generate(project_id: str):
     target = project.fss_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(document.render(), encoding="utf-8")
-    project.set_step("generate", {"path": str(target), "problems": problems}, source="app")
-    return jsonify({"written": True, "path": str(target), "problems": problems})
+    # Il .fss dice dove cercare e con quale soglia; i PNG dicono cosa. Vanno insieme, nella
+    # cartella che ESI si aspetta: DB_echo/setup_<id>/ accanto a DB_setup/.
+    ritagli = _db_echo_dir(project)
+    db_echo = None
+    if ritagli.is_dir() and any(ritagli.glob("*.png")):
+        db_echo = target.parent / "DB_echo" / target.stem
+        db_echo.mkdir(parents=True, exist_ok=True)
+        for png in ritagli.glob("*.png"):
+            shutil.copy2(png, db_echo / png.name)
+    project.set_step("generate", {"path": str(target), "problems": problems,
+                                  "db_echo": str(db_echo) if db_echo else ""}, source="app")
+    return jsonify({"written": True, "path": str(target), "problems": problems,
+                    "db_echo": str(db_echo) if db_echo else ""})
 
 
 @app.post("/api/projects/<project_id>/compare")

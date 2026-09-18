@@ -232,6 +232,7 @@ const PANELS = {
   depth_scale: panelModuleStage,
   scale_study: panelModuleStage,
   guides: panelGuides,
+  thresholds: panelThresholds,
   generate: panelGenerate,
 };
 
@@ -4858,6 +4859,101 @@ function panelGuides(panel, step) {
     if (proposta) valore.proposal = proposta;   // la prova resta accanto al valore
     return valore;
   }));
+}
+
+/* Soglie: il numero che dice a ESI «quanto deve somigliare».
+
+   Ogni blocco con un template (#13, #14, #16, #17) porta una soglia TH dentro ai suoi parametri.
+   Zero vuol dire «mai»: un file con le soglie a zero non riconosce niente. Il vecchio
+   ESIBuilder le faceva misurare all'operatore, positivi contro negativi; qui i positivi e i
+   negativi vengono dal progetto stesso, e la #17 nasce nello stesso giro perche' ha gli stessi
+   ingredienti: il numero della depth letto su ogni fotogramma. */
+function panelThresholds(panel, step) {
+  const stored = (state.project.steps[step.id] || {}).value || {};
+  panel.append(el('p', { class: 'hint' },
+    'misura le soglie TH dei template (#13 ecografo, #14 sonda, #16 orientamento) sui fotogrammi '
+    + 'del progetto, come la pagina Thresholds del vecchio ESIBuilder: positivi dove il template '
+    + 'deve essere trovato, negativi dove no, soglia a meta\' fra il peggior positivo e il miglior '
+    + 'negativo. Costruisce anche la riga #17: un ritaglio del numero per ogni depth letta, un box '
+    + 'di ricerca per ogni flip, e la sua soglia. Servono prima rettangolo, orientamento e depth.'));
+
+  const stato = el('span', { class: 'hint' });
+  const calcola = el('button', {}, stored.at ? 'Ricalcola le soglie' : 'Calcola le soglie');
+  calcola.addEventListener('click', async () => {
+    calcola.disabled = true;
+    try {
+      const avvio = await api(`/projects/${state.projectId}/thresholds/run`, { body: {} });
+      await pollJob(avvio.job_id, stato);
+      toast('soglie misurate');
+      await reload();
+    } catch (errore) { toast(errore.message, true); stato.textContent = errore.message; }
+    finally { calcola.disabled = false; }
+  });
+  panel.append(el('div', { class: 'row' }, calcola, stato));
+
+  const righe = stored.rows || [];
+  if (!righe.length) {
+    panel.append(el('p', { class: 'hint' }, 'nessuna soglia ancora misurata.'));
+    return;
+  }
+
+  const fmt = (v) => (v === null || v === undefined) ? '—' : Number(v).toExponential(3);
+  const esito = (r) => r.status === 'ok' ? 'ok'
+    : r.status === 'copied' ? 'copiata' : `da rivedere: ${r.reason || ''}`;
+
+  const card = el('div', { class: 'card' });
+  card.append(el('h3', { style: 'margin-top:0' }, `Soglie misurate${stored.at ? ` — ${stored.at.replace('T', ' ')}` : ''}`));
+  const tabella = el('table', { class: 'lines' });
+  tabella.append(el('tr', {},
+    el('td', { class: 'n' }, '#'), el('td', { class: 'name' }, 'elemento'),
+    el('td', { class: 'name' }, 'template'), el('td', {}, 'TH'),
+    el('td', {}, 'peggior positivo'), el('td', {}, 'miglior negativo'),
+    el('td', {}, 'campioni'), el('td', {}, 'esito')));
+  for (const r of righe) {
+    const nome = [r.label, r.group ? `flip ${r.group}` : ''].filter(Boolean).join(' · ');
+    const img = r.template
+      ? el('img', { src: `/api/projects/${state.projectId}/thresholds/template?name=${encodeURIComponent(r.template)}&t=${encodeURIComponent(stored.at || '')}`,
+                    alt: r.template, title: r.template,
+                    style: 'height:22px;image-rendering:pixelated;vertical-align:middle' })
+      : el('span', { class: 'hint' }, '—');
+    const tr = el('tr', { class: r.status === 'ok' ? '' : 'empty' },
+      el('td', { class: 'n' }, String(r.line)), el('td', { class: 'name' }, nome),
+      el('td', { class: 'name' }, img), el('td', { class: 'val' }, fmt(r.threshold)),
+      el('td', { class: 'val' }, fmt(r.worst_positive)), el('td', { class: 'val' }, fmt(r.best_negative)),
+      el('td', { class: 'val' }, r.n_positive !== undefined ? `${r.n_positive} / ${r.n_negative}` : '—'),
+      el('td', { class: 'val' }, esito(r)));
+    tabella.append(tr);
+  }
+  card.append(tabella);
+  panel.append(card);
+
+  const ric = stored.recognition || {};
+  for (const [riga, r] of Object.entries(ric)) {
+    const c = r.counts || {};
+    const box = el('div', { class: 'card' });
+    box.append(el('h3', { style: 'margin-top:0' },
+      riga === '17' ? 'Prova di ESI sulla #17: ogni fotogramma riconosciuto dalla sua depth?'
+                    : 'Prova di ESI sulla #16: ogni fotogramma riconosciuto dal suo orientamento?'));
+    box.append(el('div', { class: 'kv' }, el('span', {}, 'fotogrammi'), el('span', {}, String(r.total))));
+    box.append(el('div', { class: 'kv' }, el('span', {}, 'riconosciuti solo dal proprio'), el('span', {}, String(c.ok || 0))));
+    box.append(el('div', { class: 'kv' }, el('span', {}, 'ambigui (anche da altri)'), el('span', {}, String(c.ambiguous || 0))));
+    box.append(el('div', { class: 'kv' }, el('span', {}, 'sbagliati (solo da altri)'), el('span', {}, String(c.wrong || 0))));
+    box.append(el('div', { class: 'kv' }, el('span', {}, 'nessuno'), el('span', {}, String(c.none || 0))));
+    const fallimenti = r.failures || [];
+    if (fallimenti.length) {
+      const lista = el('ul', { class: 'hint' });
+      for (const f of fallimenti.slice(0, 12)) {
+        lista.append(el('li', {}, `${f.frame}: vero ${f.truth}, accettato ${f.accepted.length ? f.accepted.join(', ') : 'nessuno'}`));
+      }
+      box.append(lista);
+    }
+    panel.append(box);
+  }
+
+  if (stored.templates_dir) {
+    panel.append(el('p', { class: 'hint' },
+      'i ritagli finiscono in DB_echo/setup_<id>/ accanto al file .fss alla generazione.'));
+  }
 }
 
 function panelGeneric(panel, step) {
