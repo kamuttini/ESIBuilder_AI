@@ -36,7 +36,28 @@ Prima rete, sul test mai visto (8 acquisizioni positive, 3 negative):
 Trova tutte le acquisizioni, ma ha imparato in parte «questa è una schermata di biopsia»
 invece di «ci sono i pallini».
 
-## Il motivo, e non è la quantità di dati
+## Il confronto, a corsa finita
+
+Seconda rete, stesso modo di misurare, su un test più grande (15 acquisizioni positive, 5
+negative, tutte mai viste):
+
+| | 9 macchine | 20 macchine |
+|---|---|---|
+| acquisizioni positive trovate | 8 su 8 | **15 su 15** |
+| acquisizioni negative pulite | 2 su 3 | 3 su 5 |
+| **negativi difficili presi per buoni** | **38 su 46 (83%)** | **6 su 22 (27%)** |
+| richiamo per immagine | 0.72 | 0.79 |
+| precisione per immagine | 0.39 | 0.37 |
+
+I numeri aggregati non si muovono, e presi da soli direbbero che non è cambiato niente. Quello
+che è cambiato è **come sbaglia**: la confusione sui negativi difficili — le schermate che
+sembrano biopsie ma i pallini non ce li hanno — passa dall'83% al 27%. Era esattamente il
+difetto che la diversità doveva attaccare, e l'ha attaccato.
+
+Quello che resta è una precisione bassa distribuita su tutto, non più concentrata in un modo di
+sbagliare riconoscibile.
+
+## Il motivo per cui non sale più, e non è la quantità di dati
 
 Un pallino misura **6 pixel** nell'immagine originale (misurato su sei positivi: 3, 4, 5, 6, 8,
 8 px). La catena di preparazione lo riduce due volte: il ritaglio è limitato a 512 px di lato
