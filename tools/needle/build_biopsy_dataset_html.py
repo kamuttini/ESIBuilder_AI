@@ -27,16 +27,40 @@ import html
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import cv2
 
 SUFFISSI = {".png", ".jpg", ".jpeg"}
 
 
-def trova(root: Path, per_acquisizione: int, solo_biopsia: bool) -> List[Path]:
-    """I candidati: le immagini delle cartelle che si chiamano «biopsia», a campione."""
+def trova(root: Path, per_acquisizione: int, solo_biopsia: bool,
+          per_nome: bool = False, escludi: Optional[set] = None) -> List[Path]:
+    """I candidati da guardare.
+
+    Di norma le immagini delle cartelle che si chiamano «biopsia». Con `per_nome` invece i
+    file che hanno «biops» nel **nome** pur stando altrove: sono 134 file in 32 acquisizioni
+    che le cartelle non pescano, e sono l'unico modo di aumentare il numero di *macchine*
+    diverse fra i positivi -- che e' quello che manca, non il numero di immagini.
+    """
+    escludi = escludi or set()
     per_acq: Dict[str, List[Path]] = {}
+    if per_nome:
+        for f in sorted(root.rglob("*")):
+            if not f.is_file() or f.suffix.lower() not in SUFFISSI:
+                continue
+            if "biops" not in f.name.lower() or "biops" in f.parent.name.lower():
+                continue
+            acquisizione = str(f.relative_to(root)).split("/")[0]
+            if acquisizione in escludi:
+                continue
+            per_acq.setdefault(acquisizione, []).append(f)
+        fuori: List[Path] = []
+        for _a, files in sorted(per_acq.items()):
+            passo = max(1, len(files) // per_acquisizione)
+            fuori.extend(files[::passo][:per_acquisizione])
+        return fuori
+
     for cartella in sorted(root.rglob("*")):
         if not cartella.is_dir():
             continue
@@ -73,11 +97,22 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=900,
                     help="una copia sola, grande: la griglia la rimpicciolisce con il CSS e "
                          "il pieno schermo la usa com'e'")
+    ap.add_argument("--per-nome", action="store_true",
+                    help="i file con «biops» nel nome ma fuori dalle cartelle biopsia: "
+                         "portano acquisizioni nuove")
+    ap.add_argument("--escludi-acquisizioni", type=Path, default=None,
+                    help="un manifest gia' fatto: le sue acquisizioni non si ripropongono")
     ap.add_argument("--tutte-le-cartelle", action="store_true",
                     help="non solo quelle che si chiamano biopsia: serve per i negativi")
     args = ap.parse_args()
 
-    files = trova(args.root, args.per_acquisizione, not args.tutte_le_cartelle)
+    gia_viste = set()
+    if args.escludi_acquisizioni and args.escludi_acquisizioni.is_file():
+        import csv as _csv
+        with args.escludi_acquisizioni.open(encoding="utf-8") as h:
+            gia_viste = {r["group"] for r in _csv.DictReader(h)}
+    files = trova(args.root, args.per_acquisizione, not args.tutte_le_cartelle,
+                  per_nome=args.per_nome, escludi=gia_viste)
     print(f"candidati: {len(files)}", flush=True)
 
     voci = []
