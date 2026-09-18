@@ -3411,6 +3411,14 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
   // ogni gruppo. Si spegne con D quando si vuole guardare l'immagine pulita.
   let differenze = true;
   let occupato = false;
+  /* I fotogrammi segnati «da scartare» nel gruppo in revisione.
+
+     Un gruppo di tre o quattro scatti non ha una risposta sola: a volte se ne tengono due
+     e se ne scartano due, e «tieni questa / tienile tutte» non sa dirlo. Quindi dentro ai
+     gruppi grandi X non decide, segna - e i segni si applicano insieme con Invio. Sui
+     gruppi di due non c'e' niente da accumulare: scartarne una vuol dire tenere l'altra,
+     la decisione e' completa e si passa oltre come prima. */
+  let segnate = new Set();
   const overlay = el('div', { class: 'visore' });
   const scena = el('div', { class: 'visore-scena' });
   const img = el('img', { alt: '' });
@@ -3418,7 +3426,9 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
   scena.append(img, tela);
   const titolo = el('div', { class: 'visore-titolo' });
   const avanzamento = el('div', { class: 'visore-avanzamento' });
+  const pastiglie = el('div', { class: 'visore-pastiglie' });
   const gruppo = () => gruppi[quale];
+  const segnabile = () => !!(azioni.segna && gruppo() && gruppo().names.length > 2);
 
   const disegnaDiff = async () => {
     const g = gruppo();
@@ -3473,10 +3483,60 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
     titolo.innerHTML = '';
     titolo.append(
       el('strong', {}, `${indice + 1} di ${g.names.length}`),
-      el('span', {}, ` · ${nome.split('/').pop()} · differenza ${g.max_diff}`),
+      el('span', {}, ` · ${nome.split('/').pop()} · differenza ${g.max_diff}`
+        + (g.group ? ` · ${g.group}` : '')),
       el('span', { class: 'hint visore-diff-nota' }, ''));
-    avanzamento.textContent = `gruppo ${quale + 1} di ${gruppi.length}`;
+    const segnata = segnate.has(nome);
+    overlay.classList.toggle('visore-segnata', segnata);
+    avanzamento.innerHTML = '';
+    avanzamento.append(el('div', {}, `gruppo ${quale + 1} di ${gruppi.length}`));
+    if (segnabile()) {
+      avanzamento.append(el('div', { class: 'hint' },
+        segnate.size
+          ? `${segnate.size} segnate da scartare · Invio applica`
+          : 'X segna questa da scartare'));
+    }
+    disegnaPastiglie();
+    aggiornaBarra();
     disegnaDiff();
+  };
+  /* La barra dice cose diverse su un gruppo di due e su uno di quattro: nel primo caso X
+     e' una decisione, nel secondo e' un segno e serve Invio. Dirlo sempre allo stesso modo
+     vorrebbe dire dirlo sbagliato una volta su due. */
+  const aggiornaBarra = () => {
+    const g = gruppo();
+    const molte = segnabile();
+    tastoApplica.style.display = molte ? '' : 'none';
+    tastoApplica.disabled = false;
+    tastoSegna.textContent = molte
+      ? `Segna questa da scartare (X)`
+      : `${azioni.nessuna.label} (X)`;
+    aiuto.textContent = molte
+      ? 'frecce o barra: alterna i fotogrammi — e\' alternandoli che si vede la differenza. '
+        + 'X segna quello che stai guardando, Invio scarta i segnati e tiene gli altri. '
+        + '1 tiene solo questo, T li tiene tutti.'
+      : 'frecce o barra: alterna i fotogrammi del gruppo — e\' alternandoli che si vede '
+        + 'la differenza. Dopo 1, T o X si passa subito al gruppo dopo.';
+    if (g && g.names.length > 2 && !azioni.segna) {
+      aiuto.textContent += ' Il gruppo ne ha ' + g.names.length + '.';
+    }
+  };
+  /* I fotogrammi del gruppo in fila, uno per pastiglia: si vede a colpo d'occhio quali
+     restano e quali no, e un clic porta su quello. Senza questo, in un gruppo di quattro
+     non si sa piu' cosa si e' segnato due frecce prima. */
+  const disegnaPastiglie = () => {
+    const g = gruppo();
+    pastiglie.innerHTML = '';
+    if (!g || g.names.length < 2) return;
+    g.names.forEach((nome, k) => {
+      const via = segnate.has(nome);
+      const b = el('button', {
+        class: 'visore-pastiglia' + (k === indice ? ' qui' : '') + (via ? ' via' : ''),
+        title: nome.split('/').pop() + (via ? ' — da scartare' : ' — resta'),
+      }, String(k + 1));
+      b.addEventListener('click', (e) => { e.stopPropagation(); indice = k; mostra(); });
+      pastiglie.append(b);
+    });
   };
   const passo = (d) => {
     const g = gruppo();
@@ -3487,6 +3547,7 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
   const prossimo = () => {
     quale += 1;
     indice = 0;
+    segnate = new Set();
     if (quale >= gruppi.length) {
       toast('finito: non restano gruppi da guardare');
       chiudi();
@@ -3518,6 +3579,30 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
   const uno = () => decidi((g) => azioni.uno.fai(g, g.names[indice]));
   const tutte = () => decidi((g) => azioni.tutte.fai(g, g.names[indice]));
   const nessuna = () => decidi((g) => azioni.nessuna.fai(g, g.names[indice]));
+  /* X: sui gruppi di due decide (scarta questa, resta l'altra, avanti); su quelli di tre
+     o piu' segna e passa al fotogramma dopo ancora da guardare, cosi' tre X di fila
+     scorrono e segnano il gruppo. Premuta di nuovo sullo stesso, toglie il segno. */
+  const segna = () => {
+    const g = gruppo();
+    if (occupato || !g) return;
+    if (!segnabile()) { nessuna(); return; }
+    const nome = g.names[indice];
+    if (segnate.has(nome)) { segnate.delete(nome); mostra(); return; }
+    segnate.add(nome);
+    if (segnate.size < g.names.length) {
+      for (let k = 1; k <= g.names.length; k += 1) {
+        const p = (indice + k) % g.names.length;
+        if (!segnate.has(g.names[p])) { indice = p; break; }
+      }
+    }
+    mostra();
+  };
+  const applica = () => decidi(async (g) => {
+    const via = g.names.filter((nome) => segnate.has(nome));
+    const resta = g.names.filter((nome) => !segnate.has(nome));
+    if (!resta.length) throw new Error('una deve restare: non si scartano tutte');
+    await azioni.segna.fai(g, via, resta);
+  });
 
   const chiudi = () => {
     window.removeEventListener('keydown', tasti);
@@ -3531,7 +3616,8 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
     if (e.key === 'd' || e.key === 'D') { e.preventDefault(); differenze = !differenze; disegnaDiff(); return; }
     if (e.key === '1') { e.preventDefault(); uno(); return; }
     if (e.key === '2' || e.key === 't' || e.key === 'T') { e.preventDefault(); tutte(); return; }
-    if (e.key === 'x' || e.key === 'X') { e.preventDefault(); nessuna(); }
+    if (e.key === 'x' || e.key === 'X') { e.preventDefault(); segna(); return; }
+    if (e.key === 'Enter' && segnabile()) { e.preventDefault(); applica(); }
   };
   window.addEventListener('keydown', tasti);
   scena.addEventListener('click', () => passo(1));
@@ -3542,18 +3628,19 @@ function visoreSimili(gruppi, partenza, progetto, azioni) {
     tastoDiff.className = differenze ? '' : 'ghost';
     disegnaDiff();
   });
+  const tastoSegna = el('button', { class: 'ghost', onclick: segna },
+    `${azioni.nessuna.label} (X)`);
+  const tastoApplica = el('button', { onclick: applica },
+    `${(azioni.segna || {}).label || 'Applica'} (Invio)`);
+  tastoApplica.style.display = 'none';
+  const riga = el('div', { class: 'row' },
+    el('button', { onclick: uno }, `${azioni.uno.label} (1)`),
+    el('button', { class: 'ghost', onclick: tutte }, `${azioni.tutte.label} (T)`),
+    tastoSegna, tastoApplica, tastoDiff,
+    el('button', { class: 'ghost', onclick: chiudi }, 'Chiudi (Esc)'));
+  const aiuto = el('div', { class: 'hint' });
   overlay.append(
-    el('div', { class: 'visore-barra' },
-      avanzamento, titolo,
-      el('div', { class: 'row' },
-        el('button', { onclick: uno }, `${azioni.uno.label} (1)`),
-        el('button', { class: 'ghost', onclick: tutte }, `${azioni.tutte.label} (T)`),
-        el('button', { class: 'ghost', onclick: nessuna }, `${azioni.nessuna.label} (X)`),
-        tastoDiff,
-        el('button', { class: 'ghost', onclick: chiudi }, 'Chiudi (Esc)')),
-      el('div', { class: 'hint' },
-        'frecce o barra: alterna i fotogrammi del gruppo — e\' alternandoli che si vede '
-        + 'la differenza. Dopo 1, T o X si passa subito al gruppo dopo.')),
+    el('div', { class: 'visore-barra' }, avanzamento, titolo, riga, pastiglie, aiuto),
     scena);
   document.body.append(overlay);
   mostra();
@@ -3599,7 +3686,8 @@ function cardQuasiIdentiche(panel, value) {
           { body: { threshold: parseFloat(soglia.value) || 1 } });
         const job = await pollJob(inizio.job_id, stato);
         dati = { threshold: parseFloat(soglia.value) || 1, groups: job.result.groups,
-                 images: job.result.images };
+                 images: job.result.images, oriented: job.result.oriented,
+                 unoriented: job.result.unoriented };
         stato.textContent = '';
         disegna();
       } catch (errore) { toast(errore.message, true); stato.textContent = errore.message; }
@@ -3608,6 +3696,29 @@ function cardQuasiIdentiche(panel, value) {
     card.append(el('div', { class: 'row' },
       el('span', { class: 'hint' }, 'soglia'), soglia, avvia, stato));
     if (!dati) return;
+    /* L'orientamento e' un discrimine prima della somiglianza: due scatti presi in NF e in
+       LR non sono lo stesso fotogramma, per quanto si somiglino dentro al rettangolo. Ma
+       la ricerca parte subito dopo l'import, quando l'orientamento non lo si conosce
+       ancora: allora non ha potuto separare niente, e dirlo e' l'unico modo perche' non si
+       prenda per fatto un controllo che non c'e' stato. */
+    if (dati.oriented != null) {
+      if (!dati.oriented) {
+        card.append(el('p', { class: 'hint' },
+          'quando questa ricerca e\' girata l\'orientamento non era ancora noto, quindi i '
+          + 'gruppi non sono separati per orientamento: due scatti NF e LR simili dentro al '
+          + 'rettangolo possono essere finiti insieme. Dopo lo studio dell\'orientamento '
+          + 'rifalla con «Cerca di nuovo».'));
+      } else if (dati.unoriented) {
+        card.append(el('p', { class: 'hint' },
+          `orientamento noto su ${dati.oriented} immagini su ${dati.oriented + dati.unoriented}: `
+          + 'i gruppi sono separati per orientamento, e le ' + dati.unoriented
+          + ' senza orientamento sono state confrontate solo fra loro.'));
+      } else {
+        card.append(el('p', { class: 'hint' },
+          'gruppi separati per orientamento: due fotogrammi di gruppi diversi non finiscono '
+          + 'mai insieme, per quanto si somiglino dentro al rettangolo.'));
+      }
+    }
     const gruppi = dati.groups || [];
     if (!gruppi.length) {
       card.append(el('p', { class: 'hint' },
@@ -3616,9 +3727,14 @@ function cardQuasiIdentiche(panel, value) {
       return;
     }
     const quante = gruppi.reduce((n, g) => n + g.drop.length, 0);
+    const grandi = gruppi.filter((g) => g.names.length > 2).length;
     card.append(el('p', { class: 'avviso' },
       `${gruppi.length} gruppi di fotogrammi quasi identici: ne resterebbero fuori ${quante} `
-      + 'su ' + (dati.images || '—') + '. Di ogni gruppo si tiene il primo.'));
+      + 'su ' + (dati.images || '—') + '. Di ogni gruppo si tiene il primo'
+      + (grandi
+        ? `, ma ${grandi} gruppi hanno piu\' di due fotogrammi: a tutto schermo si segna a `
+          + 'mano quali scartare, quanti se ne vuole.'
+        : '.')));
     const rivediTutti = el('button', {}, `Guardali a tutto schermo (${gruppi.length})`);
     rivediTutti.addEventListener('click', () => rivedi(0));
     const via = el('button', { class: 'ghost' }, `Scarta tutte e ${quante} senza guardarle`);
@@ -3633,7 +3749,9 @@ function cardQuasiIdentiche(panel, value) {
     for (const g of gruppi.slice(0, 40)) {
       const riga = el('div', { class: 'simili-gruppo' });
       riga.append(el('div', { class: 'hint' },
-        `differenza ${g.max_diff} · interfaccia identica`));
+        `differenza ${g.max_diff} · interfaccia identica`
+        + (g.group ? ` · orientamento ${g.group}` : '')
+        + (g.names.length > 2 ? ` · ${g.names.length} fotogrammi` : '')));
       const strip = el('div', { class: 'simili-strip' });
       for (const nome of g.names) {
         const tenuta = nome === g.keep;
@@ -3664,8 +3782,18 @@ function cardQuasiIdentiche(panel, value) {
     if (!nomi.length) return;
     const esito = await api(`/projects/${state.projectId}/duplicates/drop`,
       { body: { names: nomi, of: gemella || '', diff: scarto } });
-    if (dati) dati.groups = (dati.groups || []).filter((g) => !nomi.includes(g.names[0])
-      && !g.names.every((n) => nomi.includes(n)));
+    /* I gruppi ancora in elenco non devono citare immagini che non ci sono piu'. Conta
+       sui gruppi grandi: se di quattro se ne scartano due, le altre due restano un gruppo
+       aperto, e tornandoci con le pastiglie un fotogramma tolto darebbe un riquadro vuoto.
+       Si accorciano qui gli stessi oggetti che ha in mano il visore, non una copia. */
+    const via = new Set(nomi);
+    for (const g of (dati ? dati.groups || [] : [])) {
+      if (!g.names.some((n) => via.has(n))) continue;
+      g.names = g.names.filter((n) => !via.has(n));
+      g.keep = g.names[0] || '';
+      g.drop = g.names.slice(1);
+    }
+    if (dati) dati.groups = (dati.groups || []).filter((g) => g.names.length > 1);
     if (!silenzioso) {
       toast(`${esito.dropped} immagini tolte dalla cartella · ne restano ${esito.left}`);
       await reload();
@@ -3691,6 +3819,14 @@ function cardQuasiIdentiche(panel, value) {
                  if (g.names.length < 2) throw new Error('e\' rimasta sola: non si scarta');
                  await scarta([nome], true, g.names.find((n) => n !== nome), g.max_diff);
                } },
+    /* Il gruppo di tre o quattro: quali scartare lo dicono i segni, e quante ne restano
+       lo decide lei. Le rimaste sono una scelta come «le tengo tutte» - le ha guardate e
+       le ha volute - quindi non devono tornare a chiedere alla ricerca dopo. */
+    segna: { label: 'Scarta i segnati',
+             fai: async (g, via, resta) => {
+               if (via.length) await scarta(via, true, resta[0], g.max_diff);
+               if (resta.length > 1) await tieni(resta);
+             } },
     finito: async () => { await reload(); },
   });
   disegna();

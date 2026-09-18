@@ -4190,6 +4190,14 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
         if len(nomi) < 2:
             raise ValueError("servono almeno due immagini")
         ora = (project.step_value("import") or {}).get("timestamp_box")
+        # L'orientamento, quando si conosce, viene **prima** della somiglianza: due
+        # fotogrammi presi uno in NF e uno in LR non sono lo stesso fotogramma, per quanto
+        # si somiglino dentro al rettangolo. E si somigliano davvero: su un'acquisizione
+        # buia il ventaglio e' quasi tutto nero in entrambe, l'unica cosa che cambia e' il
+        # marker, e un marker dentro a un riquadro ridotto a 128x128 pesa pochi centesimi -
+        # meno della soglia. Senza questo taglio finivano nello stesso gruppo, e scartarne
+        # una voleva dire perdere un orientamento intero.
+        orientamenti = _groups_of_images(project)
 
         firme = {}
         interfacce: Dict[str, str] = {}
@@ -4207,12 +4215,16 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
         # Si confrontano solo fotogrammi con la **stessa interfaccia**: stessa depth, stessi
         # parametri, stessi pulsanti. Se il pannello cambia sono due impostazioni diverse, e
         # per quanto si somigli l'ecografia non sono lo stesso fotogramma.
-        _job_update(job_id, stage="confronto le coppie con la stessa interfaccia",
-                    done=0, total=0)
-        per_interfaccia: Dict[str, List[str]] = {}
+        _job_update(job_id, stage="confronto le coppie con la stessa interfaccia "
+                                  "e lo stesso orientamento", done=0, total=0)
+        per_interfaccia: Dict[Tuple[str, str], List[str]] = {}
         for nome, impronta in interfacce.items():
             if nome in firme:
-                per_interfaccia.setdefault(impronta, []).append(nome)
+                # Chi non ha un orientamento noto sta con gli altri senza orientamento:
+                # non si sa che cosa siano, e accoppiarne uno a chi l'orientamento ce l'ha
+                # vorrebbe dire indovinare. Quante siano lo dice il riepilogo.
+                per_interfaccia.setdefault(
+                    (impronta, orientamenti.get(nome) or ""), []).append(nome)
         coppie = []
         for compagni in per_interfaccia.values():
             for i, a in enumerate(sorted(compagni)):
@@ -4234,8 +4246,9 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
                 x = padre[x]
             return x
 
-        # Le coppie arrivano gia' filtrate per interfaccia: si confrontano solo fotogrammi
-        # che sul pannello dicono la stessa cosa, quindi qui non c'e' altro da escludere.
+        # Le coppie arrivano gia' filtrate per interfaccia e per orientamento: si
+        # confrontano solo fotogrammi che sul pannello dicono la stessa cosa e che stanno
+        # nello stesso gruppo, quindi qui non c'e' altro da escludere.
         for c in coppie:
             ra, rb = radice(c["a"]), radice(c["b"])
             if ra != rb:
@@ -4252,6 +4265,7 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
             elenco.append({
                 "keep": membri[0], "drop": membri[1:], "names": membri,
                 "max_diff": round(max((c["diff"] for c in dentro), default=0.0), 4),
+                "group": orientamenti.get(membri[0]) or "",
             })
         elenco.sort(key=lambda g: g["max_diff"])
         # I gruppi su cui hai gia' detto «le tengo tutte» non tornano a chiedere: una
@@ -4262,11 +4276,18 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
         if gia_tenuti:
             elenco = [g for g in elenco if tuple(sorted(g["names"])) not in gia_tenuti]
 
+        noti = sum(1 for nome in firme if orientamenti.get(nome))
+
         def mutate(_p: Project, value: Dict) -> Dict:
             value["similar"] = {
                 "threshold": soglia, "groups": elenco,
                 "pairs": coppie[:200],
                 "images": len(firme),
+                # Su quante immagini l'orientamento era noto quando si e' cercato. Se era
+                # noto su nessuna la ricerca non ha potuto separare i gruppi, e la sezione
+                # lo dice invece di far finta di aver guardato anche quello.
+                "oriented": noti,
+                "unoriented": len(firme) - noti,
                 # Le decisioni prese restano: rifare la ricerca non e' disfarle.
                 "kept": (value.get("similar") or {}).get("kept") or [],
                 "at": datetime.now().isoformat(timespec="seconds"),
@@ -4276,7 +4297,8 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
         _write_step(project_id, "import", mutate, invalidate=False)
         _job_update(job_id, status="done", stage="fatto",
                     result={"groups": elenco, "pairs": len(coppie), "images": len(firme),
-                            "threshold": soglia,
+                            "threshold": soglia, "oriented": noti,
+                            "unoriented": len(firme) - noti,
                             "droppable": sum(len(g["drop"]) for g in elenco)})
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))

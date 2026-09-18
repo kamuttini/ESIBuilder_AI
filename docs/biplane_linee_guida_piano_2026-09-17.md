@@ -89,3 +89,65 @@ viste → aggancia allo step import come già fa il modello aghi, con la sua ban
    sonda. È l'unico pezzo davvero nuovo, e va scritto contro `setup_<ID>.grid` dell'archivio:
    29 file da cui si possono prendere i valori giusti e confrontarli, come si è fatto con i
    `.fss` per gli aghi.
+
+---
+
+## Aggiornamento del 18/09: il reticolo non va misurato, va calcolato
+
+Lavorando sul rilevatore della matrice è saltato fuori che il problema era mal posto.
+
+### Il banco di prova
+
+Tutte e 29 le configurazioni a griglia dell'archivio hanno le loro immagini di calibrazione su
+`SSD_esi1_n1` (`image_samples/image_CalGrid_depth_N.png`), e accanto il `setup_<ID>.grid` con i
+rettangoli veri. Sono **351 celle** (configurazione × depth) con verità a fianco: si misura, non
+si stima.
+
+`tools/needle/read_fss_grid.py` legge quei file. Due trappole risolte: QSettings non fa
+l'escaping del C (`\xe` è un byte solo, e `codecs.escape_decode` si ferma lì) e configparser
+prova a interpolare i `%` che capitano dentro il binario. Con la regola di Qt tutti i 692
+`@Variant` si decodificano, e la decodifica è verificata contro qualcosa di indipendente: per
+`CircleRect` i millimetri scritti sono i pixel per il ratio **fino all'ultima cifra**, su tutti
+i 321 rettangoli, e il cerchio sonda esce fra 17.65 e 23.74 mm — la misura vera di una sonda
+transrettale.
+
+### Il primo invariante
+
+    larghezza del GridRect in pixel / (colonne del kit − 1) = passo del kit
+
+Verificato su 351 celle: **0.009 mm di errore mediano**. La dimensione del rettangolo non è una
+misura, è una conseguenza.
+
+### Il secondo, che cambia il progetto
+
+    passo in pixel = passo del kit in mm / millimetri per pixel
+
+Verificato sulle stesse 351 celle: **347 entro l'1%**, errore mediano 0.162%. Il passo del kit
+sta nel `kit_needle_guide_<ID>.grid`, i millimetri per pixel vengono dallo step della scala.
+Entrambi si sanno **prima di guardare l'immagine**.
+
+Quindi il rilevatore non deve trovare il passo del reticolo. Deve trovare **dove** cade, con il
+passo già noto come vincolo — un problema molto più facile.
+
+### Che cosa vale il rilevatore "alla cieca", per confronto
+
+`tools/needle/detect_dot_grid.py` cerca il passo senza saperlo, e serve come riferimento:
+**42% delle celle entro il 5%**, errore mediano 20.4%. Le tre versioni provate dicono perché è
+difficile, ed è un'ambiguità di principio:
+
+| criterio | esito |
+|---|---|
+| addensamenti delle coordinate | il rumore forma righe finte: 27 righe dove ce n'erano 3 |
+| voto sulle distanze fra coppie | scivola sui sottomultipli: 41 px dove il vero era 120 |
+| il più grande fra i ben sostenuti | sfora sui multipli: 23% entro il 5% |
+| posti occupati e consecutivi | 42% entro il 5%, mediana 20.4% |
+
+Un passo T e il suo T/2 spiegano le stesse distanze; a distinguerli è solo quanti posti restano
+vuoti. Con il passo noto dal kit, questa ambiguità sparisce del tutto.
+
+### Prossimo passo
+
+Riscrivere il rilevatore come **verifica** invece che come ricerca: dato il passo atteso, far
+scorrere il reticolo sull'immagine e prendere la posizione dove cadono più pallini. Da lì
+`GridRect` esce per costruzione, e `bVisibleMatrix` è quali posti sono dentro al rettangolo
+ecografico.
