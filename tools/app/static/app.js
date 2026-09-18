@@ -3701,8 +3701,21 @@ function cardQuasiIdentiche(panel, value) {
        la ricerca parte subito dopo l'import, quando l'orientamento non lo si conosce
        ancora: allora non ha potuto separare niente, e dirlo e' l'unico modo perche' non si
        prenda per fatto un controllo che non c'e' stato. */
+    /* Il controllo sull'orientamento non si fida della data del calcolo: il server
+       rilegge i gruppi salvati col marker di adesso e spezza quelli che mescolano due
+       orientamenti, prima di mandarli qui. Quando succede va detto, perche' vuol dire che
+       il calcolo salvato e' vecchio e conviene rifarlo. */
+    if (dati.mixed_split) {
+      const avviso = el('p', { class: 'avviso' },
+        `${dati.mixed_split} gruppi mescolavano orientamenti diversi: erano stati calcolati `
+        + 'prima che l\'orientamento fosse noto. Li ho separati adesso, leggendoli — quello '
+        + 'che vedi e\' corretto, ma il calcolo salvato e\' ancora quello vecchio.');
+      const rifai = el('button', {}, 'Rifai la ricerca con l\'orientamento');
+      rifai.addEventListener('click', () => avvia.click());
+      card.append(avviso, el('div', { class: 'row' }, rifai));
+    }
     if (dati.oriented != null) {
-      if (!dati.oriented) {
+      if (!dati.oriented && !dati.mixed_split) {
         card.append(el('p', { class: 'hint' },
           'quando questa ricerca e\' girata l\'orientamento non era ancora noto, quindi i '
           + 'gruppi non sono separati per orientamento: due scatti NF e LR simili dentro al '

@@ -1262,6 +1262,11 @@ def _run_advanced_stages(
         stages = {**gia_fatti, **results}
         project.data.setdefault("analysis", {})["stages"] = stages
         project.save()
+        # Adesso l'orientamento si conosce: se la ricerca delle quasi identiche era girata
+        # prima di lui - cioe' sempre, parte insieme all'import - va rifatta, se no continua
+        # a proporre di scartare coppie NF/LR che non sono la stessa immagine.
+        if "orientamento" in quali:
+            _rifai_simili_senza_orientamento(project_id)
         _job_update(job_id, status="done", stage="fatto",
                     result={**(base_result or {}), "stages": stages})
     except Exception as error:  # noqa: BLE001
@@ -1484,7 +1489,9 @@ def api_project(project_id: str):
     stages_blocked_reason = _advanced_stages_block_reason(project)
     return jsonify(
         {
-            "project": project.data,
+            # Non `project.data` tal quale: i gruppi di quasi identiche passano dal
+            # controllo sull'orientamento, che nessun dato salvato puo' scavalcare.
+            "project": _dati_con_simili_ripulite(project),
             "status": project.status_report(),
             "is_biplane": project.is_biplane,
             "advanced_stages": {
@@ -3308,7 +3315,49 @@ def _consolidation_worker(project_id: str) -> None:
         # Gli envelope sono stati aggiornati: ora le proposte a valle possono leggere la
         # correzione. Il planner lascia intatti gli step confermati dall'utente.
         _schedule_auto_pipeline(project_id)
+        _rifai_simili_senza_orientamento(project_id)
         return
+
+
+_simili_in_corso: set = set()
+_simili_lock = threading.Lock()
+
+
+def _rifai_simili_senza_orientamento(project_id: str) -> Optional[str]:
+    """Rifa' la ricerca delle quasi identiche se era girata senza sapere l'orientamento.
+
+    E' l'anello che mancava: la ricerca dipende dall'orientamento ma girava prima di lui, e
+    nessuno la richiamava. Si rifa' una volta sola e alla soglia che ha scelto lei - appena
+    l'orientamento c'e', `oriented` smette di essere zero e questa non riparte piu'. Le
+    decisioni gia' prese non si toccano: `_run_simili` si tiene i «le tengo tutte».
+    """
+    try:
+        progetto = _project(project_id)
+    except FileNotFoundError:
+        return None
+    simile = (progetto.step_value("import") or {}).get("similar") or {}
+    if not simile.get("groups") and not simile.get("at"):
+        return None
+    if simile.get("oriented"):
+        return None
+    if not _groups_of_images(progetto):
+        return None
+    soglia = float(simile.get("threshold") or SOGLIA_SIMILI)
+    # Il re-innesco arriva da due punti - la corsa dei moduli e il consolidamento - e
+    # nessuno dei due sa dell'altro: senza questo, due letture della cartella insieme.
+    with _simili_lock:
+        if project_id in _simili_in_corso:
+            return None
+        _simili_in_corso.add(project_id)
+
+    def poi(job_id: str, pid: str, quanto: float) -> None:
+        try:
+            _run_simili(job_id, pid, quanto)
+        finally:
+            with _simili_lock:
+                _simili_in_corso.discard(pid)
+
+    return _start_job(poi, project_id, soglia)
 
 
 def _schedule_consolidation(project_id: str) -> Dict:
@@ -4302,6 +4351,63 @@ def _run_simili(job_id: str, project_id: str, soglia: float) -> None:
                             "droppable": sum(len(g["drop"]) for g in elenco)})
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
+
+
+def _simili_per_orientamento(project: Project, simile: Dict) -> Tuple[Dict, int]:
+    """I gruppi di quasi identiche separati per orientamento, con l'orientamento di ADESSO.
+
+    Il taglio sta dentro alla ricerca, ma non basta: la ricerca parte subito dopo l'import,
+    quando l'orientamento non si conosce ancora - e' il caso normale, non l'eccezione - e
+    nessuno la rifa'. Quei gruppi restano salvati come li ha calcolati allora, cioe' senza
+    poter distinguere un NF da un LR, e continuano a proporre di scartare un orientamento
+    intero. Qui si rileggono col marker che si conosce ora: un gruppo che mescola due
+    orientamenti si spezza in due, e cosi' una coppia di orientamenti diversi non puo'
+    arrivare alla pagina qualunque sia l'eta' del calcolo.
+    """
+    orientamenti = _groups_of_images(project)
+    if not orientamenti:
+        return simile, 0
+    fuori: List[Dict] = []
+    spezzati = 0
+    for gruppo in simile.get("groups") or []:
+        per_gruppo: Dict[str, List[str]] = {}
+        for nome in gruppo.get("names") or []:
+            per_gruppo.setdefault(orientamenti.get(nome) or "", []).append(nome)
+        if len(per_gruppo) <= 1:
+            fuori.append(gruppo)
+            continue
+        spezzati += 1
+        for quale, membri in sorted(per_gruppo.items()):
+            # Un fotogramma rimasto da solo non e' piu' un doppione di nessuno.
+            if len(membri) < 2:
+                continue
+            fuori.append({**gruppo, "names": membri, "keep": membri[0],
+                          "drop": membri[1:], "group": quale, "split_mixed": True})
+    if not spezzati:
+        return simile, 0
+    pulito = dict(simile)
+    pulito["groups"] = fuori
+    pulito["mixed_split"] = spezzati
+    return pulito, spezzati
+
+
+def _dati_con_simili_ripulite(project: Project) -> Dict:
+    """I dati del progetto con i gruppi di quasi identiche ripuliti dall'orientamento."""
+    simile = (project.step_value("import") or {}).get("similar") or {}
+    if not simile.get("groups"):
+        return project.data
+    pulito, spezzati = _simili_per_orientamento(project, simile)
+    if not spezzati:
+        return project.data
+    dati = dict(project.data)
+    passi = dict(dati.get("steps") or {})
+    passo = dict(passi.get("import") or {})
+    valore = dict(passo.get("value") or {})
+    valore["similar"] = pulito
+    passo["value"] = valore
+    passi["import"] = passo
+    dati["steps"] = passi
+    return dati
 
 
 @app.post("/api/projects/<project_id>/duplicates/similar")
