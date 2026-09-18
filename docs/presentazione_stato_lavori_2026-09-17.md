@@ -48,7 +48,7 @@ vuote o da confermare: verso e 8 depth della scala, linee guida. Tempo totale so
 | Kit `.ndg` | file esterno | lettura/scrittura verificata | 390/390 file riscritti identici |
 | Biplane a griglia | `.grid` | **non coperto** | 2/35 acquisizioni con pallini colorati rilevabili |
 | Writer `.fss` | tutte | pronto | 10/10 legacy rigenerati identici (verifica del 9/9) |
-| App wizard | — | usabile, 13 progetti di prova | nessun progetto ha ancora raggiunto lo step "genera" |
+| App wizard | — | usabile, 13 progetti di prova + il 347 | primo `.fss` reale generato con DB_echo il 18/09 (setup 347) |
 | Windows / deploy | — | **non iniziato** | — |
 
 ## 3) Cosa mostrare (demo, in ordine)
