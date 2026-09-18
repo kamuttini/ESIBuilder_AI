@@ -160,6 +160,31 @@ contro un passo che ha infiniti sottomultipli. Sulle stesse 351 celle:
 In millimetri, al ratio mediano dell'archivio: **0.31 mm su x e 0.37 su y**. Contro il 42% di
 celle entro il 5% del passo che dava la ricerca alla cieca.
 
+### Anche il cerchio sonda si deriva, non si misura
+
+Stessa domanda posta all'altra metà della pagina di calibrazione, e stessa risposta.
+
+Il diametro del cerchio sonda **non cambia con la depth**: dentro una configurazione, su tutte
+le sue depth, l'escursione è di 0.55 mm mediani (p75 1.26). Non è una misura che varia, è la
+mano di chi la segna che varia — la sonda ha il diametro che ha.
+
+E non cambia nemmeno fra configurazioni con la stessa sonda:
+
+| sonda | configurazioni | diametro mediano | escursione |
+|---|---|---|---|
+| E14CL4b | 12 | 19.89 mm | 1.07 |
+| 8848 | 8 | 19.77 mm | 2.27 |
+| TLC3-13 | 2 | 19.90 mm | 0.30 |
+| 1536N1011 | 2 | 19.03 mm | 0.18 |
+| 6LB7S | 2 | 19.47 mm | 0.29 |
+
+Tutte intorno ai 19-20 mm, che è il diametro di una sonda transrettale. Quindi anche qui il
+**quanto** è un dato dell'anagrafica e resta da trovare solo il **dove**, esattamente come per
+il reticolo.
+
+Il pezzo di anagrafica che servirebbe — il diametro per modello di sonda — oggi non c'è. Si
+può ricavare dall'archivio, ed è una decisione da prendere con Camilla, non da inventare qui.
+
 ### Prossimo passo
 
 Da qui `GridRect` esce per costruzione — angolo trovato più la matrice del kit — e
