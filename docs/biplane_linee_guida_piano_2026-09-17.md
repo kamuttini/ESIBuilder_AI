@@ -145,9 +145,24 @@ difficile, ed è un'ambiguità di principio:
 Un passo T e il suo T/2 spiegano le stesse distanze; a distinguerli è solo quanti posti restano
 vuoti. Con il passo noto dal kit, questa ambiguità sparisce del tutto.
 
+### E infatti, posto così, funziona
+
+`trova_con_passo` fa quello: dato il passo, cerca **la fase** — una sola incognita per asse,
+contro un passo che ha infiniti sottomultipli. Sulle stesse 351 celle:
+
+| | |
+|---|---|
+| reticolo agganciato | **333 su 351** |
+| scarto sull'angolo del rettangolo, x | mediana **3.3 px**, p75 7.0, p90 13.9 |
+| scarto su y | mediana **4.0 px**, p75 9.0, p90 15.4 |
+| entro 5 px su x | 219 su 333 |
+
+In millimetri, al ratio mediano dell'archivio: **0.31 mm su x e 0.37 su y**. Contro il 42% di
+celle entro il 5% del passo che dava la ricerca alla cieca.
+
 ### Prossimo passo
 
-Riscrivere il rilevatore come **verifica** invece che come ricerca: dato il passo atteso, far
-scorrere il reticolo sull'immagine e prendere la posizione dove cadono più pallini. Da lì
-`GridRect` esce per costruzione, e `bVisibleMatrix` è quali posti sono dentro al rettangolo
-ecografico.
+Da qui `GridRect` esce per costruzione — angolo trovato più la matrice del kit — e
+`bVisibleMatrix` è quali posti cadono dentro il rettangolo ecografico. Restano due cose da
+misurare: il rettangolo completo contro quello vero (non solo il suo angolo), e il cerchio
+sonda, che è l'altra metà della pagina di calibrazione e non è ancora stato toccato.

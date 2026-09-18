@@ -194,3 +194,68 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+@dataclass
+class ReticoloNoto:
+    """Il reticolo trovato sapendo gia' quanto e' fitto."""
+    passo: float                       # in pixel, quello dato
+    fase_x: float                      # dove cade la prima colonna, in pixel assoluti
+    fase_y: float
+    colonne: List[float]               # le x occupate, in pixel assoluti
+    righe: List[float]
+    pallini_usati: int
+    sostegno: float                    # quota dei pallini che cadono sul reticolo
+
+
+def _fase(valori: np.ndarray, passo: float, tolleranza: float) -> Tuple[float, int]:
+    """Dove mettere il reticolo, dato il passo: la fase su cui cade piu' roba."""
+    if valori.size == 0 or passo <= 0:
+        return 0.0, 0
+    resti = np.mod(valori, passo)
+    migliore, quanti = 0.0, -1
+    for candidata in np.unique(np.round(resti, 1)):
+        d = np.abs(resti - candidata)
+        d = np.minimum(d, passo - d)            # la fase e' circolare
+        n = int((d <= tolleranza).sum())
+        if n > quanti:
+            migliore, quanti = float(candidata), n
+    return migliore, quanti
+
+
+def trova_con_passo(bgr: np.ndarray, rect: Sequence[int], passo: float,
+                    min_contrast: int = 35, max_area: int = 60, sfondo_max: int = 25,
+                    tolleranza: Optional[float] = None) -> Optional[ReticoloNoto]:
+    """Il reticolo, quando il passo si sa gia'.
+
+    E' il modo giusto di porre il problema: il passo in pixel e' il passo del kit in
+    millimetri diviso i millimetri per pixel, e sull'archivio quel conto azzecca il vero in 347
+    celle su 351. Non c'e' niente da cercare, c'e' da **verificare dove cade** -- e una fase e'
+    una sola incognita per asse, contro un passo che ha infiniti sottomultipli.
+    """
+    if passo <= 0:
+        return None
+    punti = _pallini(bgr, rect, min_contrast, max_area, sfondo_max)
+    if len(punti) < 4:
+        return None
+    toll = tolleranza if tolleranza is not None else max(2.0, passo * 0.12)
+
+    fx, nx = _fase(punti[:, 0], passo, toll)
+    fy, ny = _fase(punti[:, 1], passo, toll)
+    if nx < 3 or ny < 2:
+        return None
+
+    def sulla_griglia(valori: np.ndarray, fase: float) -> np.ndarray:
+        d = np.abs(np.mod(valori - fase, passo))
+        d = np.minimum(d, passo - d)
+        return d <= toll
+
+    tenuti = sulla_griglia(punti[:, 0], fx) & sulla_griglia(punti[:, 1], fy)
+    if tenuti.sum() < 4:
+        return None
+    dentro = punti[tenuti]
+    colonne = sorted({float(np.round((x - fx) / passo) * passo + fx) for x in dentro[:, 0]})
+    righe = sorted({float(np.round((y - fy) / passo) * passo + fy) for y in dentro[:, 1]})
+    return ReticoloNoto(passo=passo, fase_x=fx, fase_y=fy, colonne=colonne, righe=righe,
+                        pallini_usati=int(tenuti.sum()),
+                        sostegno=float(tenuti.sum()) / len(punti))
