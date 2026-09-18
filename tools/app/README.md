@@ -34,6 +34,7 @@ Poi apri `http://127.0.0.1:8800/`. I progetti finiscono in `artifacts/80_app_pro
 | `marker_refine.py` | dal click approssimativo alla posizione precisa (match del bundle in una finestra) + verifica del gruppo + ricalcolo degli envelope |
 | `orientation_marker.py` | il marker della cartella: innesco dalla banca, taglio del ritaglio, scelta per copertura, validazione dentro gli envelope |
 | `selftest_roundtrip.py` | controllo: rigenera un `.fss` legacy e verifica che sia identico |
+| `thresholds.py` | le soglie `TH` dei template (#13 #14 #15 #16 #17) misurate sui fotogrammi come la pagina Thresholds legacy, i ritagli `DB_echo`, la costruzione della riga #17 |
 
 ## Materiale per le linee guida (dallo step Import e analisi)
 
@@ -78,6 +79,32 @@ piega mostra l'errore e il resto dell'app funziona come prima. Il blocco che lo 
 **Limite noto:** il modello copre la sessione *a linee* (ago in acqua) e manca quella *a
 griglia* (`WdgPageGridCalibration`, cartelle `GUIDA AGHI` / `GUIDA BIOPSIA`), che classifica
 come negativa.
+
+## Soglie e riga #17 (step `thresholds`)
+
+Ogni blocco con un template porta dentro `CH:TH:P1:P2:...` la soglia `TH` sotto cui ESI
+accetta il match (`TM_SQDIFF`, quindi piu' basso e' meglio). Zero vuol dire «mai». Il bottone
+*Calcola le soglie* misura ogni template sui fotogrammi del progetto come faceva l'operatore
+nella pagina Thresholds del vecchio ESIBuilder, ma senza liste a mano:
+
+| riga | template | positivi | negativi |
+|---|---|---|---|
+| #13, #14 | il box, ritagliato con la convenzione DB_echo (+3, -5) | tutti i fotogrammi | fotogrammi di altri progetti sul disco e schermate proibite; chi mostra ancora il template e' scartato; senza niente, il template su sfondo nero |
+| #15 | cio' che la schermata proibita ha e i fotogrammi normali no, fuori dal rettangolo | quella schermata | i fotogrammi normali |
+| #16 | il marker consegnato, uno per gruppo | i fotogrammi del gruppo | i fotogrammi degli altri gruppi |
+| #17 | il numero della depth, dal riquadro stretto dell'OCR allargato di 3 px | i fotogrammi letti a quella depth (per flip) | quelli delle altre depth |
+
+`TH` sta a meta' fra il peggior positivo e il miglior negativo; se si sovrappongono la riga va in
+review. La #17 nasce qui: un gruppo per depth nell'ordine di #18, quattro blocchi (NF, LR, UD,
+LRUD) con il box di ricerca = riquadro stretto + 7 px, come i 28x26 del legacy intorno a un 19x17.
+La sezione mostra anche la **prova di ESI**: ogni fotogramma con orientamento e depth noti, quanti
+sono riconosciuti dal proprio blocco e solo da quello.
+
+I ritagli finiscono in `templates/db_echo/` del progetto e, alla generazione, in
+`out/DB_echo/setup_<id>/` accanto al `.fss`: senza quei PNG il file non si carica.
+
+Servono prima rettangolo, orientamento e depth (con il riquadro dell'etichetta propagato).
+Studio del formato e dei numeri dell'archivio: `docs/rect_depth_riga17_logica_2026-09-18.md`.
 
 ## Linee guida: #22 e #23 proposti dagli aghi (step `guides`)
 
