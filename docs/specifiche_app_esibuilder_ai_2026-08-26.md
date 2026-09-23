@@ -1351,6 +1351,60 @@ unico quando si consulta la lista.
   e agosto sono tutte fra queste. Per una sonda che la rete non puo' proporre, la lista e' la
   scelta da offrire in revisione.
 
+### Restringere la rete al vendor non serve: serve leggere il nome
+
+Misurato su 178 cartelle val+test (separate per cartella dal training), con la rete sonda dell'app
+e 24 immagini per cartella (`artifacts/40_outputs_eval/probe_vendor_restriction_20260923`): la
+scelta fra tutte le sonde e quella ristretta alle sonde del vendor riconosciuto danno **le stesse
+158 cartelle giuste**. La rete sonda non confonde mai un vendor con un altro: i suoi errori stanno
+tutti dentro al vendor, e i piu' gravi sono le sonde che non ha mai visto (12 cartelle su 178), a
+cui risponde con un'altra sonda a confidenza anche 0.95-0.98. Ristringere e rinormalizzare
+peggiorerebbe la confidenza: la Toshiba 14L5 passerebbe da 0.37 a 1.0.
+
+Quindi la lista si usa per **leggere il nome della sonda sullo schermo** (`tools/app/probe_ocr.py`)
+e abbinarlo solo ai nomi delle sonde di quel vendor. La decisione (`tools/app/probe_decision.py`):
+
+| rete | schermo | esito |
+|---|---|---|
+| X | X | accettata |
+| X | Y, del vendor | **revisione**, proposta Y |
+| X | una sonda di un altro vendor (nome esatto) | **revisione**, senza proposta |
+| X | niente | accettata dalla sola rete, come prima |
+
+Le chiavi di lettura vengono **solo** dall'anagrafica (foglio PROBE e colonna "Modello sonda" del
+foglio FSS), mai dai nomi delle cartelle — il vecchio `tools/ultrasound/refine_ultrasound_probe_ocr.py`
+le prendeva da li'. Regole nate dai dati, ognuna con un caso in `tools/app/selftest_probe_ocr.py`:
+`$12C41` si legge SI2C41; dentro una parola vince il nome piu' lungo (L441 non scatta in CL4416R);
+un nome corto vale solo come parola intera; parole vicine unite valgono solo come nome esatto
+("cs, i}" non e' la C5-1, "12L 12/30/21" non contiene la L12-3); per dire che il vendor e' sbagliato
+serve il nome esatto. Una chiave di piu' sonde vale per il gruppo, e fra loro decide la rete
+(LA332E e' l'ID 11 ma l'ID 0 e' configurato con quel nome).
+
+Esito sulle stesse 178 cartelle, OCR su 12 immagini per cartella
+(`artifacts/40_outputs_eval/probe_ocr_decision_20260923`, tabella in `per_folder.csv`):
+
+| oggi (rete) | con lo schermo | cartelle |
+|---|---|---|
+| giusta | giusta (119 con rete e schermo d'accordo) | 154 |
+| giusta | revisione | 4 |
+| sbagliata | revisione con la proposta giusta | 14 |
+| sbagliata | revisione senza proposta o con un'altra | 2 |
+| sbagliata | ancora accettata | 4 |
+
+**Zero regressioni.** Delle 20 cartelle che oggi entrano sbagliate nei codici, 16 non entrano piu'
+da sole. Le 4 che restano sono schermi dove il nome non si legge: due fusioni Biojet (la rete vendor
+dice Biopsee e sullo schermo il nome non c'e'), una GE 9L che si scrive "9L-RS", una Philips L12-3
+senza box #14. Le 4 giuste che vanno in revisione sono tutte Hitachi Arietta 750SE di Sassari: lo
+schermo dice CL4416R1, la configurazione storica usa l'ID 34 (CL4416R) — un disaccordo vero, da
+chiarire (sezione 15). La lettura costa circa 3 secondi nell'import.
+
+Nell'app: la decisione sta in `analysis.probe_decision` e nella scheda **Quale sonda** della
+sezione Sonda. In revisione i codici si compilano **comunque** con la proposta, marcata "da
+confermare": lasciarli vuoti svuoterebbe il tipo sonda, e con lui il blocco che ferma i moduli su
+una cartella biplana mista. La generazione del `.fss` si rifiuta finche' la sonda non e' confermata
+(`POST /api/projects/<id>/probe/choose`). Depth e scala ricevono l'ID sonda dei codici, non piu'
+quello della rete.
+
 ### Come si aggiorna
 
 `python3 tools/app/sonde_per_vendor.py --riallinea` confronta la lista con l'anagrafica piu'
@@ -1430,6 +1484,12 @@ davvero e da come sono state fatte le configurazioni storiche.
    Biopsee, Koelis e Uronav?
 8. **Doppioni e varianti nel foglio PROBE** (sezione 13-ter). ELC10-4 con ID 59 e 69, e le
    varianti registrate come sonde: si correggono nell'anagrafica o li gestiamo con alias?
+9. **CL4416R e CL4416R1** (sezione 13-ter). Sulle Hitachi Arietta 750SE di Sassari lo schermo
+   dice CL4416R1 (ID 57), ma le configurazioni storiche usano l'ID 34 (CL4416R). Sono la stessa
+   sonda per ESI, o quelle configurazioni hanno l'ID sbagliato?
+10. **ELC13-42 e ELC13-4s** (sezione 13-ter). La Resona I9 sw 03.01 e' registrata con la ELC13-42
+   (ID 63), la stessa macchina sw 03.02 con la ELC13-4s (ID 66), e sullo schermo della prima c'e'
+   scritto ELC13-4s. "ELC13-42" e' un refuso?
 
 ## 8-quindecies. La depth: perché sbagliava sull'Esaote Nine
 

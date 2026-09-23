@@ -356,6 +356,11 @@ class Engine:
             "top": [
                 {"probe_id": name, "prob": round(float(prob), 4)} for name, prob in ranked[:3]
             ],
+            # tutta la distribuzione: la decisione con il nome letto sullo schermo
+            # (probe_decision.py) sceglie fra sonde che si leggono uguali
+            "probs": {
+                str(name): round(float(prob), 5) for name, prob in ranked if float(prob) >= 1e-4
+            },
             "images": used,
         }
 

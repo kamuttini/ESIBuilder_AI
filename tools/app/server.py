@@ -51,6 +51,9 @@ from rotation import estimate_rotation  # noqa: E402
 from timestamp_detection import detect_timestamp_box  # noqa: E402
 import marker_refine  # noqa: E402
 import orientation_marker as om  # noqa: E402
+import probe_decision  # noqa: E402
+import probe_ocr  # noqa: E402
+import sonde_per_vendor  # noqa: E402
 import stages as stages_mod  # noqa: E402
 import thresholds as thresholds_mod  # noqa: E402
 from project import STEPS, Project, expand_rect, list_projects  # noqa: E402
@@ -103,6 +106,85 @@ def _job_update(job_id: str, **fields) -> None:
             _jobs[job_id].update(fields)
 
 
+_catalogo: Optional["probe_decision.ProbeCatalog"] = None
+
+
+def _catalogo_sonde(reload: bool = False) -> Optional["probe_decision.ProbeCatalog"]:
+    """La lista sonde-per-vendor con le chiavi dei nomi. Senza anagrafica non c'e'."""
+    global _catalogo
+    if _catalogo is None or reload:
+        try:
+            _catalogo = probe_decision.ProbeCatalog.load(anagrafica=_registry())
+        except FileNotFoundError:
+            _catalogo = None
+    return _catalogo
+
+
+OCR_SONDA_IMMAGINI = 12
+
+
+def _decidi_sonda(picked: Sequence[Path], vendor: Dict, probe: Dict,
+                  rect: Optional[Dict], box14: Optional[Dict]) -> Dict:
+    """Rete sonda + nome letto sullo schermo. Se la lettura non si puo' fare resta la rete."""
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    catalogo = _catalogo_sonde()
+    probs = {int(k): float(v) for k, v in (probe.get("probs") or {}).items()
+             if str(k).lstrip("-").isdigit()}
+    if catalogo is None or not probs:
+        return {"status": "accepted", "probe_id": probe.get("probe_id"), "source": "rete",
+                "reason": "lettura dello schermo non disponibile (anagrafica o rete sonda assenti)"}
+    immagini = sample_paths(list(picked), OCR_SONDA_IMMAGINI)
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            letture = list(pool.map(lambda p: probe_ocr.read_image(p, box14, rect), immagini))
+    except Exception as error:  # noqa: BLE001 - la rete da sola resta una risposta
+        return {"status": "accepted", "probe_id": probe.get("probe_id"), "source": "rete",
+                "reason": f"lettura dello schermo non riuscita: {error}"}
+    testi = [" \n".join(t.values()) for t in letture]
+    esito = probe_decision.decide(catalogo, vendor.get("vendor") or "", probs, testi)
+    esito["images_read"] = len(immagini)
+    return esito
+
+
+def _anagrafica_sonda(vendor: Optional[str], probe_id: Optional[int]) -> Tuple[Dict, Dict]:
+    """Modello, tipi e biplana della sonda, e la combinazione eco+sonda in anagrafica."""
+    registry: Dict = {}
+    combination: Dict = {}
+    try:
+        anagrafica = _registry()
+        if probe_id is not None:
+            registry = anagrafica.probe_by_id(int(probe_id))
+        if vendor and registry.get("model"):
+            resolved = anagrafica.resolve(vendor, registry["model"])
+            combination = dict(resolved.get("proposal") or {})
+            combination["sources"] = resolved.get("sources") or {}
+            combination["ambiguous"] = resolved.get("ambiguous", False)
+            combination["ambiguous_ids"] = resolved.get("ambiguous_ids") or []
+    except (FileNotFoundError, KeyError):
+        registry = registry or {}
+    return registry, combination
+
+
+def _sonda_effettiva(project: Project) -> Optional[int]:
+    """L'ID sonda che i moduli devono usare: quello dei codici, se c'e'.
+
+    I moduli leggevano l'ID della rete da `analysis.probe`: una sonda corretta a mano nei
+    codici non arrivava mai a depth e scala.
+    """
+    raw = project.codes.get("id_probe")
+    if raw not in (None, ""):
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    analysis = project.data.get("analysis") or {}
+    decision = analysis.get("probe_decision") or {}
+    if decision.get("probe_id") is not None:
+        return decision["probe_id"]
+    return (analysis.get("probe") or {}).get("probe_id")
+
+
 def _fill_codes_from_analysis(project: Project, analysis: Dict) -> Dict:
     """Codes the analysis can answer. Never overwrites something the user already set."""
     codes = project.codes
@@ -120,9 +202,22 @@ def _fill_codes_from_analysis(project: Project, analysis: Dict) -> Dict:
     registry = analysis.get("registry") or {}
     plane = (analysis.get("plane") or {}).get("plane")
 
+    # La sonda e' quella decisa con il nome sullo schermo; in revisione e' la proposta, e la
+    # sorgente lo dice. Si compila comunque: il tipo sonda che ne discende e' cio' che ferma
+    # i moduli su una cartella biplana non ancora divisa.
+    decision = analysis.get("probe_decision") or {}
+    probe_id = decision.get("probe_id")
+    if probe_id is None:
+        probe_id = probe.get("probe_id")
+    source = {"rete + schermo": "rete sonda e nome sullo schermo",
+              "schermo": "nome sullo schermo (da confermare)"}.get(
+        decision.get("source") or "", "rete sonda")
+    if decision.get("status") == "review" and decision.get("source") != "schermo":
+        source += " (da confermare)"
+
     put("echo_model", vendor, "rete vendor")
     put("probe_model", registry.get("model"), "anagrafica da ID sonda")
-    put("id_probe", probe.get("probe_id"), "rete sonda")
+    put("id_probe", probe_id, source)
 
     types = registry.get("probe_types") or []
     if registry.get("biplane"):
@@ -316,21 +411,6 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         _job_update(job_id, stage="riconoscimento sonda")
         probe = engine.predict_probe(picked)
 
-        registry: Dict = {}
-        combination: Dict = {}
-        try:
-            anagrafica = _registry()
-            if probe.get("probe_id") is not None:
-                registry = anagrafica.probe_by_id(probe["probe_id"])
-            if vendor.get("vendor") and registry.get("model"):
-                resolved = anagrafica.resolve(vendor["vendor"], registry["model"])
-                combination = dict(resolved.get("proposal") or {})
-                combination["sources"] = resolved.get("sources") or {}
-                combination["ambiguous"] = resolved.get("ambiguous", False)
-                combination["ambiguous_ids"] = resolved.get("ambiguous_ids") or []
-        except (FileNotFoundError, KeyError):
-            registry = registry or {}
-
         _job_update(job_id, stage="rettangolo ecografico")
         rect = engine.predict_rect(
             picked, vendor.get("vendor"), vendor.get("confidence"),
@@ -344,6 +424,22 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         _job_update(job_id, stage="template sonda (#14)")
         line14 = engine.predict_line14(picked)
 
+        # La rete sonda da sola sbaglia con sicurezza sulle sonde che non ha mai visto: il
+        # nome scritto sullo schermo, letto nel box #14, fa da controllo (probe_decision.py).
+        _job_update(job_id, stage="nome della sonda sullo schermo")
+        decision = _decidi_sonda(picked, vendor, probe, box, line14.get("box"))
+        # Una sonda confermata dall'utente sopravvive a «rianalizza», come la rotazione
+        # scelta a mano: la lettura nuova resta accanto, per confronto.
+        prima = ((_project(project_id).data.get("analysis") or {}).get("probe_decision") or {})
+        if prima.get("status") == "confirmed":
+            decision = {**prima, "latest_automatic": {
+                k: decision.get(k) for k in ("status", "probe_id", "source", "reason", "net", "ocr")}}
+        probe_id = decision.get("probe_id")
+        if probe_id is None:
+            probe_id = probe.get("probe_id")
+
+        registry, combination = _anagrafica_sonda(vendor.get("vendor"), probe_id)
+
         plane: Dict = {}
         if box and registry.get("biplane"):
             _job_update(job_id, stage="piano L/T")
@@ -352,6 +448,7 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         analysis = {
             "vendor": vendor,
             "probe": probe,
+            "probe_decision": decision,
             "registry": registry,
             "combination": combination,
             # The box is kept here as well: it is the value the "restore the network proposal"
@@ -757,7 +854,7 @@ def _run_advanced_stages(
         analysis = project.data.get("analysis") or {}
         vendor = ((analysis.get("vendor") or {}).get("vendor") or "")
         vendor_conf = float((analysis.get("vendor") or {}).get("confidence") or 0.0)
-        probe_id = (analysis.get("probe") or {}).get("probe_id")
+        probe_id = _sonda_effettiva(project)
         imported = project.step_value("import")
         video_size = imported.get("image_sample_size") or [0, 0]
         # Le immagini che i moduli ricevono sono gia' raddrizzate (lo specchio di lavoro le
@@ -2439,6 +2536,11 @@ def api_anagrafica_new_row():
             result = registry.add_echo((payload.get("model") or "").strip())
         elif kind == "probe":
             result = registry.add_probe((payload.get("model") or "").strip())
+            # La sonda nuova entra anche nella lista sonde-per-vendor, col vendor del progetto
+            # se chi la crea lo conosce: una sonda senza vendor non appartiene a nessuno.
+            result["list_row"] = sonde_per_vendor.add(
+                result["id"], (payload.get("model") or "").strip(),
+                (payload.get("vendor") or "").strip(), fonte="creata dall'app")
         elif kind == "combination":
             result = registry.add_combination(payload.get("entry") or {})
         else:
@@ -2446,7 +2548,67 @@ def api_anagrafica_new_row():
     except (RuntimeError, KeyError) as error:
         return jsonify({"error": str(error)}), 400
     _registry(reload=True)
+    _catalogo_sonde(reload=True)
     return jsonify(result)
+
+
+@app.post("/api/projects/<project_id>/probe/choose")
+def api_probe_choose(project_id: str):
+    """La sonda confermata o scelta dall'utente: entra nei codici con il modello e il tipo.
+
+    E' l'uscita dalla revisione della sonda (probe_decision.py): la proposta resta scritta
+    accanto, per sapere poi se la lettura dello schermo o la rete avevano ragione.
+    """
+    project = _project(project_id)
+    try:
+        probe_id = int(_payload().get("probe_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "serve probe_id"}), 400
+    analysis = project.data.setdefault("analysis", {})
+    vendor = (analysis.get("vendor") or {}).get("vendor")
+    registry, combination = _anagrafica_sonda(vendor, probe_id)
+    if not registry.get("model"):
+        return jsonify({"error": f"la sonda {probe_id} non e' nel foglio PROBE dell'anagrafica"}), 400
+
+    changes: Dict = {"id_probe": probe_id, "probe_model": registry["model"]}
+    note = ""
+    plane = analysis.get("plane") or {}
+    if registry.get("biplane") and plane.get("plane") not in ("L", "T"):
+        # Il piano L/T si riconosceva solo per le sonde biplane: se la sonda di prima non lo
+        # era, non e' mai stato calcolato. Senza, il tipo (#04) resterebbe vuoto e il blocco
+        # sulle cartelle miste non scatterebbe.
+        rect = project.step_value("rect").get("rect_echo")
+        if rect:
+            try:
+                images = sample_paths(_immagini_da_misurare(project), 24)
+                plane = _inference_engine().predict_lt(images, rect)
+                analysis["plane"] = plane
+            except Exception as error:  # noqa: BLE001
+                note = f"piano L/T non riconosciuto: {error}"
+    types = registry.get("probe_types") or []
+    if registry.get("biplane"):
+        if plane.get("plane") in ("L", "T"):
+            changes["probe_type"] = 3 if plane["plane"] == "L" else 4
+        else:
+            note = note or "sonda biplana: il tipo (#04) si sceglie dopo aver separato L e T"
+    elif types:
+        changes["probe_type"] = types[0]
+
+    decision = dict(analysis.get("probe_decision") or {})
+    decision.update({
+        "status": "confirmed",
+        "proposed_probe_id": decision.get("proposed_probe_id", decision.get("probe_id")),
+        "probe_id": probe_id,
+        "source": "utente",
+        "confirmed_at": datetime.now().isoformat(timespec="seconds"),
+    })
+    analysis["probe_decision"] = decision
+    analysis["registry"] = registry
+    analysis["combination"] = combination
+    project.save()
+    stale = project.update_codes(changes)
+    return jsonify({"codes": changes, "stale": stale, "note": note,
+                    "status": project.status_report()})
 
 
 # -- orientamento: envelope, template e detection per immagine -------------
@@ -10604,7 +10766,7 @@ def _run_depth_only(job_id: str, project_id: str, sample: int) -> None:
                 output_root=project.root / "stages",
                 python_bin=sys.executable,
                 vendor=((analysis.get("vendor") or {}).get("vendor") or ""),
-                probe_id=str((analysis.get("probe") or {}).get("probe_id") or ""),
+                probe_id=str(_sonda_effettiva(project) or ""),
                 probe_model=str(project.codes.get("probe_model") or ""),
                 rect=rect,
                 video_size=imported.get("image_sample_size") or [0, 0],
@@ -11188,6 +11350,10 @@ def api_generate(project_id: str):
     project = _project(project_id)
     document = project.build_document()
     problems = document.validate()
+    # Una sonda in revisione non e' una sonda scelta: rete e schermo non concordavano.
+    decision = (project.data.get("analysis") or {}).get("probe_decision") or {}
+    if decision.get("status") == "review":
+        problems.append("sonda da confermare (sezione Sonda): " + (decision.get("reason") or ""))
     if problems and not _payload().get("force"):
         return jsonify({"written": False, "problems": problems}), 200
     target = project.fss_path()

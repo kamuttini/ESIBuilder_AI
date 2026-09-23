@@ -1226,6 +1226,9 @@ function panelImport(panel) {
     const rows = [
       ['ecografo', vendor.vendor ? `${vendor.vendor} (conf ${vendor.confidence}, margine ${vendor.margin ?? '—'})` : '—'],
       ['sonda (#03)', probe.probe_id != null ? `ID ${probe.probe_id} (conf ${probe.confidence})` : (probe.reason || '—')],
+      ['sonda: esito', (analysis.probe_decision || {}).status === 'review'
+        ? `da confermare nella sezione Sonda — ${(analysis.probe_decision || {}).reason}`
+        : ((analysis.probe_decision || {}).reason || '—')],
       ['sonda in anagrafica', registry.model ? `${registry.model} — tipi ${JSON.stringify(registry.probe_types || [])}` : '—'],
       ['piano L/T', plane.plane ? `${plane.plane} (${plane.counts ? JSON.stringify(plane.counts) : ''} conf media ${plane.mean_confidence})` : (plane.reason || 'non applicabile')],
       ['rettangolo', rect.agreement_iou != null ? `accordo IoU ${rect.agreement_iou}, modello ${rect.source}` : '—'],
@@ -1766,6 +1769,8 @@ function panelProbe(panel, step) {
         : (value.rect_name_probe_reason || '—')],
   ]);
 
+  probeDecisionCard(panel, analysis);
+
   // I progetti importati prima che la rete esistesse non hanno mai eseguito il modulo:
   // lo si lancia da soli alla prima apertura della sezione, una volta sola. `_ts` dice se
   // e' gia' girato, cosi' «non ha trovato niente» non si confonde con «mai eseguito».
@@ -1794,6 +1799,91 @@ function panelProbe(panel, step) {
   templateBlockEditor(panel, value, 'rect_name_probe', '#14',
     'le coordinate si modificano sopra, qui restano i parametri di match');
   panel.append(saveRow(step.id, () => value));
+}
+
+
+/* Quale sonda: la rete sonda e il nome letto sullo schermo (probe_decision.py). La rete da
+   sola sbaglia con sicurezza sulle sonde che non ha mai visto; quando le due fonti non
+   concordano la sonda va confermata qui, scegliendo fra le sonde del vendor — anche quelle
+   che la rete non conosce, perche' la lista viene dall'anagrafica. */
+function probeDecisionCard(panel, analysis) {
+  const decision = analysis.probe_decision;
+  if (!decision) return;
+  const codes = state.project.codes || {};
+  const ocr = decision.ocr || {};
+  const net = decision.net || {};
+  const vendorProbes = decision.vendor_probes || [];
+  const nameOf = (id) => {
+    const hit = vendorProbes.find((p) => p.probe_id === id);
+    return hit ? `${hit.model} (ID ${id})` : (id != null ? `ID ${id}` : '—');
+  };
+  const labels = {
+    accepted: decision.source === 'rete + schermo'
+      ? 'accettata: la rete e il nome sullo schermo concordano'
+      : 'accettata dalla sola rete: il nome non e\' stato letto sullo schermo',
+    review: 'da confermare',
+    confirmed: 'confermata da te',
+  };
+
+  const card = el('div', { class: 'card' });
+  card.append(el('h3', { style: 'margin-top:0' }, 'Quale sonda'));
+  if (decision.status === 'review') {
+    card.append(el('p', { class: 'avviso' }, `${labels.review}: ${decision.reason}`));
+  }
+  const rows = [
+    ['esito', labels[decision.status] || decision.status],
+    ['sonda nei codici (#03)', nameOf(codes.id_probe != null && codes.id_probe !== '' ? Number(codes.id_probe) : null)],
+    ['la rete dice', net.probe_id != null ? `${nameOf(net.probe_id)} · confidenza ${net.confidence}` : '—'],
+    ['sullo schermo', (ocr.probe_ids || []).length
+      ? `${ocr.probe_ids.map(nameOf).join(' / ')} · in ${Math.max(...Object.values(ocr.hits || {0: 0}))} fotogrammi su ${ocr.images_read}`
+      : (ocr.reason || 'non letto')],
+  ];
+  if (decision.status === 'confirmed' && decision.proposed_probe_id != null
+      && decision.proposed_probe_id !== decision.probe_id) {
+    rows.push(['proposta di partenza', nameOf(decision.proposed_probe_id)]);
+  }
+  for (const [key, val] of rows) {
+    card.append(el('div', { class: 'kv' }, el('span', {}, key), el('span', {}, String(val))));
+  }
+
+  // la scelta: le sonde del vendor, e un ID libero per quando il vendor non ha una lista
+  const host = decision.status === 'review' ? card : el('details', {}, el('summary', {}, 'cambia sonda'));
+  if (host !== card) card.append(host);
+  const current = decision.probe_id != null ? decision.probe_id : net.probe_id;
+  let chosen = current;
+  if (vendorProbes.length) {
+    const select = el('select', { style: 'max-width:100%' });
+    for (const p of vendorProbes) {
+      const option = el('option', { value: String(p.probe_id) },
+        `${p.model} (ID ${p.probe_id})` + (p.known_to_net ? '' : ' · la rete non la conosce'));
+      if (p.probe_id === current) option.selected = true;
+      select.append(option);
+    }
+    if (!vendorProbes.some((p) => p.probe_id === current)) {
+      select.prepend(el('option', { value: '', selected: '' }, '— scegli —'));
+      chosen = null;
+    }
+    select.addEventListener('change', () => { chosen = select.value === '' ? null : Number(select.value); });
+    host.append(el('p', { class: 'hint' },
+      `le sonde ${decision.vendor || ''} dell'anagrafica (tools/app/sonde_per_vendor.csv)`), select);
+  } else {
+    const input = el('input', { type: 'number', value: current ?? '', placeholder: 'ID sonda' });
+    input.addEventListener('input', () => { chosen = input.value === '' ? null : Number(input.value); });
+    host.append(el('p', { class: 'hint' },
+      `per ${decision.vendor || 'questo vendor'} la lista delle sonde e' vuota: scrivi l'ID dell'anagrafica`), input);
+  }
+  host.append(confermaInDueTempi(
+    decision.status === 'review' ? 'Conferma questa sonda' : 'Usa questa sonda',
+    'la sonda entra nei codici: ID (#03), modello e tipo (#04)',
+    async () => {
+      if (chosen == null) return toast('scegli una sonda', true);
+      try {
+        const result = await api(`/projects/${state.projectId}/probe/choose`, { body: { probe_id: chosen } });
+        toast(result.note || `sonda ${nameOf(chosen)} nei codici`);
+        await reload();
+      } catch (error) { toast(error.message, true); }
+    }));
+  panel.append(card);
 }
 
 
@@ -5164,7 +5254,8 @@ function anagraficaCard(codes) {
 function candidatesPicker(codes) {
   const host = el('div', {});
   const analysis = state.project.analysis || {};
-  const probeId = (analysis.probe || {}).probe_id;
+  const probeId = codes.id_probe != null && codes.id_probe !== ''
+    ? Number(codes.id_probe) : (analysis.probe || {}).probe_id;
   if (probeId == null) return host;
   const ambiguous = (analysis.combination || {}).ambiguous;
   if (!ambiguous && codes.id_echo) return host;
@@ -5271,7 +5362,10 @@ function renderAnagrafica(host, data, echoModel, probeModel, refresh) {
             'Il file encoding_struct viene modificato (con backup automatico).')) return;
           try {
             const result = await api('/anagrafica/new_row', {
-              body: { kind: item.sheet === 'ECO' ? 'echo' : 'probe', model: item.query },
+              body: {
+                kind: item.sheet === 'ECO' ? 'echo' : 'probe', model: item.query,
+                vendor: ((state.project.analysis || {}).vendor || {}).vendor || '',
+              },
             });
             toast(`riga ${result.row} creata con id ${result.id} · backup: ${result.backup.split('/').pop()}`);
             await refresh();

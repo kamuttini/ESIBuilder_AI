@@ -23,7 +23,9 @@ Poi apri `http://127.0.0.1:8800/`. I progetti finiscono in `artifacts/80_app_pro
 | `rotation.py` | rotazione OSD con tesseract (>=2 voti, >=60% di supporto), 4 processi in parallelo |
 | `timestamp_detection.py` | proposta OCR dell'area data/ora su 8 immagini, con supporto spaziale e confidenza |
 | `anagrafica.py` | lettura/scrittura di `encoding_struct*.xlsx`: ID da modelli, candidati per sonda, nuova riga con backup |
-| `sonde_per_vendor.py` | la lista sonde → vendor in `sonde_per_vendor.csv` (vendor = chi costruisce l'ecografo), ricavata dall'anagrafica e riallineata a ogni versione nuova (`--riallinea`) — **non ancora agganciata** al riconoscimento sonda |
+| `sonde_per_vendor.py` | la lista sonde → vendor in `sonde_per_vendor.csv` (vendor = chi costruisce l'ecografo), ricavata dall'anagrafica e riallineata a ogni versione nuova (`--riallinea`) — la usa la decisione sulla sonda |
+| `probe_ocr.py` | il nome della sonda letto sullo schermo (box #14 e schermo col ventaglio oscurato), abbinato ai nomi dell'anagrafica; casi di controllo in `selftest_probe_ocr.py` |
+| `probe_decision.py` | rete sonda + nome sullo schermo: accettata se concordano, revisione se no (`analysis.probe_decision`, scheda «Quale sonda», `POST /api/projects/<id>/probe/choose`) |
 | `inference.py` | vendor, sonda, rettangolo (routing per vendor), template #13 e #14, piano L/T e su/giu dai checkpoint della pipeline attiva |
 | `stages.py` | marker di orientamento, depth e scala come sottoprocessi con `pipeline_context.json`, piu' i parser dalle righe del modulo al valore dello step |
 | `probe_shape.py` | misura geometrica lineare/convex — **non agganciata**, i numeri misurati sono nel docstring |

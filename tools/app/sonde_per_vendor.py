@@ -120,6 +120,29 @@ def save(rows: List[Dict[str, str]], path: Path = LIST_PATH) -> None:
             writer.writerow({key: row.get(key, "") for key in COLUMNS})
 
 
+def add(probe_id: int, model: str, vendor: str, fonte: str, path: Path = LIST_PATH) -> Dict[str, str]:
+    """Una sonda nuova nella lista. Un ID gia' presente non si sovrascrive: si segnala."""
+    rows = load(path)
+    for row in rows:
+        if row.get("id_sonda") == str(probe_id):
+            return {**row, "note": (row.get("note") or "") + " (gia' presente: non modificata)"}
+    row = {
+        "id_sonda": str(probe_id),
+        "modello_sonda": model,
+        "vendor": list_vendor(vendor) if vendor else "",
+        "fonte": fonte,
+        "note": "" if vendor else "vendor da assegnare",
+    }
+    save(rows + [row], path)
+    return row
+
+
+def list_vendor(net_vendor: str) -> str:
+    """Il vendor della lista per una classe della rete vendor: Canon e Toshiba sono uno solo."""
+    first = re.split(r"[\s,]+", (net_vendor or "").strip())[0].lower()
+    return BRAND.get(first, net_vendor or "")
+
+
 def probes_of(vendor: str, rows: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
     """Le sonde di un vendor. Una sonda senza vendor non appartiene a nessuno."""
     rows = load() if rows is None else rows
