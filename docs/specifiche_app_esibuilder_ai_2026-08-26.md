@@ -1012,6 +1012,12 @@ decisione arriva. Nessuno di questi blocca la parte già decisa della specifica.
    nei 10 `.fss` legacy nessuna riga e' mai vuota. Serve sapere cosa accetta ESI: una riga vuota, oppure
    un box segnaposto con `B` invertito.
    Decisione: _da definire_
+8. **Dove vive la lista delle sonde per vendor** (sezione 13-ter) — una colonna *Vendor* nel foglio
+   PROBE dell'anagrafica, oppure un file nostro nel repo che si riallinea a ogni versione nuova di
+   `encoding_struct`. Dipende da qual e' la copia master dell'anagrafica e da chi la modifica.
+   Decisione provvisoria (2026-09-23, delegata a Claude, **da rivedere**): file nostro,
+   `tools/app/sonde_per_vendor.csv`, chiave l'ID sonda. Non tocca un file che modificano
+   anche i colleghi, e una versione nuova dell'anagrafica non lo cancella.
 
 ## 12-bis. Il passo zero: una sola attesa, poi tutto è già proposto
 
@@ -1318,6 +1324,51 @@ voci per la sonda 12 su piano L, ognuna col nome della macchina — e l'utente s
 Lo stesso vale per il fallback sul foglio `ECO`: un vincitore senza margine sul secondo non
 è una risposta.
 
+## 13-ter. Le sonde per vendor (23-09-2026)
+
+**Regola di dominio** (Camilla): ogni vendor ha le sue sonde. Una sonda di un vendor non viene
+usata dagli ecografi di un altro vendor; piu' ecografi dello stesso vendor possono condividere
+piu' sonde. **Deciso:** il vendor e' **chi costruisce l'ecografo**. Un sistema montato sopra la
+macchina di un altro prende il vendor di quella macchina: Elesta ("Elesta, MyLabTwice-Class-70XVG")
+e' un Esaote, Uronav riceve il video da un BK.
+
+Controllata sull'anagrafica `encoding_struct 2026 08 31.xlsx`, la regola regge senza eccezioni:
+votando il vendor di ogni sonda dalle sue configurazioni FSS, 72 sonde su 75 hanno un vendor
+unico e nessuna ne ha due. Le tre senza vendor sono quelle viste solo su piattaforme di fusione
+(Biopsee `LA - CLA 1536N1011`, le due voci `Koelis Probe`): il nome della piattaforma non dice
+di chi e' la macchina, e la lista le lascia **vuote** invece di indovinare.
+
+L'anagrafica non ha una colonna vendor: si ricava dalla prima parola del modello ecografo
+(`BRAND` in `tools/app/sonde_per_vendor.py`). Canon e Toshiba stanno insieme come nell'anagrafica
+("Canon/Toshiba"): la rete vendor li separa in due classi, che vanno ricondotte a questo vendor
+unico quando si consulta la lista.
+
+### Perche' serve alla catena
+
+- Il classificatore sonda sceglie fra 44 classi di **tutti** i vendor, senza sapere quale vendor
+  e' stato riconosciuto: la lista restringe i candidati alle sonde di quel vendor.
+- Il classificatore non conosce **31 sonde su 75**, e le 7 aggiunte all'anagrafica fra febbraio
+  e agosto sono tutte fra queste. Per una sonda che la rete non puo' proporre, la lista e' la
+  scelta da offrire in revisione.
+
+### Come si aggiorna
+
+`python3 tools/app/sonde_per_vendor.py --riallinea` confronta la lista con l'anagrafica piu'
+recente e non scrive niente: elenca le sonde **nuove** (con il vendor proposto dalle
+configurazioni, da confermare), quelle **rinominate**, quelle **sparite** e quelle ancora
+**senza vendor**. Esce con codice 1 se c'e' qualcosa da allineare. Provato all'indietro contro
+l'anagrafica di febbraio: segnala esattamente le 7 sonde che mancano.
+
+### Da sistemare nell'anagrafica (non la tocchiamo noi)
+
+- `ELC10-4` (Mindray) e' registrata due volte, ID 59 e 69. `ECL10-4` (ID 72) e' invece una Dawei:
+  nome simile, sonda diversa.
+- Varianti di configurazione registrate come sonde: `8848 - NUOVI TEMPLATE DEPTH` (14),
+  `Koelis Probe modalità visualizzazione aghi` (50).
+- La colonna B del foglio FSS non sempre coincide col nome dell'ID: l'ID 0 (LA332) compare come
+  "LA332E", che ha un ID suo (11); "L4533" per LA533; "14L4" per 14L5.
+- Il foglio nuovo `FSS_ESI3` (configurazioni ESI3) non e' ancora letto dall'app.
+
 ## 14. Stato dell'implementazione (26-08-2026)
 
 Codice in `tools/app/` (vedi `tools/app/README.md`). Avvio:
@@ -1372,6 +1423,13 @@ davvero e da come sono state fatte le configurazioni storiche.
 5. **Cartella con entrambi i piani L e T** (punto aperto 6). `1.Esaote_Nine_TLC3-13...` contiene
    `TLC3-13 L` e `TLC3-13 T`, e in anagrafica sono due setup distinti (41 e 42). Una cartella
    così va trattata come due configurazioni separate?
+6. **Copia master dell'anagrafica** (punto aperto 8). Dove sta la `encoding_struct` di riferimento,
+   chi la modifica, e se si puo' aggiungere una colonna *Vendor* al foglio PROBE.
+7. **Sonde viste solo su piattaforme di fusione** (sezione 13-ter). Di che vendor sono
+   `LA - CLA 1536N1011` (Biopsee) e `Koelis Probe`? E su quale macchina girano le configurazioni
+   Biopsee, Koelis e Uronav?
+8. **Doppioni e varianti nel foglio PROBE** (sezione 13-ter). ELC10-4 con ID 59 e 69, e le
+   varianti registrate come sonde: si correggono nell'anagrafica o li gestiamo con alias?
 
 ## 8-quindecies. La depth: perché sbagliava sull'Esaote Nine
 
