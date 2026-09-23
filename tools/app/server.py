@@ -3125,7 +3125,7 @@ def _refine_click(project: Project, name: str, click: Dict, window: int) -> Dict
 
 
 def _fill_blocks(value: Dict, groups: Dict) -> Dict:
-    """Gruppi trovati, mancanti e i quattro blocchi di #17, dal donatore se serve."""
+    """Gruppi trovati, mancanti e i quattro blocchi di #16, dal donatore se serve."""
     order = marker_refine.GROUP_ORDER
     found = [g for g in order if g in groups]
     value.update(
@@ -4665,7 +4665,7 @@ def _dopo_aver_cambiato_le_immagini(project_id: str, quando: str) -> None:
 
     Togliere un'immagine dalla cartella non disfa i calcoli gia' fatti. Gli envelope
     dell'orientamento si rifanno qui, perche' sono minimi e massimi su riquadri gia' noti e
-    costano microsecondi - e sono quelli che finiscono nel `.fss` come riga #17, quindi
+    costano microsecondi - e sono quelli che finiscono nel `.fss` come riga #16, quindi
     lasciarli con dentro il contributo di un'immagine che non c'e' piu' vorrebbe dire
     consegnare a ESI un rettangolo disegnato attorno a qualcosa di escluso.
 
