@@ -266,8 +266,33 @@ function renderPanel() {
   panel.append(el('p', { class: 'hint' },
     `pagina legacy: ${step.legacy_page}${lines} · stato: ${step.status}` +
     (step.relevant ? '' : ' · non applicabile a questa sonda')));
+  avvisoCatenaFerma(panel, state.step);
   avvisoImmaginiCambiate(panel, state.step);
   (PANELS[state.step] || panelGeneric)(panel, step);
+}
+
+
+/* «La catena si e' fermata qui, e non da sola».
+
+   Orientamento, depth e scala devono girare su un piano solo. Con L e T nella stessa
+   cartella ora la catena prosegue sulle sole L; si ferma ancora quando il piano di una
+   sonda biplana non e' mai stato riconosciuto. E' una scelta giusta, non un guasto - ma
+   finche' lo diceva soltanto un grigetto accanto a un tasto spento, da fuori si vedeva una
+   cosa sola: che i moduli non erano partiti. E non partire in silenzio e' indistinguibile
+   da un guasto. */
+const FERMI_SENZA_PIANO = ['orientation', 'depth_scale', 'scale_study', 'depth_find',
+                           'guides', 'thresholds', 'generate'];
+function avvisoCatenaFerma(panel, stepId) {
+  const cancello = state.advancedStages || {};
+  if (cancello.ready !== false || !cancello.blocked_reason) return;
+  if (stepId !== 'import' && !FERMI_SENZA_PIANO.includes(stepId)) return;
+  panel.append(el('p', { class: 'avviso' },
+    'la catena automatica si e\' fermata prima di questo punto: ' + cancello.blocked_reason
+    + '. Non e\' un errore, ed e\' il motivo per cui i moduli non sono partiti da soli.'));
+  if (stepId === 'import') return;
+  const vai = el('button', {}, 'Vai al piano L/T');
+  vai.addEventListener('click', () => selectStep('import'));
+  panel.append(el('div', { class: 'row' }, vai));
 }
 
 
