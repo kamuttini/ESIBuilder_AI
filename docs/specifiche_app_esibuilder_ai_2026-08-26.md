@@ -1766,6 +1766,16 @@ si aspetta di trovare in `#13`.
 
 ## 8-novodecies. I moduli girano da soli, l'utente corregge
 
+> Aggiornamento 24 settembre 2026: con L e T nella stessa cartella la catena **non aspetta piu'
+> lo sdoppiamento**. Prosegue sulle sole immagini L riconosciute (con sopra le correzioni a
+> mano) e mette da parte le T nello stesso progetto; spostare un'immagine da un piano all'altro
+> ricalcola l'insieme e fa ripartire orientamento, depth e scala da li'. Le correzioni che
+> arrivano mentre la catena gira non si perdono: la catena riparte una volta sola alla fine.
+> Lo sdoppiamento resta per configurare anche la T, e ritrova tutta la cartella. Provato su 44
+> immagini di Bologna (Esaote X8, TLC3-13): la rete L/T le ha dette tutte L, anche le 20 T a
+> confidenza 0.93-1.0, quindi il lavoro sulle L e' partito solo dopo averle corrette a mano —
+> la rete L/T resta il punto debole di questo passo.
+
 > Aggiornamento 9 settembre 2026: questo comportamento e' stato sostituito dal flusso in
 > due tempi. L'import non lancia piu' i tre moduli: prima si controllano i piani L/T e si
 > sdoppia la cartella quando li contiene entrambi; solo dopo orientamento, depth e scala

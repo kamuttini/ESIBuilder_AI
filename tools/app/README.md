@@ -167,9 +167,13 @@ del modello macchina quando l'anagrafica e' ambigua; rettangolo proposto con ant
 disegnato; stato per step con invalidazione mirata; writer `.fss` con validazione; quality gate via
 `tools/fss/compare_fss.py`.
 
-La catena lavora in due tempi: l'import si ferma prima dei moduli avanzati; dopo aver controllato
-e, se necessario, separato L e T, il comando del singolo progetto lancia orientamento, depth e
-scala. Il server impedisce di lanciarli su una cartella biplana non classificata o ancora mista.
+Dopo l'import la catena prosegue da sola: piano L/T, template #14, orientamento, depth e scala.
+Se la cartella contiene **L e T** e non e' stata sdoppiata, non si ferma: lavora sulle sole
+immagini L (con sopra le correzioni a mano) e mette da parte le T, che restano visibili e
+spostabili nella sezione Import. Spostare un'immagine da un piano all'altro fa ripartire i moduli
+da li'; per configurare anche la T si sdoppia, e lo sdoppiamento ritrova tutta la cartella
+(`plane_focus.json` nel progetto). Il server si ferma solo su una biplana il cui piano non e' mai
+stato riconosciuto.
 Durante l'import data e ora vengono cercate automaticamente dopo la rotazione: una proposta
 affidabile entra subito nella deduplicazione, ma il riquadro rosa resta visibile e correggibile.
 La ricerca puo' essere rilanciata o disattivata esplicitamente per il singolo progetto.

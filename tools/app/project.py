@@ -474,6 +474,37 @@ class Project:
             encoding="utf-8",
         )
 
+    # Una cartella con L e T che non e' stata sdoppiata lavora sulle sole L: l'insieme di
+    # lavoro (`DEDUP_FILE`) contiene le L, e questo file tiene tutte le immagini della
+    # cartella - le T messe da parte comprese - perche' correggere un piano o sdoppiare
+    # deve poter ripescare quelle che ora non sono al lavoro.
+    PLANE_FOCUS_FILE = "plane_focus.json"
+
+    def plane_focus(self) -> Optional[Dict]:
+        """{"plane": "L", "all": [...]} quando si lavora su un piano solo, altrimenti None."""
+        path = self.root / self.PLANE_FOCUS_FILE
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        return data if data.get("plane") and isinstance(data.get("all"), list) else None
+
+    def set_plane_focus(self, plane: str, all_names: List[str]) -> None:
+        (self.root / self.PLANE_FOCUS_FILE).write_text(
+            json.dumps({"plane": plane, "all": sorted(set(all_names))}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def clear_plane_focus(self) -> None:
+        (self.root / self.PLANE_FOCUS_FILE).unlink(missing_ok=True)
+
+    def all_names(self) -> List[str]:
+        """Tutte le immagini della cartella, anche quelle messe da parte per il piano."""
+        focus = self.plane_focus()
+        return list(focus["all"]) if focus else self.dedup_names()
+
     def dedup_names(self) -> List[str]:
         path = self.root / self.DEDUP_FILE
         if not path.is_file():

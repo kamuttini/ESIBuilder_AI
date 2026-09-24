@@ -889,6 +889,18 @@ function panelImport(panel) {
   panel.append(el('h3', {}, 'Piano L / T'));
   const pianiBox = el('div', {});
   panel.append(pianiBox);
+  // Mentre si lavora sulle sole L una correzione sposta l'immagine davvero, e i moduli
+  // ripartono: dirlo, e tenere il riepilogo allineato senza ricaricare la pagina.
+  const dopoLaCorrezione = (esito) => {
+    const fuoco = (esito || {}).plane_focus || {};
+    if (!fuoco.changed) return;
+    state.project.source = state.project.source || {};
+    state.project.source.plane_focus = fuoco.active
+      ? { plane: 'L', working: fuoco.working, set_aside: fuoco.set_aside } : null;
+    toast(esito.advanced_job_id
+      ? `ora lavorano ${fuoco.working} immagini L: orientamento, depth e scala ripartono`
+      : `ora lavorano ${fuoco.working} immagini`);
+  };
   const renderPiani = () => {
     pianiBox.innerHTML = '';
     const conteggi = value.plane_counts || {};
@@ -913,6 +925,15 @@ function panelImport(panel) {
     if (value.plane === 'T' || (state.project.source || {}).plane === 'T') {
       pianiBox.append(el('p', { class: 'hint' },
         'questo e\' il progetto della T, nato dallo sdoppiamento.'));
+    }
+    /* L e T nella stessa cartella: l'analisi non aspetta lo sdoppiamento, prosegue sulle
+       sole L. Le T restano qui, messe da parte, e spostarne una fa ripartire i moduli. */
+    const fuoco = (state.project.source || {}).plane_focus;
+    if (fuoco && !(state.project.source || {}).plane) {
+      pianiBox.append(el('p', { class: 'avviso' },
+        `ci sono L e T: orientamento, depth e scala lavorano sulle ${fuoco.working} immagini L. `
+        + `Le ${fuoco.set_aside} T restano da parte. Se sposti un'immagine da un piano all'altro `
+        + 'i moduli ripartono da li\'; per configurare anche la T, sdoppia.'));
     }
     // Correggere un piano non sposta l'immagine da sola: finche' non si riconferma la
     // divisione, i moduli continuano a girare su quella di prima - e non si vedeva.
@@ -995,8 +1016,9 @@ function panelImport(panel) {
         const elenco = Array.isArray(nomi) ? nomi : [nomi];
         if (!elenco.length) return;
         try {
-          await api(`/projects/${state.projectId}/planes/correct`,
+          const esito = await api(`/projects/${state.projectId}/planes/correct`,
             { body: { names: elenco, plane: verso } });
+          dopoLaCorrezione(esito);
           for (const n of elenco) correzioni[n] = verso;
           value.plane_corrections = correzioni;
           scelte.clear();
@@ -1142,8 +1164,9 @@ function panelImport(panel) {
           const nome = ordine[dove];
           if (dettoDa(nome) === verso) return;
           try {
-            await api(`/projects/${state.projectId}/planes/correct`,
+            const esito = await api(`/projects/${state.projectId}/planes/correct`,
               { body: { name: nome, plane: verso } });
+            dopoLaCorrezione(esito);
             correzioni[nome] = verso;
             value.plane_corrections = correzioni;
             mostra();

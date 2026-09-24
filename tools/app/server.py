@@ -56,7 +56,7 @@ import probe_ocr  # noqa: E402
 import sonde_per_vendor  # noqa: E402
 import stages as stages_mod  # noqa: E402
 import thresholds as thresholds_mod  # noqa: E402
-from project import STEPS, Project, expand_rect, list_projects  # noqa: E402
+from project import CODE_IMPACT, STEPS, Project, expand_rect, list_projects  # noqa: E402
 
 REPO_ROOT = HERE.parents[1]
 COMPARE_FSS = REPO_ROOT / "tools" / "fss" / "compare_fss.py"
@@ -285,6 +285,9 @@ def _run_import_analysis(job_id: str, project_id: str, folder: str, sample: int)
         imported.update(da_tenere)
         # The deduplicated list is the working set from here on: nets, modules, viewer.
         project.save_dedup_images(imported.pop("kept_names", []))
+        # Riletta la cartella, l'insieme e' di nuovo tutto: il lavoro sulle sole L lo rimette
+        # la catena automatica, dopo aver riconosciuto i piani.
+        project.clear_plane_focus()
         project.source.update(
             {
                 key: imported[key]
@@ -733,6 +736,9 @@ def _advanced_stages_block_reason(project: Project) -> str:
     # Dopo lo sdoppiamento ciascuna meta' dichiara il proprio piano ed e' pronta. Vale sia
     # per la L rimasta nel progetto originale sia per la T derivata.
     if str(project.source.get("plane") or "") in ("L", "T"):
+        return ""
+    # Con L e T nella stessa cartella si lavora sulle sole L: le T sono messe da parte.
+    if project.plane_focus():
         return ""
 
     conteggi = (project.step_value("import").get("plane_counts") or {})
@@ -1850,6 +1856,84 @@ STEP_EREDITATI = ("codes", "vendor", "probe", "rect")
 CHIAVI_SCALA_EREDITATE = ("pixel_ratio_x", "pixel_ratio_y", "scale_lines", "scale_module")
 
 
+PIANO_DI_LAVORO = "L"
+
+
+def _lavora_su_un_piano(project_id: str) -> Dict:
+    """Se la cartella ha L e T e non e' stata sdoppiata, i moduli lavorano sulle sole L.
+
+    Prima la catena si fermava ad aspettare lo sdoppiamento. Ora prosegue sulle immagini L
+    riconosciute (con sopra le correzioni a mano), e le T restano nel progetto, messe da
+    parte: si vedono nell'import, si possono spostare, e lo sdoppiamento le ritrova tutte.
+    Le immagini senza piano restano con la L, come nello sdoppiamento. Ritorna se
+    l'insieme di lavoro e' cambiato: e' il segnale per far ripartire i moduli.
+    """
+    project = _project(project_id)
+    if str(project.source.get("plane") or "") in ("L", "T"):
+        return {"active": False, "changed": False, "reason": "progetto gia' sdoppiato"}
+    tutte = project.all_names()
+    piani = _piani_salvati(project)
+    di = lambda nome: (piani.get(nome) or {}).get("plane")  # noqa: E731
+    altre = sorted(n for n in tutte if di(n) not in (None, "?", PIANO_DI_LAVORO))
+    mie = sorted(n for n in tutte if n not in set(altre))
+    prima = sorted(project.dedup_names())
+    if not altre or not mie:
+        # un piano solo: se si stava lavorando su una parte, si torna a tutta la cartella
+        if project.plane_focus() is None:
+            return {"active": False, "changed": False}
+        project.clear_plane_focus()
+        project.source.pop("plane_focus", None)
+        nuove = sorted(tutte)
+    else:
+        project.set_plane_focus(PIANO_DI_LAVORO, tutte)
+        project.source["plane_focus"] = {"plane": PIANO_DI_LAVORO, "working": len(mie),
+                                         "set_aside": len(altre)}
+        nuove = mie
+        _tipo_sonda_del_piano(project)
+    project.save()
+    cambiato = nuove != prima
+    if cambiato:
+        project.save_dedup_images(nuove)
+        specchio = project.root / project.DEDUP_LINKS
+        if specchio.exists():
+            shutil.rmtree(specchio, ignore_errors=True)
+        project.dedup_link_dir()
+
+        def mutate(_p: Project, value: Dict) -> Dict:
+            value["images_total"] = len(nuove)
+            value["images_changed_at"] = datetime.now().isoformat(timespec="seconds")
+            return value
+
+        valore = _write_step(project_id, "import", mutate, invalidate=False)
+        _dopo_aver_cambiato_le_immagini(project_id, valore.get("images_changed_at") or "")
+    return {"active": bool(altre and mie), "changed": cambiato,
+            "working": len(nuove), "set_aside": len(altre) if mie else 0}
+
+
+def _tipo_sonda_del_piano(project: Project) -> None:
+    """Sulle sole L il tipo sonda (#04) di una biplana e' la L (3), se l'aveva messo l'analisi.
+
+    L'import sceglie il tipo dal piano della maggioranza del campione: su una cartella con
+    piu' T che L avrebbe detto 4 mentre i moduli misurano le L. Un tipo scelto a mano non si
+    tocca.
+    """
+    analysis = project.data.get("analysis") or {}
+    registry = analysis.get("registry") or {}
+    compilati = analysis.get("codes_filled") or {}
+    if not registry.get("biplane"):
+        return
+    attuale = project.codes.get("probe_type")
+    if attuale not in (None, "", 0) and "probe_type" not in compilati:
+        return
+    if attuale == 3:
+        return
+    project.codes["probe_type"] = 3
+    compilati["probe_type"] = "si lavora sulle immagini L"
+    analysis["codes_filled"] = compilati
+    project.data["analysis"] = analysis
+    project._mark_stale(CODE_IMPACT.get("probe_type", ()))
+
+
 def _piani_salvati(project: Project) -> Dict[str, str]:
     """Il piano di ogni immagine: quello riconosciuto, con sopra le correzioni a mano."""
     valore = project.step_value("import")
@@ -1927,20 +2011,28 @@ def _predict_planes(job_id: str, project_id: str) -> Dict[str, int]:
         chiave = voce.get("plane") or "?"
         conteggi[chiave] = conteggi.get(chiave, 0) + 1
 
-    def mutate(_p: Project, value: Dict) -> Dict:
+    def mutate(p: Project, value: Dict) -> Dict:
         # Una correzione fatta fra un riconoscimento e l'altro resta la voce piu' forte.
-        value["planes"] = piani
-        value["plane_counts"] = conteggi
-        return value
+        # Mentre si lavora sulle sole L la rete vede solo quelle: le T messe da parte
+        # tengono l'etichetta che avevano, e il conto e' su tutta la cartella.
+        tutti = dict(value.get("planes") or {}) if p.plane_focus() else {}
+        tutti.update(piani)
+        value["planes"] = tutti
+        return _riconta_piani(value, p.all_names())
 
-    _write_step(project_id, "import", mutate, status="proposed", source="model")
-    return conteggi
+    valore = _write_step(project_id, "import", mutate, status="proposed", source="model")
+    return valore.get("plane_counts") or conteggi
 
 
 def _run_planes(job_id: str, project_id: str) -> None:
     try:
         conteggi = _predict_planes(job_id, project_id)
-        _job_update(job_id, status="done", stage="fatto", result={"counts": conteggi})
+        # Riconosciuti i piani, se la cartella ne ha due si lavora sulle sole L, e se
+        # l'insieme e' cambiato i moduli ripartono da qui.
+        fuoco = _lavora_su_un_piano(project_id)
+        job = _schedule_auto_pipeline(project_id) if fuoco.get("changed") else None
+        _job_update(job_id, status="done", stage="fatto",
+                    result={"counts": conteggi, "plane_focus": fuoco, "advanced_job_id": job})
     except Exception as error:  # noqa: BLE001
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
@@ -2029,13 +2121,18 @@ def _automatic_stages(project: Project) -> List[str]:
 
 _automatic_pipeline_lock = threading.Lock()
 _automatic_pipeline_active: set[str] = set()
+_automatic_pipeline_pending: set[str] = set()
 
 
 def _run_auto_pipeline(job_id: str, project_id: str) -> None:
     """Piano L/T, poi i moduli non confermati; tutto senza dover premere altri pulsanti."""
     with _automatic_pipeline_lock:
         if project_id in _automatic_pipeline_active:
-            _job_update(job_id, status="done", stage="gia' in esecuzione", result={"skipped": True})
+            # Una correzione arrivata mentre la catena gira non va persa: la catena riparte
+            # appena finisce, una volta sola per quante ne arrivano nel frattempo.
+            _automatic_pipeline_pending.add(project_id)
+            _job_update(job_id, status="done", stage="ripartira' appena finisce il giro in corso",
+                        result={"queued": True})
             return
         _automatic_pipeline_active.add(project_id)
     try:
@@ -2043,6 +2140,7 @@ def _run_auto_pipeline(job_id: str, project_id: str) -> None:
         # Il riconoscimento L/T e' utile anche sulle sonde singole come controllo visivo;
         # solo una sonda biplana con entrambi i piani blocca i moduli in attesa dello split.
         _predict_planes(job_id, project_id)
+        _lavora_su_un_piano(project_id)
         # Il template della sonda non dipende dal rettangolo ne' dal piano: si calcola
         # anche quando i moduli a valle restano fermi in attesa della divisione L/T.
         try:
@@ -2064,6 +2162,10 @@ def _run_auto_pipeline(job_id: str, project_id: str) -> None:
     finally:
         with _automatic_pipeline_lock:
             _automatic_pipeline_active.discard(project_id)
+            di_nuovo = project_id in _automatic_pipeline_pending
+            _automatic_pipeline_pending.discard(project_id)
+        if di_nuovo:
+            _schedule_auto_pipeline(project_id)
 
 
 def _schedule_auto_pipeline(project_id: str) -> Optional[str]:
@@ -2112,10 +2214,15 @@ def api_planes_correct(project_id: str):
             else:
                 fatte[nome] = piano
         value["plane_corrections"] = fatte
-        return value
+        return _riconta_piani(value, _p.all_names())
 
     _write_step(project_id, "import", mutate, status="corrected", source="user")
-    return jsonify({"saved": True, "count": len(nomi)})
+    # Se si sta lavorando sulle sole L, la correzione sposta davvero l'immagine: entra fra
+    # quelle al lavoro o ne esce, e i moduli ripartono da qui.
+    esito = _lavora_su_un_piano(project_id)
+    job = _schedule_auto_pipeline(project_id) if esito.get("changed") else None
+    return jsonify({"saved": True, "count": len(nomi), "plane_focus": esito,
+                    "advanced_job_id": job})
 
 
 @app.post("/api/projects/<project_id>/split")
@@ -2136,7 +2243,7 @@ def api_split_planes(project_id: str):
     # sdoppiamento qui dentro ci sono solo le L, e riconfermare avrebbe diviso quelle -
     # buttando via le T invece di rimetterle al loro posto. L'insieme sono le immagini dei
     # due progetti insieme, che e' la cartella deduplicata.
-    tutte = list(project.dedup_names())
+    tutte = list(project.all_names())
     gia_esistente = str(project.source.get("split_into") or "")
     if gia_esistente:
         try:
@@ -2260,6 +2367,8 @@ def api_split_planes(project_id: str):
                      source=stato_import.get("source") or "import")
     project.source.update({"plane": "L", "images_total": len(nomi["L"]),
                            "split_into": nuovo.root.name})
+    project.source.pop("plane_focus", None)
+    project.clear_plane_focus()
     project.save()
     specchio = project.root / project.DEDUP_LINKS
     if specchio.exists():
@@ -2397,6 +2506,7 @@ def _run_dedup(job_id: str, project_id: str, folder: str, box: Optional[Dict],
             if own:
                 names = own
         project.save_dedup_images(names)
+        project.clear_plane_focus()
         # Lo specchio di lavoro va rifatto: contiene una copia (o un link) per immagine
         # tenuta, e adesso ne sono di meno.
         specchio = project.root / project.DEDUP_LINKS
@@ -4599,6 +4709,10 @@ def api_duplicates_drop(project_id: str):
         return jsonify({"error": "toglierebbe tutte le immagini della cartella"}), 400
     tolte = len(project.dedup_names()) - len(restano)
     project.save_dedup_images(restano)
+    fuoco = project.plane_focus()
+    if fuoco:
+        # si lavora sulle sole L: un'immagine tolta esce anche dall'elenco della cartella
+        project.set_plane_focus(fuoco["plane"], [n for n in fuoco["all"] if n not in set(via)])
 
     # Di chi era il doppione, e di quanto differiva: senza, l'elenco delle scartate e' una
     # lista di nomi orfani, e tornare a guardarle non vorrebbe dire niente - non si saprebbe
@@ -4618,7 +4732,7 @@ def api_duplicates_drop(project_id: str):
         value["duplicates_removed"] = (value.get("duplicates_removed") or 0) + tolte
         value["images_total"] = len(restano)
         value["images_changed_at"] = datetime.now().isoformat(timespec="seconds")
-        value = _riconta_piani(value, restano)
+        value = _riconta_piani(value, _p.all_names())
         # Le proposte che restano non devono citare immagini che non ci sono piu'.
         simile = dict(value.get("similar") or {})
         if simile.get("groups"):
@@ -4680,7 +4794,13 @@ def _dopo_aver_cambiato_le_immagini(project_id: str, quando: str) -> None:
             rifatti = _rebuild_orientation(p, value)
             return _fill_blocks(value, rifatti["groups"])
 
-        _write_orientation(project_id, mutate)
+        # Rifare gli envelope non e' una correzione dell'utente: scriverlo come tale
+        # (il default di `_write_orientation`) toglieva l'orientamento dalla catena
+        # automatica, e dopo aver tolto un'immagine il marker non ripartiva piu'.
+        a_mano = bool((progetto.steps.get("orientation") or {}).get("user_edited"))
+        _write_orientation(project_id, mutate,
+                           status="corrected" if a_mano else "proposed",
+                           source="user" if a_mano else "model")
 
 
 def _riconta_piani(value: Dict, restano: Sequence[str]) -> Dict:
@@ -4697,11 +4817,14 @@ def _riconta_piani(value: Dict, restano: Sequence[str]) -> Dict:
     dentro, si riconta e basta - non c'e' da rifare la rete su di lei.
     """
     dentro = set(restano)
+    # Con sopra le correzioni a mano: e' il conto su cui si decide se si lavora sulle sole L
+    # e se c'e' qualcosa da sdoppiare, e senza la pagina diceva «T 0» accanto a venti T.
+    corrette = value.get("plane_corrections") or {}
     conteggi: Dict[str, int] = {}
     for nome, voce in (value.get("planes") or {}).items():
         if nome not in dentro:
             continue
-        chiave = voce.get("plane") or "?"
+        chiave = corrette.get(nome) or voce.get("plane") or "?"
         conteggi[chiave] = conteggi.get(chiave, 0) + 1
     value["plane_counts"] = conteggi
     return value
@@ -4724,9 +4847,11 @@ def api_duplicates_restore(project_id: str):
     # puo' essere. Il file sta nella cartella di origine, che non si tocca mai.
     origine = Path(project.source.get("folder") or "")
     presenti = set(project.dedup_names())
+    # le T messe da parte ci sono gia': non sono state scartate
+    della_cartella = set(project.all_names())
     tornate = []
     for nome in nomi:
-        if nome in presenti:
+        if nome in presenti or nome in della_cartella:
             continue
         if origine.is_dir() and _immagine_nella_cartella(origine, nome) is None:
             continue
@@ -4735,6 +4860,9 @@ def api_duplicates_restore(project_id: str):
         return jsonify({"error": "queste immagini o ci sono gia', o non sono piu' "
                                  "sul disco"}), 400
     project.save_dedup_images(sorted(presenti | set(tornate)))
+    fuoco = project.plane_focus()
+    if fuoco:
+        project.set_plane_focus(fuoco["plane"], sorted(della_cartella | set(tornate)))
 
     def mutate(_p: Project, value: Dict) -> Dict:
         doppi = dict(value.get("duplicates") or {})
@@ -4746,11 +4874,14 @@ def api_duplicates_restore(project_id: str):
         # Rimettendole dentro tornano anche nel conto dei piani, con l'etichetta che gia'
         # avevano: la rete su di loro aveva gia' detto la sua.
         value["images_changed_at"] = datetime.now().isoformat(timespec="seconds")
-        value = _riconta_piani(value, sorted(presenti | set(tornate)))
+        value = _riconta_piani(value, _p.all_names())
         return value
 
     valore = _write_step(project_id, "import", mutate, invalidate=False)
     _dopo_aver_cambiato_le_immagini(project_id, valore.get("images_changed_at") or "")
+    if fuoco:
+        # una T rimessa dentro torna fra quelle messe da parte
+        _lavora_su_un_piano(project_id)
     return jsonify({"restored": sorted(tornate), "left": len(presenti | set(tornate)),
                     "recomputed": _da_rifare_dopo_le_immagini(_project(project_id))})
 
