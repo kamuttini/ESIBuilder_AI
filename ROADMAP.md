@@ -86,6 +86,17 @@ Criterio di chiusura: batch reale con % compatibilità concordata e review rate 
 
 ## Rischi aperti
 
+- **Rete L/T: sulle acquisizioni mai viste sbaglia le T** (misura del 2026-09-24,
+  `artifacts/40_outputs_eval/lt_net_by_acquisition_20260924/`, 51 acquisizioni con L/ e T/ separate).
+  Sulle acquisizioni viste in training e' quasi perfetta (L 100%, T 99%), ed e' per questo che
+  sembrava funzionare benissimo; sulle 37 mai viste le L restano al 100% ma le T scendono all'83%, e
+  solo 18 cartelle su 37 sono perfette. L'errore e' sempre lo stesso, T detta L: su Bologna X8,
+  Koelis e Biopsee quasi nessuna T e' riconosciuta. Conseguenza nell'app: il lavoro sulle sole L non
+  parte se la rete non trova T, e le T sbagliate entrano fra le L al lavoro finche' non si correggono
+  a mano. Anche lo split del training non era per acquisizione (12 acquisizioni con la L e la T in
+  split diversi). Rimedio: riaddestrare con split per acquisizione, aggiungendo le acquisizioni che
+  hanno gia' L e T separate; fino ad allora la lista dei piani nell'import va guardata.
+
 - Orientation, casi limite legacy (da pensarci per gli sviluppi futuri): alcuni ecografi hanno template di orientamento ribaltati/speculari che rompevano il match del vecchio software — quei progetti sono stati configurati per un solo orientamento (spesso UD) e la loro riga #16 contiene 4 copie dello stesso box (non NF/LR/UD/LRUD). Il nuovo detector dovrà gestirli esplicitamente. Inoltre il template può cambiare dimensione tra immagini della stessa cartella (serve matching multi-scala).
 - Probe: classi rare/unseen con recall basso — mitigare con policy review + OCR refine
 - Orientation: trainer da rifare, effort incerto
