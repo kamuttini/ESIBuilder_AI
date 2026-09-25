@@ -50,7 +50,7 @@ EXCLUDE_FILE_RE = re.compile(r"Thumbs\.db|Software Release|System Info|proibite"
 
 IMAGE_FIELDS = [
     "folder", "vendor", "image_id", "pred_group", "status", "review_reason",
-    "match_score", "search_scope", "marker_box_abs", "template_name", "image_size",
+    "match_score", "search_scope", "marker_box_abs", "template_name", "template_scale", "image_size",
     "vertical_correction", "vertical_source",
 ]
 
@@ -103,6 +103,13 @@ def _append_csv(path: Path, rows: List[Dict[str, object]], fields: List[str]) ->
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     new_file = not path.is_file() or not path.stat().st_size
+    if not new_file:
+        # Resuming a run written by an older version: honor the existing header
+        # so appended rows stay aligned with it.
+        with path.open(newline="", encoding="utf-8") as handle:
+            existing = next(csv.reader(handle), None)
+        if existing:
+            fields = existing
     with path.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         if new_file:
@@ -132,6 +139,17 @@ def main() -> int:
     parser.add_argument("--max-folders", type=int, default=0)
     parser.add_argument("--max-images-per-folder", type=int, default=0, help="0 = ALL dominant-resolution images.")
     parser.add_argument("--selection-images", type=int, default=4)
+    parser.add_argument("--pinned-templates", type=Path, default=None,
+                        help="JSON map folder-name -> [vendor/marker_NNN.png, ...]: human-verified "
+                             "templates harvested from that folder's review corrections. Evaluated "
+                             "per image next to the auto-selected template; win only by margin.")
+    parser.add_argument("--pinned-margin", type=float, default=0.03,
+                        help="Score margin a pinned template must exceed to replace the auto match.")
+    parser.add_argument("--pinned-min-score", type=float, default=0.90,
+                        help="Minimum absolute score for a pinned template to take over a frame.")
+    parser.add_argument("--template-scales", type=str, default="0.75,1.0,1.3,1.7,2.2",
+                        help="Scales tried during folder template selection (marker size varies "
+                             "between machines). The winning scale is stored in state.json.")
     parser.add_argument("--min-match-score", type=float, default=0.55)
     parser.add_argument("--fallback-threshold", type=float, default=0.58)
     parser.add_argument("--expanded-threshold", type=float, default=0.62)
@@ -147,6 +165,9 @@ def main() -> int:
                         help="Explicit already-expanded #13 exclusion as top|left|bottom|right.")
     parser.add_argument("--exclusion-margin-frac", type=float, default=0.75,
                         help="Expansion of the #13 exclusion rect (vendor logo often sits just outside it).")
+    parser.add_argument("--vendor-conf-min", type=float, default=0.35,
+                        help="Min CNN confidence for the official vendor to override folder-name "
+                             "inference (when the name resolves to an existing template bank).")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--time-budget", type=float, default=0.0, help="Stop gracefully after N seconds (0 = no limit).")
     args = parser.parse_args()
@@ -171,6 +192,13 @@ def main() -> int:
             return tuple(int(float(p)) for p in parts[:4])  # type: ignore[return-value]
         except ValueError:
             return None
+
+    pinned_map: Dict[str, List[str]] = {}
+    if args.pinned_templates and args.pinned_templates.is_file():
+        raw = json.loads(args.pinned_templates.read_text(encoding="utf-8"))
+        pinned_map = {str(k): [str(x) for x in v] for k, v in raw.items()
+                      if isinstance(v, list) and not str(k).startswith("_")}
+        print(f"[pinned] {len(pinned_map)} folders with human-pinned templates", flush=True)
 
     official_img: Dict[Tuple[str, str], Dict[str, str]] = {}
     official_fold: Dict[str, Dict[str, str]] = {}
@@ -218,6 +246,24 @@ def main() -> int:
         folder_state = state.get(folder.name, {})
 
         chained = bool(args.official_stages_dir)
+        if chained:
+            # Prefer the official image-based vendor CNN over folder-name inference:
+            # some folders are named after the probe/model only (e.g. "Arietta 65"),
+            # with no vendor keyword in the text, which infer_vendor_from_text can't resolve.
+            # BUT a low-confidence CNN prediction must not override a vendor that IS
+            # spelled out in the folder name (seen: "165.Mindray TE7" -> ExactVu @0.14).
+            official_row = official_fold.get(folder.name, {})
+            official_vendor = str(official_row.get("vendor_pred") or "").strip()
+            try:
+                official_conf = float(official_row.get("vendor_conf") or 0.0)
+            except ValueError:
+                official_conf = 0.0
+            name_has_bank = omd._vendor_dir(
+                Path(args.library_root).expanduser().resolve() if args.library_root else omd.DEFAULT_LIBRARY_ROOT,
+                vendor,
+            ) is not None
+            if official_vendor and (official_conf >= args.vendor_conf_min or not name_has_bank):
+                vendor = official_vendor
         if chained:
             # Same exact image set of the official stages (already dominant-resolution only).
             kept = [folder / image_id for (fname, image_id) in official_img if fname == folder.name]
@@ -294,17 +340,40 @@ def main() -> int:
             completed_folders.add(folder.name)
             print(f"[{index}/{len(folders)}] {folder.name}: ERROR no templates for {vendor}")
             continue
+        sel_scales = tuple(float(s) for s in str(args.template_scales).split(",") if s.strip()) or (1.0,)
         if folder_state.get("template_path"):
             template = next((t for t in templates if str(t.path) == folder_state["template_path"]), None)
+        template_scale = float(folder_state.get("template_scale", 1.0))
+        candidates = [(template, template_scale)] if template is not None else []
         if template is None:
             selection = [
                 omd.ImageInput(image_path=p, image_id=p.relative_to(folder).as_posix())
                 for p in kept[:: max(1, len(kept) // max(1, args.selection_images))][: args.selection_images]
             ]
-            template, _rows, _rank = omd.select_best_template(selection, templates, params=params)
+            try:
+                template, _rows, rank = omd.select_best_template(selection, templates, params=params, scales=sel_scales)
+                template_scale = float(rank[0].get("scale", 1.0)) if rank else 1.0
+            except TypeError:  # older bundle without multi-scale support
+                template, _rows, _rank = omd.select_best_template(selection, templates, params=params)
+                template_scale = 1.0
+            candidates = [(template, template_scale)]
             folder_state["template_path"] = str(template.path)
+            folder_state["template_scale"] = template_scale
             state[folder.name] = folder_state
             state_path.write_text(json.dumps(state, indent=1, ensure_ascii=False))
+
+        # Human-pinned templates (harvested from THIS folder's review corrections):
+        # evaluated per image alongside the auto-selected one; they win only when
+        # clearly better, so unpinned folders behave exactly as before.
+        pinned: List[Tuple[object, float]] = []
+        primary_path = str(candidates[0][0].path)
+        for rel in pinned_map.get(folder.name, []):
+            suffix = str(rel).replace("\\", "/").lower()
+            cand = next((t for t in templates if str(t.path).replace("\\", "/").lower().endswith(suffix)), None)
+            if cand is None:
+                print(f"[pinned] WARN not resolved for {folder.name[:40]}: {rel}", flush=True)
+            elif str(cand.path) != primary_path:
+                pinned.append((cand, 1.0))
 
         pending = [p for p in kept if (folder.name, p.relative_to(folder).as_posix()) not in done_pairs]
         buffer: List[Dict[str, object]] = []
@@ -328,19 +397,34 @@ def main() -> int:
                         sugiu_conf = float(info.get("sugiu_conf", 0.0) or 0.0)
                     except ValueError:
                         sugiu_conf = 0.0
-            row = omd.detect_marker(
-                omd.ImageInput(
-                    image_path=path,
-                    image_id=image_id,
-                    crop_rect=crop_rect,
-                    crop_source="official_stages" if crop_rect else "",
-                    sugiu_pred=sugiu_pred,
-                    sugiu_conf=sugiu_conf,
-                    exclusion_rects=exclusion_rects,
-                ),
-                template,
-                params=params,
+            image_input = omd.ImageInput(
+                image_path=path,
+                image_id=image_id,
+                crop_rect=crop_rect,
+                crop_source="official_stages" if crop_rect else "",
+                sugiu_pred=sugiu_pred,
+                sugiu_conf=sugiu_conf,
+                exclusion_rects=exclusion_rects,
             )
+            # Folder-selected scale first; neighbor scales only when the score is
+            # weak (marker size can change between frames of the same folder).
+            row = omd.detect_marker(image_input, template, params=params, scales=(template_scale,))
+            if (row.match_score or -1.0) < args.fallback_threshold:
+                alt = omd.detect_marker(
+                    image_input, template, params=params,
+                    scales=(template_scale * 0.8, template_scale * 1.25),
+                )
+                if (alt.match_score or -1.0) > (row.match_score or -1.0):
+                    row = alt
+            # Human-pinned templates win only on near-perfect evidence: score at
+            # least --pinned-min-score (a true machine template reaches ~1.0 on
+            # its frames, static twin glyphs top out lower) AND clearly above
+            # the auto-selected match. So they can never degrade a frame.
+            for pin_tpl, pin_scale in pinned:
+                pin_row = omd.detect_marker(image_input, pin_tpl, params=params, scales=(pin_scale,))
+                pin_score = pin_row.match_score or -1.0
+                if pin_score >= args.pinned_min_score and pin_score > (row.match_score or -1.0) + args.pinned_margin:
+                    row = pin_row
             buffer.append(
                 {
                     "folder": folder.name,
@@ -353,6 +437,7 @@ def main() -> int:
                     "search_scope": row.search_scope,
                     "marker_box_abs": "" if not row.marker_box_abs else "|".join(map(str, row.marker_box_abs)),
                     "template_name": row.template_name,
+                    "template_scale": getattr(row, "template_scale", 1.0),
                     "image_size": f"{dominant[0]}x{dominant[1]}",
                     "vertical_correction": row.vertical_correction,
                     "vertical_source": row.vertical_source,

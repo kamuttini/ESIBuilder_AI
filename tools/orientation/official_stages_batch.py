@@ -125,6 +125,10 @@ def main() -> int:
     parser.add_argument("--ckpt-path-rewrite", action="append", default=[],
                         help="OLD=NEW prefix rewrite for checkpoint paths inside vendor maps.")
     parser.add_argument("--vendor-sample", type=int, default=80)
+    parser.add_argument("--max-images-per-folder", type=int, default=0,
+                        help="0 = ALL dominant-resolution images. Uniform stride sample otherwise "
+                             "(same formula as predict_marker_envelopes_batch.py, so the two runners "
+                             "stay on the same per-folder image subset in chained mode).")
     parser.add_argument("--rect-vendor-min-confidence", type=float, default=0.70)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--rect-red-margin-pct", type=float, default=12.0)
@@ -347,6 +351,9 @@ def main() -> int:
         image_ids = images_by_folder.get(folder) or _self_collect(folder_path, fstate)
         if "dominant_resolution" in fstate:
             state_path.write_text(json.dumps(state, indent=1, ensure_ascii=False))
+        if args.max_images_per_folder > 0 and len(image_ids) > args.max_images_per_folder:
+            stride = len(image_ids) / args.max_images_per_folder
+            image_ids = [image_ids[int(i * stride)] for i in range(args.max_images_per_folder)]
         if not image_ids:
             _append_csv(out / "official_folder.csv",
                         [{"folder": folder, "vendor_pred": "", "line11_method": "error:no_images"}], FOLDER_FIELDS)

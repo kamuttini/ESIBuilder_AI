@@ -40,7 +40,7 @@ a { color: #9ecbff; }
 .legend span { margin-right: 18px; }
 .toolbar { position: sticky; top: 0; z-index: 50; background: #16181d; padding: 8px 0; }
 .toolbar button { background: #2f6fed; color: #fff; border: 0; border-radius: 6px; padding: 8px 14px; font-size: 14px; cursor: pointer; margin-right: 8px; }
-.toolbar .hint { color: #999; font-size: 12px; margin-left: 8px; }
+.hint { color: #999; font-size: 12px; margin-left: 8px; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #333; }
 tr:hover td { background: #22252c; }
@@ -69,19 +69,32 @@ body.noboxes .box { display: none; }
 .box.fix { border: 2px solid #00e5ff; box-shadow: 0 0 6px #00e5ff88; }
 .box.fix .lbl { position: absolute; bottom: -18px; right: 0; color: #00e5ff; font-size: 11px; text-shadow: 0 0 3px #000; }
 .card.wrong { outline: 2px solid #ef4444; }
-.cardbtns { margin-top: 6px; display: flex; gap: 8px; }
+.card.excluded { opacity: .35; }
+.card.excluded .title::after { content: ' (esclusa)'; color: #f87171; font-weight: bold; }
+.cardbtns { margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; }
 .cardbtns button { background: #333; color: #ddd; border: 0; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
 .cardbtns button.active { background: #7f1d1d; color: #fecaca; }
+.foldercomment { margin: 10px 0; }
+.foldercomment label { display: block; font-size: 12px; color: #9ecbff; margin-bottom: 4px; }
+.foldercomment textarea { width: 100%; box-sizing: border-box; background: #1a1d23; color: #ffd76e;
+  border: 1px solid #444; border-radius: 6px; padding: 6px 8px; font-size: 13px; font-family: inherit; resize: vertical; }
+.foldercomment textarea:focus { outline: 1px solid #2f6fed; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
 .badge.ok { background: #14532d; color: #86efac; }
 .badge.partial { background: #713f12; color: #fde68a; }
+tr.reviewed { opacity: .45; }
+tr.reviewed td a { text-decoration: line-through; }
+.reviewedcheck { width: 18px; height: 18px; cursor: pointer; }
+#reviewedCount { color: #9ecbff; font-weight: bold; }
 #viewer { display: none; position: fixed; inset: 0; z-index: 100; background: rgba(8,9,12,.97); }
 #viewer.open { display: flex; flex-direction: column; }
 #viewer .stage { flex: 1; display: flex; align-items: center; justify-content: center; overflow: hidden; }
 #viewer .frame { position: relative; }
 #viewer .frame img { max-width: 96vw; max-height: 86vh; display: block; }
-#viewer .bar { padding: 10px 16px; font-size: 13px; color: #ddd; display: flex; gap: 16px; align-items: center; }
-#viewer .bar button { background: #333; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+#viewer .bar { padding: 10px 16px; font-size: 13px; color: #ddd; display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+#viewer .bar button { background: #333; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; flex: 0 0 auto; white-space: nowrap; }
+#viewer .bar button.active { background: #7f1d1d; color: #fecaca; }
+#viewer .bar #vComment { flex: 1 1 220px; min-width: 160px; }
 """
 
 SCRIPT = """
@@ -108,12 +121,85 @@ let current = -1;
 
 const STORE = 'marker_envelope_gallery_comments_v1';
 const FIX_STORE = 'marker_envelope_gallery_corrections_v1';
+const EXCLUDE_STORE = 'marker_envelope_gallery_excludes_v1';
+const FOLDER_COMMENT_STORE = 'marker_envelope_gallery_folder_comments_v1';
 let comments = {};
 let fixes = {};
+let excludes = {};
+let folderComments = {};
 try { comments = JSON.parse(localStorage.getItem(STORE) || '{}'); } catch (e) {}
 try { fixes = JSON.parse(localStorage.getItem(FIX_STORE) || '{}'); } catch (e) {}
+try { excludes = JSON.parse(localStorage.getItem(EXCLUDE_STORE) || '{}'); } catch (e) {}
+try { folderComments = JSON.parse(localStorage.getItem(FOLDER_COMMENT_STORE) || '{}'); } catch (e) {}
 const cards = Array.from(document.querySelectorAll('.card'));
 const vComment = document.getElementById('vComment');
+
+function isExcluded(key) { return !!excludes[key]; }
+function setExcluded(key, value) {
+  if (value) excludes[key] = true; else delete excludes[key];
+  localStorage.setItem(EXCLUDE_STORE, JSON.stringify(excludes));
+  refreshExcludeUI(key);
+  recomputeStats();
+}
+function setExcludedAll(value) {
+  cards.forEach(c => {
+    if (value) excludes[c.dataset.key] = true; else delete excludes[c.dataset.key];
+  });
+  localStorage.setItem(EXCLUDE_STORE, JSON.stringify(excludes));
+  cards.forEach(c => refreshExcludeUI(c.dataset.key));
+  recomputeStats();
+}
+function refreshExcludeUI(key) {
+  const excl = isExcluded(key);
+  const card = cards.find(c => c.dataset.key === key);
+  if (card) {
+    card.classList.toggle('excluded', excl);
+    const btn = card.querySelector('.btn-exclude');
+    if (btn) { btn.classList.toggle('active', excl); btn.textContent = excl ? '↺ Includi' : 'Escludi'; }
+  }
+  if (current >= 0 && wraps[current].closest('.card').dataset.key === key) {
+    const vx = document.getElementById('vExclude');
+    if (vx) { vx.classList.toggle('active', excl); vx.textContent = excl ? '↺ Includi' : 'Escludi'; }
+  }
+}
+function recomputeStats() {
+  let total = 0, markerFound = 0, reviewCount = 0;
+  const byGroup = {};
+  cards.forEach(c => {
+    if (isExcluded(c.dataset.key)) return;
+    total++;
+    const marker = JSON.parse(c.dataset.marker || 'null');
+    if (marker) markerFound++;
+    if (c.dataset.status === 'review') reviewCount++;
+    if (marker && c.dataset.accepted === '1' && c.dataset.group) {
+      (byGroup[c.dataset.group] = byGroup[c.dataset.group] || []).push(marker);
+    }
+  });
+  const groups = Object.keys(byGroup).sort();
+  const envelopes = groups.map(g => {
+    const boxes = byGroup[g];
+    const t = Math.min(...boxes.map(b => b.t)), l = Math.min(...boxes.map(b => b.l));
+    const bo = Math.max(...boxes.map(b => b.t + b.h)), r = Math.max(...boxes.map(b => b.l + b.w));
+    return { group: g, box: { t: t, l: l, h: bo - t, w: r - l } };
+  });
+  cards.forEach(c => {
+    const wrap = c.querySelector('.imgwrap');
+    let boxes = JSON.parse(wrap.dataset.boxes).filter(b => b.kind !== 'legacy');
+    envelopes.forEach(e => boxes.push(Object.assign({ kind: 'legacy', label: e.group }, e.box)));
+    wrap.dataset.boxes = JSON.stringify(boxes);
+    renderBoxes(wrap, boxes);
+  });
+  if (current >= 0) renderBoxes(frame, JSON.parse(wraps[current].dataset.boxes));
+  const excludedCount = cards.length - total;
+  const envTxt = groups.length ? groups.join(', ') : '-';
+  const reviewPct = total ? Math.round(100 * reviewCount / total) : 0;
+  const statsLine = document.getElementById('statsLine');
+  if (statsLine) {
+    statsLine.innerHTML = 'marker trovati: <b>' + markerFound + '/' + total + '</b>' +
+      (excludedCount ? ' (escluse: ' + excludedCount + ')' : '') +
+      ' · review: <b>' + reviewPct + '%</b> · envelope: <b>' + envTxt + '</b>';
+  }
+}
 
 function saveFixes() { localStorage.setItem(FIX_STORE, JSON.stringify(fixes)); }
 function getFix(key) { return fixes[key] || {}; }
@@ -208,29 +294,110 @@ cards.forEach(c => {
     e.stopPropagation();
     setFix(c.dataset.key, { box: null });
   });
+  const exBtn = c.querySelector('.btn-exclude');
+  if (exBtn) exBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    setExcluded(c.dataset.key, !isExcluded(c.dataset.key));
+  });
   attachDraw(c.querySelector('.imgwrap'), () => c.dataset.key);
   refreshFixUI(c.dataset.key);
+  refreshExcludeUI(c.dataset.key);
 });
+recomputeStats();
+
+const idxRows = Array.from(document.querySelectorAll('tr[data-folder]'));
+function recomputeIndexReview() {
+  idxRows.forEach(tr => {
+    const folder = tr.dataset.folder;
+    const total = parseInt(tr.dataset.total || '0');
+    let reviewIds;
+    try { reviewIds = JSON.parse(tr.dataset.reviewIds || '[]'); } catch (e) { reviewIds = []; }
+    const reviewSet = new Set(reviewIds);
+    const prefix = folder + '::';
+    let excludedTotal = 0, excludedReview = 0;
+    Object.keys(excludes).forEach(k => {
+      if (!k.startsWith(prefix)) return;
+      excludedTotal++;
+      if (reviewSet.has(k.slice(prefix.length))) excludedReview++;
+    });
+    const newTotal = total - excludedTotal;
+    const newReview = reviewIds.length - excludedReview;
+    const pct = newTotal > 0 ? Math.round(100 * newReview / newTotal) : 0;
+    const cell = tr.querySelector('.reviewcell');
+    if (cell) cell.textContent = pct + '%' + (excludedTotal ? ' (escluse: ' + excludedTotal + ')' : '');
+  });
+}
+if (idxRows.length) recomputeIndexReview();
+
+const REVIEWED_STORE = 'marker_envelope_gallery_reviewed_folders_v1';
+let reviewedFolders = {};
+try { reviewedFolders = JSON.parse(localStorage.getItem(REVIEWED_STORE) || '{}'); } catch (e) {}
+function isFolderReviewed(folder) { return !!reviewedFolders[folder]; }
+function setFolderReviewed(folder, value) {
+  if (value) reviewedFolders[folder] = true; else delete reviewedFolders[folder];
+  localStorage.setItem(REVIEWED_STORE, JSON.stringify(reviewedFolders));
+  updateReviewedCount();
+}
+function updateReviewedCount() {
+  const el = document.getElementById('reviewedCount');
+  if (el) el.textContent = Object.keys(reviewedFolders).filter(f => idxRows.some(tr => tr.dataset.folder === f)).length + '/' + idxRows.length + ' riviste';
+}
+idxRows.forEach(tr => {
+  const cb = tr.querySelector('.reviewedcheck');
+  if (!cb) return;
+  const folder = tr.dataset.folder;
+  cb.checked = isFolderReviewed(folder);
+  tr.classList.toggle('reviewed', cb.checked);
+  cb.addEventListener('change', () => {
+    setFolderReviewed(folder, cb.checked);
+    tr.classList.toggle('reviewed', cb.checked);
+  });
+});
+if (idxRows.length) updateReviewedCount();
+
+const folderKey = document.body.dataset.folder || '';
+const folderCommentEl = document.getElementById('folderComment');
+if (folderCommentEl && folderKey) {
+  folderCommentEl.value = folderComments[folderKey] || '';
+  folderCommentEl.addEventListener('input', () => {
+    const v = folderCommentEl.value;
+    if (v.trim()) folderComments[folderKey] = v; else delete folderComments[folderKey];
+    localStorage.setItem(FOLDER_COMMENT_STORE, JSON.stringify(folderComments));
+  });
+}
 const DIMS = {};
 cards.forEach(c => { DIMS[c.dataset.key] = [parseInt(c.dataset.w || '0'), parseInt(c.dataset.h || '0')]; });
 const exportBtn = document.getElementById('exportComments');
 if (exportBtn) exportBtn.onclick = () => {
-  const lines = [['folder', 'image_id', 'comment', 'wrong_template', 'corr_top', 'corr_left', 'corr_bottom', 'corr_right']];
-  const keys = new Set(Object.keys(comments).concat(Object.keys(fixes)));
+  const lines = [['folder', 'image_id', 'comment', 'wrong_template', 'corr_top', 'corr_left', 'corr_bottom', 'corr_right', 'corr_top_pct', 'corr_left_pct', 'corr_bottom_pct', 'corr_right_pct', 'excluded']];
+  const keys = new Set(Object.keys(comments).concat(Object.keys(fixes)).concat(Object.keys(excludes)));
   keys.forEach(k => {
     const v = (comments[k] || '').trim();
     const fix = fixes[k] || {};
-    if (!v && !fix.wrong && !fix.box) return;
+    const excl = isExcluded(k);
+    if (!v && !fix.wrong && !fix.box && !excl) return;
     const i = k.indexOf('::');
     let corr = ['', '', '', ''];
+    let corrPct = ['', '', '', ''];
     const wh = DIMS[k] || [0, 0];
-    if (fix.box && wh[0] > 0) {
-      corr = [
-        Math.round(fix.box.t / 100 * wh[1]), Math.round(fix.box.l / 100 * wh[0]),
-        Math.round((fix.box.t + fix.box.h) / 100 * wh[1]), Math.round((fix.box.l + fix.box.w) / 100 * wh[0]),
-      ];
+    if (fix.box) {
+      corrPct = [fix.box.t, fix.box.l, fix.box.t + fix.box.h, fix.box.l + fix.box.w];
+      if (wh[0] > 0) {
+        corr = [
+          Math.round(fix.box.t / 100 * wh[1]), Math.round(fix.box.l / 100 * wh[0]),
+          Math.round((fix.box.t + fix.box.h) / 100 * wh[1]), Math.round((fix.box.l + fix.box.w) / 100 * wh[0]),
+        ];
+      }
     }
-    lines.push([k.slice(0, i), k.slice(i + 2), v, fix.wrong ? 1 : 0].concat(corr));
+    lines.push([k.slice(0, i), k.slice(i + 2), v, fix.wrong ? 1 : 0].concat(corr).concat(corrPct).concat([excl ? 1 : 0]));
+  });
+  Object.keys(folderComments).forEach(f => {
+    const v = (folderComments[f] || '').trim();
+    if (!v) return;
+    lines.push([f, '(commento cartella)', v, '', '', '', '', '', '', '', '', '', '']);
+  });
+  Object.keys(reviewedFolders || {}).forEach(f => {
+    lines.push([f, '(cartella rivista)', '', '', '', '', '', '', '', '', '', '', '']);
   });
   const csv = lines.map(r => r.map(x => '"' + String(x).replace(/"/g, '""') + '"').join(',')).join('\\n');
   const a = document.createElement('a');
@@ -241,11 +408,22 @@ if (exportBtn) exportBtn.onclick = () => {
 
 const body = document.body;
 const toggleBtn = document.getElementById('toggleBoxes');
+const vToggleBtn = document.getElementById('vToggleBoxes');
 function setBoxes(visible) {
   body.classList.toggle('noboxes', !visible);
-  if (toggleBtn) toggleBtn.textContent = visible ? 'Nascondi box' : 'Mostra box';
+  const label = visible ? 'Nascondi box (immagine grezza)' : 'Mostra box';
+  if (toggleBtn) toggleBtn.textContent = label;
+  if (vToggleBtn) vToggleBtn.textContent = label;
 }
 if (toggleBtn) toggleBtn.onclick = () => setBoxes(body.classList.contains('noboxes'));
+if (vToggleBtn) vToggleBtn.onclick = () => setBoxes(body.classList.contains('noboxes'));
+
+const excludeAllBtn = document.getElementById('excludeAllFolder');
+if (excludeAllBtn) excludeAllBtn.onclick = () => {
+  if (confirm('Escludere tutte le ' + cards.length + ' immagini di questa cartella?')) setExcludedAll(true);
+};
+const includeAllBtn = document.getElementById('includeAllFolder');
+if (includeAllBtn) includeAllBtn.onclick = () => setExcludedAll(false);
 
 function openViewer(i) {
   current = (i + wraps.length) % wraps.length;
@@ -260,6 +438,7 @@ function openViewer(i) {
   viewer.classList.add('open');
   renderFix(frame, card.dataset.key);
   refreshFixUI(card.dataset.key);
+  refreshExcludeUI(card.dataset.key);
 }
 function closeViewer() { viewer.classList.remove('open'); current = -1; }
 wraps.forEach((w, i) => w.addEventListener('click', e => { if (!e.shiftKey) openViewer(i); }));
@@ -274,6 +453,12 @@ const vDelBtn = document.getElementById('vDelBox');
 if (vDelBtn) vDelBtn.onclick = () => {
   if (current < 0) return;
   setFix(wraps[current].closest('.card').dataset.key, { box: null });
+};
+const vExcludeBtn = document.getElementById('vExclude');
+if (vExcludeBtn) vExcludeBtn.onclick = () => {
+  if (current < 0) return;
+  const key = wraps[current].closest('.card').dataset.key;
+  setExcluded(key, !isExcluded(key));
 };
 if (viewer) {
   document.getElementById('vClose').onclick = closeViewer;
@@ -292,6 +477,10 @@ document.addEventListener('keydown', e => {
   if (current < 0) return;
   if (e.key === 'ArrowLeft') openViewer(current - 1);
   if (e.key === 'ArrowRight') openViewer(current + 1);
+  if (e.key === 'x' || e.key === 'X') {
+    const key = wraps[current].closest('.card').dataset.key;
+    setExcluded(key, !isExcluded(key));
+  }
 });
 """
 
@@ -329,6 +518,10 @@ def _load_csv(path: Path) -> List[Dict[str, str]]:
 
 
 def _file_href(root: str, folder: str, image_id: str) -> str:
+    # If the dataset root is already an http(s) base (gallery served over HTTP),
+    # build an http URL (a file:// resource would be blocked from an http page).
+    if root.startswith(("http://", "https://")):
+        return f"{root}/{urllib.parse.quote(folder)}/{urllib.parse.quote(image_id)}"
     full = f"{root}/{folder}/{image_id}"
     return "file://" + urllib.parse.quote(full)
 
@@ -342,10 +535,10 @@ def _union(boxes: List[Rect]) -> Rect:
     )
 
 
-def _page(title: str, toolbar: str, content: str) -> str:
+def _page(title: str, toolbar: str, content: str, body_attrs: str = "") -> str:
     return f"""<!DOCTYPE html>
 <html lang="it"><head><meta charset="utf-8"><title>{html.escape(title)}</title>
-<style>{STYLE}</style></head><body>
+<style>{STYLE}</style></head><body{body_attrs}>
 <h1>{html.escape(title)}</h1>
 {toolbar}
 {content}
@@ -355,12 +548,15 @@ def _page(title: str, toolbar: str, content: str) -> str:
     <button id="vClose">Chiudi (Esc)</button>
     <button id="vPrev">← Prec</button>
     <button id="vNext">Succ →</button>
+    <button id="vToggleBoxes">Nascondi box (immagine grezza)</button>
     <span id="vTitle"></span>
     <button id="vWrong">Segna errato</button>
     <button id="vDelBox">Cancella box</button>
+    <button id="vExclude">Escludi</button>
     <input id="vComment" placeholder="Commento..." style="flex:1; background:#1a1d23; color:#ffd76e; border:1px solid #444; border-radius:6px; padding:6px 8px; font-size:13px;">
   </div>
   <div class="bar" style="padding-top:0"><span id="vMeta"></span></div>
+  <div class="bar" style="padding-top:0"><span class="hint">Shift+trascina sull'immagine = disegna il box corretto · X = escludi · B = box on/off</span></div>
 </div>
 <script>{SCRIPT}</script>
 </body></html>"""
@@ -383,9 +579,17 @@ def main() -> int:
     envelope_rows = _load_csv(args.run_dir / "folder_envelopes.csv")
     folder_rows = {str(r["folder"]): r for r in _load_csv(args.run_dir / "folder_summary.csv")}
 
+    def _score_key(row: Dict[str, str]) -> float:
+        try:
+            return float(row.get("match_score") or "")
+        except ValueError:
+            return -1.0  # no match / unreadable score: show first, needs the most review
+
     rows_by_folder: Dict[str, List[Dict[str, str]]] = {}
     for row in image_rows:
         rows_by_folder.setdefault(str(row["folder"]), []).append(row)
+    for rows in rows_by_folder.values():
+        rows.sort(key=_score_key)
     env_by_folder: Dict[str, List[Dict[str, str]]] = {}
     for row in envelope_rows:
         env_by_folder.setdefault(str(row["folder"]), []).append(row)
@@ -464,8 +668,9 @@ def main() -> int:
                 conf = str(sugiu.get("sugiu_conf", ""))[:4]
                 if label in ("su", "giu"):
                     sugiu_html = f" | <span class='sugiu {label}'>{label.upper()} {conf}</span>"
+            marker_norm = norm(marker) if marker else None
             if marker:
-                boxes.append({"kind": "marker", "label": "", **norm(marker)})
+                boxes.append({"kind": "marker", "label": "", **marker_norm})
             href = _file_href(href_root, folder, str(row["image_id"]))
             meta = (
                 f"pred: <b>{html.escape(row.get('pred_group') or '-')}</b> | "
@@ -477,14 +682,22 @@ def main() -> int:
                 + ("" if marker else " | <b style='color:#f87171'>NESSUN MARKER</b>")
             )
             comment_key = f"{folder}::{row['image_id']}"
+            group_val = str(row.get("pred_group") or "")
+            status_val = str(row.get("status") or "")
+            accepted_val = "1" if status_val == "ok" else "0"
             cards.append(
-                f"<div class='card' data-key='{html.escape(comment_key, quote=True)}' data-w='{width}' data-h='{height}'>"
+                f"<div class='card' data-key='{html.escape(comment_key, quote=True)}' data-w='{width}' data-h='{height}' "
+                f"data-marker='{html.escape(json.dumps(marker_norm), quote=True)}' "
+                f"data-group='{html.escape(group_val, quote=True)}' "
+                f"data-status='{html.escape(status_val, quote=True)}' "
+                f"data-accepted='{accepted_val}'>"
                 f"<div class='title'>{html.escape(str(row['image_id']))}</div>"
                 f"<div class='imgwrap' data-boxes='{html.escape(json.dumps(boxes), quote=True)}' data-src='{html.escape(href, quote=True)}'>"
                 f"<img loading='lazy' src='{html.escape(href, quote=True)}'></div>"
                 f"<div class='meta'>{meta}</div>"
                 "<div class='cardbtns'><button class='btn-wrong'>Segna errato</button>"
-                "<button class='btn-delbox'>Cancella box corretto</button></div>"
+                "<button class='btn-delbox'>Cancella box corretto</button>"
+                "<button class='btn-exclude'>Escludi</button></div>"
                 "<textarea class='comment' placeholder='Commento...' rows='2'></textarea>"
                 "</div>"
             )
@@ -496,40 +709,57 @@ def main() -> int:
         toolbar = (
             "<div class='toolbar'><a href='../index.html'>← Indice</a> "
             "<button id='toggleBoxes'>Nascondi box</button>"
-            "<button id='exportComments'>Esporta commenti CSV</button>"
+            "<button id='excludeAllFolder'>Escludi tutta la cartella</button>"
+            "<button id='includeAllFolder'>Includi tutta la cartella</button>"
+            "<button id='exportComments'>Esporta correzioni CSV (commenti, box, esclusioni)</button>"
             "<span class='legend'><span style='color:#00c800'>■ envelope cartella</span>"
             "<span style='color:#ff2828'>■ marker trovato</span>"
             "<span style='color:#3c78ff'>■ rect ecografico (#11 / per-immagine)</span>"
             "<span style='color:#ffd000'>▨ template vendor #13</span></span>"
             "<span class='hint'>Click = tutto schermo · <b>Shift+trascina = disegna il box corretto</b> · "
-            "B = box on/off · ←/→ · Esc · azzurro = box corretto disegnato da te</span></div>"
-            f"<p>Vendor: <b>{html.escape(str(vendor))}</b> · {len(rows)} immagini ({size_txt}) · "
-            f"marker trovati: {n_marker}/{len(rows)} · envelope: {html.escape(env_txt)} · {badge}</p>"
+            "B = box on/off · X = escludi immagine · ←/→ · Esc · azzurro = box corretto disegnato da te</span></div>"
+            f"<p>Vendor: <b>{html.escape(str(vendor))}</b> · {len(rows)} immagini ({size_txt}) · {badge}</p>"
+            f"<p id='statsLine'>marker trovati: {n_marker}/{len(rows)} · envelope: {html.escape(env_txt)}</p>"
+            "<div class='foldercomment'><label>Commento generale sulla cartella</label>"
+            "<textarea id='folderComment' placeholder='Commento per tutta la cartella...' rows='2'></textarea></div>"
         )
         page_name = f"folders/{fid:04d}.html"
+        body_attrs = f" data-folder='{html.escape(folder, quote=True)}'"
         (out / page_name).write_text(
-            _page(folder, toolbar, "<div class='grid'>" + "".join(cards) + "</div>"), encoding="utf-8"
+            _page(folder, toolbar, "<div class='grid'>" + "".join(cards) + "</div>", body_attrs), encoding="utf-8"
         )
         page_count += 1
 
+        review_ids = [str(r["image_id"]) for r in rows if r.get("status") == "review"]
+        review_pct_static = round(100 * len(review_ids) / max(1, len(rows)))
         index_lines.append(
-            f"<tr><td><a href='{page_name}'>{html.escape(folder)}</a></td>"
+            f"<tr data-folder='{html.escape(folder, quote=True)}' data-total='{len(rows)}' "
+            f"data-review-ids='{html.escape(json.dumps(review_ids), quote=True)}'>"
+            "<td><input type='checkbox' class='reviewedcheck'></td>"
+            f"<td><a href='{page_name}'>{html.escape(folder)}</a></td>"
             f"<td>{html.escape(str(vendor))}</td><td>{len(rows)}</td>"
             f"<td>{n_marker}/{len(rows)}</td>"
-            f"<td>{html.escape(str(info.get('review_rate', '')))}</td>"
+            f"<td class='reviewcell'>{review_pct_static}%</td>"
             f"<td>{html.escape(env_txt)}</td><td>{badge}</td></tr>"
         )
 
     index_content = (
         "<p>Click su una cartella per vedere tutte le sue immagini con marker ed envelope. "
         "Le cartelle 'in corso' mostrano i risultati parziali già disponibili.</p>"
-        "<table><tr><th>Cartella</th><th>Vendor</th><th>Immagini</th><th>Marker trovati</th>"
+        "<table><tr><th>Rivista</th><th>Cartella</th><th>Vendor</th><th>Immagini</th><th>Marker trovati</th>"
         "<th>Review</th><th>Envelope</th><th>Stato</th></tr>"
         + "".join(index_lines)
         + "</table>"
     )
+    index_toolbar = (
+        "<div class='toolbar'><button id='exportComments'>Esporta correzioni CSV (commenti, box, esclusioni — tutte le cartelle)</button>"
+        "<span id='reviewedCount'></span>"
+        "<span class='hint'>Spunta 'Rivista' per segnare le cartelle già controllate (salvato nel browser). "
+        "Esporta commenti, esclusioni e box corretti annotati in qualunque pagina-cartella "
+        "(salvati nel browser, non sul disco, finché non li esporti).</span></div>"
+    )
     (out / "index.html").write_text(
-        _page("Review marker + envelope — indice cartelle", "", index_content), encoding="utf-8"
+        _page("Review marker + envelope — indice cartelle", index_toolbar, index_content), encoding="utf-8"
     )
     print(f"Gallery: {out / 'index.html'} ({page_count} cartelle)")
     return 0
