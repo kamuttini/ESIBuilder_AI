@@ -1218,53 +1218,14 @@ def _run_advanced_stages(
             righe_depth = list(depth.get("rows") or [])
             letture: Dict[str, Dict] = {}
             tutti = list(project.dedup_names())
-            _job_update(job_id, stage="depth: quale etichetta regge su tutta la cartella")
-            scelta = _riferimento_che_regge(
-                base_moduli, _righe_depth_per_nome(project, righe_depth), tutti,
-            )
-            results["depth"]["box_reference"] = "" if scelta is None else scelta[0]
-            if scelta is None:
-                # Nessuna etichetta regge: si porta via anche quella di un giro precedente,
-                # altrimenti la sezione continua a mostrare le sue letture come se valessero.
-                def butta_propagazione(_p: Project, value: Dict) -> Dict:
-                    if (value.get("depth_box_template") or {}).get("scope") == "auto":
-                        value.pop("depth_box_template", None)
-                        value.pop("depth_box_reads", None)
-                    return value
-
-                _write_step(project_id, "depth_scale", butta_propagazione,
-                            status="proposed", source="model")
-            if scelta is not None:
-                nome_rif, box_rif, fattore, quota = scelta
-                _job_update(job_id, stage=f"depth: la stessa etichetta su {len(tutti)} immagini",
-                            done=0, total=len(tutti))
-                letture, falliti = _leggi_riquadro_su(
-                    base_moduli, box_rif, fattore, tutti,
-                    progress=lambda fatte, quante: _job_update(job_id, done=fatte),
-                )
-                # Dove l'etichetta non c'e' - un fotogramma di un'altra schermata - resta
-                # comunque un numero, ed e' un numero qualsiasi. Fuori dai millimetri di una
-                # profondita' e' meglio nessuna lettura che una sbagliata.
-                fuori_scala = [n for n, l in letture.items()
-                               if not 5.0 <= float(l.get("depth_mm") or 0) <= 500.0]
-                for nome in fuori_scala:
-                    letture.pop(nome, None)
-                falliti = list(falliti) + fuori_scala
-                if letture:
-                    def salva_letture(_p: Project, value: Dict) -> Dict:
-                        value["depth_box_template"] = {
-                            "box": box_rif, "from": nome_rif, "unit_factor": fattore,
-                            "scope": "auto", "applied": len(letture), "targets": len(tutti),
-                            "failed": falliti, "checked_ratio": round(quota, 2),
-                            "at": datetime.now().isoformat(timespec="seconds"),
-                        }
-                        value["depth_box_reads"] = letture
-                        return value
-
-                    _write_step(project_id, "depth_scale", salva_letture,
-                                status="proposed", source="model")
-                    results["depth"]["box_reads"] = len(letture)
-                    results["depth"]["box_failed"] = len(falliti)
+            # Una strada sola per tutta la cartella: l'interfaccia o la scala (vedi
+            # `_strategia_depth`). Il giro automatico non tocca un riquadro applicato da lei.
+            propagata = _propaga_depth(job_id, project_id, base_moduli,
+                                       _righe_depth_per_nome(project, righe_depth), tutti)
+            results["depth"].update(propagata)
+            project = _project(project_id)
+            letture = dict(project.step_value("depth_scale").get("depth_box_reads") or {}) \
+                if propagata.get("box_reads") else {}
 
         if "scala" in quali:
             if "depth" not in quali:
@@ -9420,6 +9381,7 @@ def api_depth(project_id: str):
     righe, stage = _depth_module_rows(project)
     if stage is None:
         return jsonify({"error": "la depth non e' ancora stata calcolata", "rows": []}), 404
+    strategia = _strategia_depth(project, righe)
 
     # Le schermate proibite non hanno una depth da leggere: non compaiono qui ne' nei conti.
     # Restano nel progetto, e si riammettono dalla sezione della cartella.
@@ -9435,11 +9397,25 @@ def api_depth(project_id: str):
             continue
         r.update({"depth_mm": lettura.get("depth_mm"), "box": lettura.get("box"),
                   "ocr_text": lettura.get("ocr_text", ""), "from_box": True})
+        if lettura.get("method") == "scala":
+            r["mode"] = "scale"
+    # Una strada sola per la cartella: dove il modulo aveva preso l'altra, il suo numero non
+    # vale. Su prova_13 due immagini del campione mostravano ancora 65, la dynamic range.
+    altra = DEPTH_BOX_MODES if strategia["mode"] == "scala" else ("scale",)
+    for r in righe:
+        if r.get("from_box") or r.get("mode") not in altra or r["depth_mm"] is None:
+            continue
+        r.update({"depth_mm": None, "status": "missing",
+                  "reason": ("nella cartella la depth si prende dalla "
+                             + ("scala" if strategia["mode"] == "scala" else "interfaccia")
+                             + f": il modulo qui aveva letto «{r.get('ocr_text') or ''}»")})
     # Le immagini fuori dal campione del modulo: la depth ce l'hanno solo grazie al riquadro.
     modo_riquadro = ""
     if modello:
         sorgente = next((r for r in righe if r["name"] == modello.get("from")), None)
         modo_riquadro = (sorgente or {}).get("mode") or "direct_label"
+        if modello.get("method") == "scala":
+            modo_riquadro = "scale"
     for nome, lettura in letture.items():
         if nome in nella_run or nome in proibite:
             continue
@@ -9447,7 +9423,8 @@ def api_depth(project_id: str):
             "name": nome, "status": "box", "mode": modo_riquadro,
             "depth_mm": lettura.get("depth_mm"), "score": None,
             "box": lettura.get("box"), "ocr_text": lettura.get("ocr_text", ""),
-            "reason": "letta nel riquadro di cartella", "candidates": None,
+            "reason": ("letta sulla scala" if lettura.get("method") == "scala"
+                       else "letta nel riquadro di cartella"), "candidates": None,
             "direct": {}, "scale": {}, "from_box": True, "in_run": False,
         })
     # Le immagini che nessuno ha ancora guardato: fuori dal campione del modulo e senza
@@ -9497,6 +9474,7 @@ def api_depth(project_id: str):
     return jsonify(
         {
             "rows": righe,
+            "strategy": strategia,
             "box_template": modello,
             "box_applications": valore_step.get("depth_box_applications") or [],
             "box_tightened": valore_step.get("depth_box_tightened") or None,
@@ -10090,13 +10068,17 @@ def _ancora_dopo_il_prefisso(image_path: Path, box: Dict,
     return int(prefisso["right"]) + spostamento
 
 
-def _punto_dai_pixel(image_path: Path, parola: Dict, riga: Dict, cifre: str) -> Optional[str]:
+def _punto_dai_pixel(image_path: Path, parola: Dict, riga: Dict, cifre: str,
+                     coda: int = 0) -> Optional[str]:
     """Il numero col punto decimale ritrovato nell'inchiostro, se l'OCR l'ha perso.
 
     A 10 px di altezza tesseract perde a volte il punto: su prova_10 `4.6` usciva `46`.
     Il punto pero' si vede: e' un glifo stretto con l'inchiostro solo nelle righe basse.
     Se fra i glifi della parola ce n'e' esattamente uno cosi', e gli altri sono tanti quante
     le cifre lette, il punto va li'. In ogni altro caso non si inventa niente.
+
+    `coda` sono i glifi dell'unita' che seguono il numero nella stessa parola (`30cm` -> 2):
+    non sono cifre, e contarli come tali faceva rinunciare proprio dove serviva.
     """
     import numpy as np  # noqa: PLC0415
     from PIL import Image  # noqa: PLC0415
@@ -10128,6 +10110,8 @@ def _punto_dai_pixel(image_path: Path, parola: Dict, riga: Dict, cifre: str) -> 
                 x += 1
             gruppi.append((inizio, x))
         x += 1
+    if coda:
+        gruppi = gruppi[:-coda] if len(gruppi) > coda else []
     punti, cifre_viste = [], 0
     for inizio, fine in gruppi:
         sue = np.where(inchiostro[:, inizio:fine + 1].any(axis=1))[0]
@@ -10674,6 +10658,70 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
         _job_update(job_id, status="error", stage="errore", error=str(error))
 
 
+@app.post("/api/projects/<project_id>/depth/strategy")
+def api_depth_strategy(project_id: str):
+    """La strada della depth per tutta la cartella, scelta da lei: interfaccia o scala.
+
+    E' la correzione al volo di quando il modulo sbaglia strada: si sceglie, e la depth si
+    rilegge su tutta la cartella per quella strada. `reset` torna alla scelta automatica.
+    """
+    project = _project(project_id)
+    payload = _payload()
+    modo = str(payload.get("mode") or "").strip()
+    annulla = bool(payload.get("reset"))
+    if not annulla and modo not in DEPTH_STRATEGIES:
+        return jsonify({"error": "la strada e' «interfaccia» oppure «scala»"}), 400
+    _righe, stage = _depth_module_rows(project)
+    if stage is None:
+        return jsonify({"error": "la depth non e' ancora stata calcolata"}), 404
+    prima = project.step_value("depth_scale").get("depth_strategy")
+
+    def metti(_p: Project, value: Dict) -> Dict:
+        if annulla:
+            value.pop("depth_strategy", None)
+        else:
+            value["depth_strategy"] = {"mode": modo, "source": "user",
+                                       "at": datetime.now().isoformat(timespec="seconds")}
+        return value
+
+    _write_step(project_id, "depth_scale", metti, status="proposed", source="model",
+                invalidate=False)
+    return jsonify({"job_id": _start_job(_run_depth_strategia, project_id, prima),
+                    "mode": None if annulla else modo})
+
+
+def _run_depth_strategia(job_id: str, project_id: str, prima: Optional[Dict] = None) -> None:
+    """Rilegge la depth di tutta la cartella per la strada scelta.
+
+    Se la strada non regge si torna alla scelta di prima: le letture che c'erano restano.
+    """
+    def ripristina(_p: Project, value: Dict) -> Dict:
+        if prima:
+            value["depth_strategy"] = prima
+        else:
+            value.pop("depth_strategy", None)
+        return value
+
+    try:
+        project = _project(project_id)
+        base = project.dedup_link_dir() or Path(project.source.get("folder") or "")
+        righe, _stage = _depth_module_rows(project)
+        esito = _propaga_depth(job_id, project_id, base, righe, list(project.dedup_names()),
+                               forza=True)
+        if not esito.get("box_reads"):
+            if esito["strategy"]["mode"] == "interfaccia":
+                raise ValueError(esito.get("error") or (
+                    "nessuna etichetta dell'interfaccia regge su tutta la cartella: disegna il "
+                    "riquadro sul numero della depth in un'immagine e applicalo a tutte"))
+            raise ValueError(esito.get("error") or "sulla scala non si legge nessuna etichetta")
+        _job_update(job_id, status="done", stage="fatto", result=esito)
+    except Exception as error:  # noqa: BLE001
+        _write_step(project_id, "depth_scale", ripristina, status="proposed", source="model",
+                    invalidate=False)
+        _job_update(job_id, status="error", stage="errore",
+                    error=f"{error}. Resta la strada di prima.")
+
+
 @app.post("/api/projects/<project_id>/depth/box")
 def api_depth_box(project_id: str):
     """Stringi il riquadro su un'immagine e rileggi la depth su tutte quelle con etichetta."""
@@ -10865,6 +10913,298 @@ def _campione_sparso(nomi: Sequence[str], quante: int) -> List[str]:
     return [elenco[int(indice * passo)] for indice in range(quante)]
 
 
+def _valore_quasi_costante(valori: Sequence[float]) -> bool:
+    """Un numero che resta quasi sempre lo stesso non e' la depth.
+
+    In una cartella di acquisizione le depth si acquisiscono tutte: la stessa puo' tornare
+    per orientamenti diversi, ma il valore cambia. Su prova_13 l'etichetta propagata era
+    «Dyn R 65», la dynamic range del Philips: 65 o 68 su 143 immagini su 146. Credibile come
+    millimetri, ma e' un'impostazione ferma, non una profondita'.
+    """
+    utili = [round(float(v), 1) for v in valori if v is not None]
+    if len(utili) < 5:
+        return False
+    conta: Dict[float, int] = {}
+    for v in utili:
+        conta[v] = conta.get(v, 0) + 1
+    primi = sorted(conta.values(), reverse=True)
+    return len(conta) <= 2 or sum(primi[:2]) / float(len(utili)) >= 0.9
+
+
+DEPTH_STRATEGIES = ("interfaccia", "scala")
+
+
+def _strategia_depth(project: Project, righe: Sequence[Dict]) -> Dict:
+    """Da dove si prende la depth **di tutta la cartella**: interfaccia o scala.
+
+    Una cartella e' un ecografo solo: se la depth e' scritta nell'interfaccia lo e' in ogni
+    immagine, se non c'e' si deduce dalla scala in ogni immagine. Mescolare le due strade -
+    qualche immagine dall'etichetta, qualche altra dal righello - voleva dire propagare
+    l'etichetta sbagliata anche dove il modulo aveva gia' trovato la scala: su prova_13 il
+    modulo aveva scelto la scala in 10 immagini su 12 e la cartella e' uscita tutta «65».
+
+    Decidono i voti del modulo sulle immagini che ha guardato (accettate o da rivedere). La
+    scelta di lei, se c'e', vince sempre.
+    """
+    scelta = project.step_value("depth_scale").get("depth_strategy") or {}
+    voti = {"interfaccia": 0, "scala": 0}
+    for riga in righe:
+        if str(riga.get("status") or "") not in ("accepted", "review"):
+            continue
+        if riga.get("mode") in DEPTH_BOX_MODES:
+            voti["interfaccia"] += 1
+        elif riga.get("mode") == "scale":
+            voti["scala"] += 1
+    if scelta.get("source") == "user" and scelta.get("mode") in DEPTH_STRATEGIES:
+        return {"mode": scelta["mode"], "source": "user", "votes": voti,
+                "at": scelta.get("at", "")}
+    # Un riquadro dell'interfaccia applicato da lei e' gia' una scelta di strada.
+    modello = project.step_value("depth_scale").get("depth_box_template") or {}
+    if str(modello.get("scope") or "") not in ("", "auto") and modello.get("method") != "scala":
+        return {"mode": "interfaccia", "source": "user", "votes": voti,
+                "at": modello.get("at", ""), "via": "riquadro"}
+    modo = "scala" if voti["scala"] > voti["interfaccia"] else "interfaccia"
+    return {"mode": modo, "source": "model", "votes": voti}
+
+
+def _corsia_della_scala(project: Project, righe: Sequence[Dict]) -> Optional[Tuple[float, float, float, float]]:
+    """La colonna dello schermo dove sta la scala: dove il modulo ha letto le sue etichette.
+
+    In orizzontale la scala sta ferma; in verticale no - l'etichetta sta in fondo al
+    righello e scende con la depth - quindi la corsia va dal rettangolo fino al fondo
+    dell'immagine.
+    """
+    def scatole(stati: Sequence[str]) -> List[Dict]:
+        return [r["box"] for r in righe
+                if r.get("mode") == "scale" and r.get("box")
+                and (not stati or str(r.get("status") or "") in stati)]
+
+    boxes = scatole(("accepted", "review")) or scatole(())
+    if not boxes:
+        return None
+    larghezza, altezza = (project.step_value("import").get("image_sample_size") or [0, 0])[:2]
+    rect = project.step_value("rect").get("rect_echo") or {}
+    sinistra = min(b["left"] for b in boxes) - 60
+    destra = max(b["right"] for b in boxes) + 30
+    if larghezza and destra - sinistra > 0.35 * larghezza:
+        return None  # etichette sparse per lo schermo: non e' una colonna
+    alto = min([rect.get("top", 10 ** 6)] + [b["top"] for b in boxes]) - 20
+    basso = altezza or max(b["bottom"] for b in boxes) + 80
+    return (float(max(0, sinistra)), float(max(0, alto)),
+            float(destra if not larghezza else min(larghezza, destra)), float(basso))
+
+
+def _leggi_scala_su(base: Path, corsia: Tuple[float, float, float, float], nomi: Sequence[str],
+                    decimali: Optional[int] = None,
+                    progress=None) -> Tuple[Dict[str, Dict], List[str]]:  # noqa: ANN001
+    """La depth di ogni immagine dall'etichetta in fondo alla scala.
+
+    L'etichetta cambia posto con la depth, quindi non si propaga un riquadro: si legge la
+    corsia della scala immagine per immagine e si prende l'etichetta con l'unita' piu' in
+    basso, cioe' la fine del righello. Su prova_13: «8.0cm» ... «2.5cm», una per immagine.
+    """
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+    parole_di = _tesseract_words()
+
+    # La corsia si legge a fasce basse che si sovrappongono: su una striscia alta e stretta
+    # l'OCR e' capriccioso - su prova_13 lo stesso «7.0cm» si leggeva o no a seconda di dove
+    # cominciava la striscia - mentre in una fascia di 90 px l'etichetta e' una riga sola.
+    sinistra, alto, destra, basso = corsia
+    fasce = []
+    y = alto
+    while y < basso:
+        fasce.append((sinistra, y, destra, min(basso, y + 90.0)))
+        if y + 90.0 >= basso:
+            break
+        y += 60.0
+
+    def leggi(nome: str) -> Tuple[str, Optional[Dict]]:
+        percorso = base / nome
+        trovate: List[Tuple[float, str, str, Dict, str]] = []
+        parole = []
+        for fascia in fasce:
+            for psm in ("6", "11"):
+                try:
+                    lette, _ = parole_di(percorso, timeout=8.0, max_side=1800, crop_box=fascia,
+                                         psm=psm, preprocess="base",
+                                         char_whitelist="0123456789.,cm")
+                except Exception:  # noqa: BLE001
+                    continue
+                parole.extend(lette)
+        for parola in parole:
+            testo = str(parola.text or "").strip().lower()
+            trovato = re.match(r"^(\d+(?:[.,]\d+)?)\s*(c|mm)", testo)
+            if not trovato:
+                continue
+            box = {"left": int(round(parola.left)), "top": int(round(parola.top)),
+                   "right": int(round(parola.left + parola.width)),
+                   "bottom": int(round(parola.top + parola.height))}
+            trovate.append((parola.top + parola.height / 2.0,
+                            trovato.group(1).replace(",", "."), trovato.group(2), box,
+                            str(parola.text)))
+        if not trovate:
+            return nome, None
+        fondo = max(t[0] for t in trovate)
+        giu = [t for t in trovate if t[0] >= fondo - 8]
+        # due passate sulla stessa etichetta: vince quella scritta come le altre della cartella
+        if decimali is not None:
+            giu.sort(key=lambda t: 0 if _decimali(t[1]) == decimali else 1)
+        _y, cifre, unita, box, testo = giu[0]
+        if decimali and _decimali(cifre) == 0:
+            unita_scritta = re.sub(r"[^a-z]", "", testo.lower().split(cifre[-1], 1)[-1])
+            riparato = _punto_dai_pixel(percorso, box, box, cifre, coda=len(unita_scritta))
+            if riparato is not None and _decimali(riparato) == decimali:
+                cifre = riparato
+        valore = round(float(cifre) * (10.0 if unita.startswith("c") else 1.0), 2)
+        if not _depth_credibile(valore):
+            return nome, None
+        stretto = _stringi_sui_pixel(percorso, box, len(cifre), soglia_media=True)
+        return nome, {"box": stretto, "depth_mm": valore, "ocr_text": testo, "method": "scala"}
+
+    letture: Dict[str, Dict] = {}
+    fatte = 0
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for nome, esito in pool.map(leggi, nomi):
+            fatte += 1
+            if progress is not None and (fatte % 10 == 0 or fatte == len(nomi)):
+                progress(fatte, len(nomi))
+            if esito is not None:
+                letture[nome] = esito
+    letture = _punto_dalla_cartella(letture, decimali)
+    falliti = [n for n in nomi if n not in letture]
+    return letture, falliti
+
+
+def _punto_dalla_cartella(letture: Dict[str, Dict], decimali: Optional[int]) -> Dict[str, Dict]:
+    """Il punto decimale perso, ritrovato nelle altre immagini della cartella.
+
+    `40cm` accanto a immagini che leggono `4.0cm` e' la stessa etichetta senza il punto: lo
+    dice la cartella, non un'ipotesi. Si corregge solo cosi'. `12cm` resta 12 cm - il
+    Philips scrive senza decimali da 10 cm in su - perche' `1.2cm` nella cartella non c'e'.
+    Dove non c'e' nessuna delle due prove la lettura si butta: meglio nessuna depth che una
+    sbagliata di dieci volte.
+    """
+    if not decimali:
+        return letture
+    nel_formato = {round(l["depth_mm"], 2) for l in letture.values()
+                   if _decimali(_cifre_lette(l.get("ocr_text"))) == decimali}
+    fuori: Dict[str, Dict] = {}
+    for nome, lettura in letture.items():
+        cifre = _cifre_lette(lettura.get("ocr_text"))
+        if _decimali(cifre) == decimali:
+            fuori[nome] = lettura
+            continue
+        if _decimali(cifre) == 0 and len(cifre) > decimali:
+            col_punto = cifre[:-decimali] + "." + cifre[-decimali:]
+            fattore = lettura["depth_mm"] / float(cifre)
+            corretto = round(float(col_punto) * fattore, 2)
+            if corretto in nel_formato:
+                fuori[nome] = {**lettura, "depth_mm": corretto,
+                               "ocr_text": lettura.get("ocr_text", "").replace(cifre, col_punto, 1),
+                               "dot_from_folder": True}
+                continue
+            if lettura["depth_mm"] >= 100.0 and round(lettura["depth_mm"], 2) not in \
+                    {round(v * 10, 2) for v in nel_formato}:
+                fuori[nome] = lettura
+    return fuori
+
+
+def _propaga_depth(job_id: str, project_id: str, base: Path, righe: Sequence[Dict],
+                   tutti: Sequence[str], forza: bool = False) -> Dict:
+    """La depth su tutta la cartella, per la strada decisa da `_strategia_depth`.
+
+    Scala: si legge l'etichetta in fondo al righello immagine per immagine. Interfaccia: si
+    propaga l'etichetta che regge sulle altre immagini, e che non sia un valore fermo. Le
+    letture nascono come proposta (`scope` auto): diventano verita' solo con la conferma. I
+    riquadri che lei ha sistemato a mano restano i suoi.
+    """
+    project = _project(project_id)
+    strategia = _strategia_depth(project, righe)
+    esito: Dict = {"strategy": strategia}
+    letture: Dict[str, Dict] = {}
+    falliti: List[str] = []
+    modello: Optional[Dict] = None
+    adesso = datetime.now().isoformat(timespec="seconds")
+    progresso = (lambda fatte, quante: _job_update(job_id, done=fatte)) if job_id else None
+
+    if strategia["mode"] == "scala":
+        corsia = _corsia_della_scala(project, righe)
+        if corsia is None:
+            esito["error"] = "non so dove sta la scala: il modulo non ne ha letta nessuna etichetta"
+        else:
+            # L'OCR il punto lo perde, non lo inventa: il formato della cartella e' quello con
+            # piu' decimali fra le letture del modulo (`4.5cm` accanto a `35cm`).
+            dec = [d for d in (_decimali(r.get("ocr_text")) for r in righe
+                               if r.get("mode") == "scale") if d is not None]
+            decimali = max(dec) if dec and sum(1 for d in dec if d == max(dec)) >= 2 else None
+            if job_id:
+                _job_update(job_id, stage=f"depth: la scala su {len(tutti)} immagini",
+                            done=0, total=len(tutti))
+            letture, falliti = _leggi_scala_su(base, corsia, tutti, decimali, progresso)
+            modello = {"method": "scala", "lane": [round(v) for v in corsia], "scope": "auto",
+                       "unit_factor": 1.0, "decimals": decimali, "applied": len(letture),
+                       "targets": len(tutti), "failed": falliti, "at": adesso}
+    else:
+        if job_id:
+            _job_update(job_id, stage="depth: quale etichetta regge su tutta la cartella")
+        scelta = _riferimento_che_regge(base, righe, tutti)
+        esito["box_reference"] = "" if scelta is None else scelta[0]
+        if scelta is not None:
+            nome_rif, box_rif, fattore, quota = scelta
+            if job_id:
+                _job_update(job_id, stage=f"depth: la stessa etichetta su {len(tutti)} immagini",
+                            done=0, total=len(tutti))
+            letture, falliti = _leggi_riquadro_su(base, box_rif, fattore, tutti,
+                                                  progress=progresso, riferimento=nome_rif)
+            # Dove l'etichetta non c'e' - un fotogramma di un'altra schermata - resta
+            # comunque un numero, ed e' un numero qualsiasi. Fuori dai millimetri di una
+            # profondita' e' meglio nessuna lettura che una sbagliata.
+            fuori_scala = [n for n, l in letture.items()
+                           if not 5.0 <= float(l.get("depth_mm") or 0) <= 500.0]
+            for nome in fuori_scala:
+                letture.pop(nome, None)
+            falliti = list(falliti) + fuori_scala
+            if _valore_quasi_costante([l["depth_mm"] for l in letture.values()]):
+                esito["error"] = ("l'etichetta trovata nell'interfaccia vale quasi sempre lo "
+                                  "stesso numero: non e' la depth")
+                letture = {}
+            else:
+                modello = {"box": box_rif, "from": nome_rif, "unit_factor": fattore,
+                           "method": "interfaccia", "scope": "auto", "applied": len(letture),
+                           "targets": len(tutti), "failed": falliti,
+                           "checked_ratio": round(quota, 2), "at": adesso}
+
+    def salva(_p: Project, value: Dict) -> Dict:
+        vecchie = dict(value.get("depth_box_reads") or {})
+        a_mano = {n: l for n, l in vecchie.items() if l.get("source") == "user_box"}
+        modello_vecchio = value.get("depth_box_template") or {}
+        if not forza and str(modello_vecchio.get("scope") or "") not in ("", "auto"):
+            # Un riquadro applicato da lei: il giro automatico non lo tocca. Lo cambiano
+            # solo i bottoni della strategia, cioe' ancora lei.
+            return value
+        if forza and not letture:
+            # Una strada scelta da lei che non regge non cancella quella che c'era.
+            return value
+        if modello is not None and letture:
+            value["depth_box_template"] = modello
+            value["depth_box_reads"] = {**letture, **a_mano}
+        elif str(modello_vecchio.get("scope") or "") in ("", "auto"):
+            # Nessuna strada regge: si porta via anche la propagazione di un giro precedente,
+            # altrimenti la sezione continua a mostrarne le letture come se valessero.
+            value.pop("depth_box_template", None)
+            if a_mano:
+                value["depth_box_reads"] = a_mano
+            else:
+                value.pop("depth_box_reads", None)
+        return value
+
+    _write_step(project_id, "depth_scale", salva, status="proposed", source="model")
+    esito["box_reads"] = len(letture)
+    esito["box_failed"] = len(falliti)
+    return esito
+
+
 def _riferimento_che_regge(
     base: Path, righe: Sequence[Dict], nomi: Sequence[str], prove: int = 8,
 ) -> Optional[Tuple[str, Dict, float, float]]:
@@ -10919,6 +11259,8 @@ def _riferimento_che_regge(
             continue
         quota = sum(1 for v in valori if _depth_credibile(v)) / float(len(valori))
         if quota < 0.6:
+            continue
+        if _valore_quasi_costante(valori):
             continue
         voto = (quota, -area(riga), riga["name"], riga["box"], fattore)
         if migliore is None or voto[:2] > migliore[:2]:

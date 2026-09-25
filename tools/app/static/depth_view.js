@@ -756,6 +756,48 @@ async function createDepthViewer(projectId, sampleSize) {
     coperturaBox.append(el('strong', {},
       `${c.with_depth} immagini su ${c.total} hanno una depth`));
     if (c.reason) coperturaBox.append(el('span', { class: 'hint' }, ` — ${c.reason}.`));
+    /* La strada della depth, una sola per tutta la cartella: o l'etichetta dell'interfaccia
+       o l'etichetta in fondo alla scala. Se il modulo ha preso quella sbagliata - su
+       prova_13 aveva propagato «Dyn R 65», la dynamic range, invece della scala - la si
+       corregge qui con un clic, e la depth si rilegge su tutte le immagini per quella via.
+       I riquadri sistemati a mano restano. */
+    const strategia = data.strategy || {};
+    const strada = el('div', { class: 'row', style: 'margin-top:6px' },
+      el('span', { class: 'hint' }, 'la depth si prende:'));
+    const statoStrada = el('span', { class: 'hint' });
+    const rilancia = async (corpo, messaggio) => {
+      for (const b of strada.querySelectorAll('button')) b.disabled = true;
+      try {
+        const { job_id } = await api(`/projects/${projectId}/depth/strategy`, { body: corpo });
+        await pollJob(job_id, statoStrada);
+        toast(messaggio);
+        await rileggiTutto();
+      } catch (errore) {
+        // la strada non regge: il server ha rimesso quella di prima, e la pagina la mostra
+        toast(errore.message, true);
+        await rileggiTutto();
+      } finally { for (const b of strada.querySelectorAll('button')) b.disabled = false; }
+    };
+    for (const [modo, etichetta] of [['interfaccia', 'dall\'interfaccia'], ['scala', 'dalla scala']]) {
+      const b = el('button', { class: 'chip' + (strategia.mode === modo ? ' on' : '') }, etichetta);
+      b.addEventListener('click', () => rilancia({ mode: modo },
+        `depth riletta ${etichetta} su tutta la cartella`));
+      strada.append(b);
+    }
+    const voti = strategia.votes || {};
+    if (strategia.source === 'user') {
+      strada.append(el('span', { class: 'hint' }, '(scelta tua)'));
+      const auto = el('button', { class: 'ghost' }, 'torna alla scelta automatica');
+      auto.addEventListener('click', () => rilancia({ reset: true },
+        'depth riletta con la scelta automatica'));
+      strada.append(auto);
+    } else if (strategia.mode) {
+      strada.append(el('span', { class: 'hint' },
+        `(scelta automatica: nel campione del modulo ${voti.scala || 0} dalla scala, `
+        + `${voti.interfaccia || 0} dall'interfaccia)`));
+    }
+    strada.append(statoStrada);
+    coperturaBox.append(strada);
     const riga = el('div', { class: 'row', style: 'margin-top:6px' });
     const mancanti = (conteggi.by_status || {}).missing || 0;
     if (mancanti) {
@@ -848,6 +890,7 @@ async function createDepthViewer(projectId, sampleSize) {
     modello = fresca.box_template || null;
     data.coverage = fresca.coverage; data.confirmed = fresca.confirmed;
     data.coherence = fresca.coherence;
+    data.strategy = fresca.strategy;
     data.images_total = fresca.images_total;
     conteggi = { by_mode: fresca.by_mode || {}, by_status: fresca.by_status || {} };
     // Anche i valori: sono le scorciatoie della correzione, e dopo un giro nuovo quelli di
