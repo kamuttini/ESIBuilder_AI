@@ -59,20 +59,22 @@ async function createDepthViewer(projectId, sampleSize) {
     if (filtro === 'rivista:no') return r.depth_mm != null && !r.reviewed && !r.corrected;
     return true;
   };
-  /* L'ordine dell'elenco. Per nome e' l'ordine della cartella - va bene per controllare
-     un'acquisizione alla volta - ma per **giudicare** le letture serve l'ordine per valore:
-     i due estremi finiscono agli estremi, e una depth sbagliata di dieci volte si vede
-     subito perche' e' l'unica lassu'. Serve anche al rettangolo, che dalla depth piu' bassa
-     prende l'immagine con la corda piu' lunga. */
-  let ordine = 'nome';
+  /* L'ordine dell'elenco: per depth, crescente di partenza, oppure per punteggio. Per
+     **giudicare** le letture serve l'ordine per valore: i due estremi finiscono agli estremi,
+     e una depth sbagliata di dieci volte si vede subito perche' e' l'unica lassu'. Serve
+     anche al rettangolo, che dalla depth piu' bassa prende l'immagine con la corda piu'
+     lunga. Per punteggio, alto di partenza: le letture incerte finiscono in fondo, tutte
+     insieme. L'ordine per nome non c'e' piu': le correzioni si facevano comunque in ordine
+     di depth, e lo si rimetteva a mano ogni volta. */
+  const ordine = { chiave: 'depth', verso: 1 };
   const visibili = () => {
     const elenco = names.filter(passa);
-    if (ordine === 'nome') return elenco;
-    const verso = ordine === 'giu' ? -1 : 1;
+    const campo = ordine.chiave === 'score' ? 'score' : 'depth_mm';
+    const verso = ordine.verso;
     return elenco.slice().sort((a, b) => {
-      const va = (byName.get(a) || {}).depth_mm;
-      const vb = (byName.get(b) || {}).depth_mm;
-      // Le immagini senza depth stanno in fondo in tutti e due i versi: sono da riempire,
+      const va = (byName.get(a) || {})[campo];
+      const vb = (byName.get(b) || {})[campo];
+      // Le immagini senza valore stanno in fondo in tutti e due i versi: sono da riempire,
       // non sono ne' le piu' piccole ne' le piu' grandi.
       if (va == null && vb == null) return a < b ? -1 : 1;
       if (va == null) return 1;
@@ -1312,20 +1314,31 @@ async function createDepthViewer(projectId, sampleSize) {
   };
 
   // --- l'ordine con cui si scorrono le immagini
+  // Due bottoni: il primo clic sceglie il criterio, i successivi ne invertono il verso.
   const ordineRow = el('div', { class: 'row' },
     el('span', { class: 'hint' }, 'ordine:'));
-  for (const [chiave, etichetta] of [['nome', 'per nome'], ['su', 'depth crescente'],
-                                     ['giu', 'depth decrescente']]) {
-    const b = el('button', { class: 'chip' + (chiave === ordine ? ' on' : '') }, etichetta);
+  const criteri = [
+    { chiave: 'depth', partenza: 1, versi: { 1: 'depth crescente', '-1': 'depth decrescente' } },
+    { chiave: 'score', partenza: -1, versi: { '-1': 'punteggio alto', 1: 'punteggio basso' } },
+  ];
+  const bottoniOrdine = criteri.map((criterio) => {
+    const b = el('button', { class: 'chip' });
     b.addEventListener('click', () => {
-      ordine = chiave;
-      for (const altro of ordineRow.querySelectorAll('button')) {
-        altro.className = 'chip' + (altro.textContent === etichetta ? ' on' : '');
-      }
+      if (ordine.chiave === criterio.chiave) ordine.verso = -ordine.verso;
+      else { ordine.chiave = criterio.chiave; ordine.verso = criterio.partenza; }
+      aggiornaOrdine();
       if (vista === 'riepilogo') renderRiepilogo(); else mostra();
     });
-    ordineRow.append(b);
-  }
+    return b;
+  });
+  const aggiornaOrdine = () => criteri.forEach((criterio, i) => {
+    const attivo = ordine.chiave === criterio.chiave;
+    const verso = attivo ? ordine.verso : criterio.partenza;
+    bottoniOrdine[i].className = 'chip' + (attivo ? ' on' : '');
+    bottoniOrdine[i].textContent = (verso === 1 ? '↑ ' : '↓ ') + criterio.versi[verso];
+  });
+  aggiornaOrdine();
+  ordineRow.append(...bottoniOrdine);
 
   // --- le due viste: una per una, oppure tutte le depth trovate in un colpo d'occhio
   let vista = 'singola';
