@@ -488,7 +488,9 @@ async function createDepthViewer(projectId, sampleSize) {
     );
     dettaglio.innerHTML = '';
     dettaglio.append(el('div', {},
-      `stato ${r.status}${r.score != null ? ` · punteggio ${r.score.toFixed(3)}` : ''}`
+      `stato ${r.status}`
+      + (r.module_status ? ` (confermata da te; il modulo la dava «${r.module_status}»)` : '')
+      + (r.score != null ? ` · punteggio ${r.score.toFixed(3)}` : '')
       + `${r.ocr_text ? ` · letto «${r.ocr_text}»` : ''}`
       + `${r.candidates ? ` · ${r.candidates} candidati` : ''}`));
     if (m.what) dettaglio.append(el('div', { style: `color:${m.color}` }, m.what));

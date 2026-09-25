@@ -8152,6 +8152,14 @@ def _depth_confermate(project: Project) -> Dict[str, float]:
             if misura:
                 confermate[nome] = float(misura)
 
+    # Guardata e confermata una per una: vale come confermata, finche' il valore resta quello
+    # che ha confermato. Senza, una conferma su una lettura del modulo non contava niente.
+    for nome, segno in (valore.get("depth_reviewed") or {}).items():
+        misura = segno.get("depth_mm")
+        attuale = (letture.get(nome) or {}).get("depth_mm")
+        if misura and (attuale is None or abs(float(attuale) - float(misura)) < 1e-6):
+            confermate.setdefault(nome, float(misura))
+
     for nome, fix in (valore.get("depth_corrections") or {}).items():
         misura = fix.get("depth_mm")
         if misura:
@@ -9465,6 +9473,11 @@ def api_depth(project_id: str):
             segno and r["depth_mm"] is not None
             and abs(float(segno.get("depth_mm") or 0) - float(r["depth_mm"])) < 1e-6
         )
+        # Confermata da lei vuol dire accettata: lo stato del modulo («da rivedere»,
+        # «scartata») era il suo dubbio, e lei l'ha sciolto. Resta leggibile a parte.
+        if r["reviewed"] and not r.get("corrected") and r.get("status") != "accepted":
+            r["module_status"] = r.get("status")
+            r["status"] = "accepted"
 
     valori: Dict[str, int] = {}
     for r in righe:
