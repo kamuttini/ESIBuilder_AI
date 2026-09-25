@@ -4069,30 +4069,34 @@ function cardTolteAMano(panel, value) {
   riga.append(guarda, tutte);
   card.append(riga);
 
-  const elenco = el('details', { class: 'ov-fold' },
-    el('summary', {}, 'l\'elenco, con la gemella rimasta'));
-  const corpo = el('div', { class: 'depth-rimaste' });
+  /* Le tolte si vedono, non solo si elencano: una miniatura ciascuna, con il tasto per
+     rimetterla. Un nome di file non dice se la scelta era giusta; l'immagine si'. Un clic
+     sulla miniatura apre il visore accanto alla gemella rimasta. */
+  const griglia = el('div', { class: 'row', style: 'flex-wrap:wrap;gap:8px;margin-top:8px' });
   for (const v of tolte.slice(0, 400)) {
-    const voce = el('div', { class: 'row', style: 'margin:2px 0' },
-      el('span', { class: 'hint' },
-        `${v.name.split('/').pop()}`
-        + (v.of ? ` — gemella di ${v.of.split('/').pop()}` : ' — gemella non registrata')
-        + (v.diff != null ? ` · differenza ${v.diff}` : '')
-        + (v.at ? ` · tolta il ${v.at.replace('T', ' alle ')}` : '')));
+    const nome = v.name.split('/').pop();
+    const figura = el('img', {
+      loading: 'lazy', alt: nome, title: `${nome} — apri accanto alla gemella`,
+      style: 'width:170px;max-height:110px;object-fit:contain;background:#000;display:block;cursor:zoom-in',
+      src: `/api/projects/${state.projectId}/image?name=${encodeURIComponent(v.name)}&w=200`,
+    });
+    const gruppo = gruppi.findIndex((g) => g.tolte.includes(v.name));
+    figura.addEventListener('click', () => rivedi(Math.max(0, gruppo)));
     const b = el('button', { class: 'ghost sq2' }, 'rimetti');
     b.addEventListener('click', async () => {
       b.disabled = true;
       try {
         await rimetti([v.name]);
-        toast(`${v.name.split('/').pop()} rimessa dentro`);
+        toast(`${nome} rimessa dentro`);
         await reload();
       } catch (errore) { toast(errore.message, true); b.disabled = false; }
     });
-    voce.append(b);
-    corpo.append(voce);
+    griglia.append(el('div', { style: 'width:170px' }, figura,
+      el('div', { class: 'hint', style: 'font-size:11px;overflow-wrap:anywhere' },
+        nome + (v.at ? ` · tolta il ${v.at.slice(0, 16).replace('T', ' ')}` : '')),
+      b));
   }
-  elenco.append(corpo);
-  card.append(elenco);
+  card.append(griglia);
   cardTenuteApposta(card, tenute);
 }
 
