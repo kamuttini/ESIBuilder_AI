@@ -11,6 +11,7 @@ Questi script servono per dimostrare compatibilita tra output legacy e nuovo flu
 - `tools/fss/`: utilita' compatibilita' e audit `.fss`
 - `tools/ultrasound/`: dataset/training/inferenza vendor-probe-rect + pipeline head `.fss`
 - `tools/line16/`: pipeline riga `#16` (template rect + parametri)
+- `tools/freeze/`: blocco proibite/freeze (I/O `.freeze`, quality gate, dataset, review)
 - `tools/orientation/`: pipeline orientamento simbolico e review GUI
 - `tools/review_html/`: script per generare pacchetti/gallerie HTML di revisione
 - `tools/old/`: script legacy/non raccomandati
