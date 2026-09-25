@@ -1832,6 +1832,12 @@ def api_step_confirm(project_id: str, step_id: str):
     project = _project(project_id)
     if step_id not in project.steps:
         return jsonify({"error": f"step sconosciuto: {step_id}"}), 400
+    if step_id == "depth_scale":
+        # Una conferma sola per la depth, da qualunque bottone arrivi. Il «Conferma step»
+        # generico marcava lo step e basta, e il quarto giro del rettangolo - quello sulle
+        # depth piu' basse - non partiva: su prova_10 la sezione del rettangolo e' rimasta
+        # sulle corde del giro prima, misurate a 6.5 invece che a 1.8.
+        return api_depth_confirm(project_id)
     annulla = bool(_payload().get("reset"))
     _write_step(project_id, step_id, lambda _p, v: v,
                 status="proposed" if annulla else "confirmed",

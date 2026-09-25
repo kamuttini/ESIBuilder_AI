@@ -4337,6 +4337,10 @@ function valoreDiModulo(panel, step) {
           const esito = await api(`/projects/${state.projectId}/steps/${step.id}/confirm`,
             { body: confermato ? { reset: true } : {} });
           toast(esito.confirmed ? 'step confermato' : 'conferma tolta');
+          if (esito.rect_job) {
+            toast('rifaccio le corde del rettangolo sulle depth piu\' basse: la proposta '
+              + 'arriva nella sezione del rettangolo ecografico');
+          }
           await reload();
         } catch (error) { toast(error.message, true); }
       })));
