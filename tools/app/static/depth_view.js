@@ -591,7 +591,7 @@ async function createDepthViewer(projectId, sampleSize) {
       riga.addEventListener('click', () => { index = names.indexOf(name); mostra(); });
       listBox.append(riga);
       if (name === names[index]) {
-        requestAnimationFrame(() => riga.scrollIntoView({ block: 'nearest' }));
+        requestAnimationFrame(() => tieniInVista(listBox, riga));
       }
     }
   };

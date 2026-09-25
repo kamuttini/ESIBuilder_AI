@@ -1313,7 +1313,7 @@ async function createScaleViewer(projectId) {
       );
       riga.addEventListener('click', () => { indice = frames.indexOf(f); mostra(); });
       listBox.append(riga);
-      if (f === corrente()) requestAnimationFrame(() => riga.scrollIntoView({ block: 'nearest' }));
+      if (f === corrente()) requestAnimationFrame(() => tieniInVista(listBox, riga));
     }
   };
 

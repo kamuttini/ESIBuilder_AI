@@ -21,6 +21,18 @@ const el = (tag, attrs = {}, ...children) => {
   return node;
 };
 
+/* Porta una riga in vista dentro la sua scatola scorrevole, e solo li'. scrollIntoView
+   scorrerebbe anche la pagina ogni volta che la riga non e' tutta sullo schermo, e mentre
+   si passano le immagini con le frecce la pagina scivolerebbe verso il basso. */
+const tieniInVista = (box, node) => {
+  const b = box.getBoundingClientRect();
+  const n = node.getBoundingClientRect();
+  const alto = b.top + box.clientTop;
+  const basso = alto + box.clientHeight;
+  if (n.top < alto) box.scrollTop -= alto - n.top;
+  else if (n.bottom > basso) box.scrollTop += n.bottom - basso;
+};
+
 function toast(message, isError = false) {
   const node = $('#toast');
   node.textContent = message;

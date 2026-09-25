@@ -1619,7 +1619,7 @@ async function createOrientationViewer(projectId, sampleSize) {
       listBox.append(item);
       if (name === names[index]) {
         // l'immagine corrente resta in vista anche quando si scorre con le frecce
-        requestAnimationFrame(() => item.scrollIntoView({ block: 'nearest' }));
+        requestAnimationFrame(() => tieniInVista(listBox, item));
       }
     }
     if (list.length > LIST_LIMIT) {
