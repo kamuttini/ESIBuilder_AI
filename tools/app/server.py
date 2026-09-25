@@ -9729,7 +9729,8 @@ def _numero_scritto(testo: str) -> Optional[float]:
     return valore if valore > 0 else None
 
 
-def _stringi_sui_pixel(image_path: Path, box: Dict, caratteri: int) -> Dict:
+def _stringi_sui_pixel(image_path: Path, box: Dict, caratteri: int,
+                      soglia_media: bool = False) -> Dict:
     """Porta il riquadro sulle sole cifre, contandole.
 
     L'OCR restituisce riquadri di parola generosi e disuguali fra una passata e l'altra: su
@@ -9740,6 +9741,10 @@ def _stringi_sui_pixel(image_path: Path, box: Dict, caratteri: int) -> Dict:
     Lo spazio non basta a separarli — fra `162` e `*mm` ci sono 5 px, fra le cifre 3-4 — ma il
     numero di caratteri si sa gia' dall'OCR: si tengono i primi gruppi di colonne accese, uno
     per carattere.
+   
+    `soglia_media` mette la soglia a meta' fra fondo e inchiostro invece che vicino al
+    massimo: il tratto sottile del `1`, antialiasato, sta sotto la soglia alta e il glifo si
+    spezza in due gruppi - su prova_10 `13.9` contava cinque glifi e perdeva il 9.
     """
     from PIL import Image  # noqa: PLC0415
 
@@ -9759,9 +9764,13 @@ def _stringi_sui_pixel(image_path: Path, box: Dict, caratteri: int) -> Dict:
         chiaro = sum(1 for v in valori if v >= 140) > len(valori) / 2
         if chiaro:
             soglia = min(140, max(40, min(valori) + 45))
+            if soglia_media:
+                soglia = (min(valori) + massimo) // 2
             acceso = lambda v: v <= soglia  # noqa: E731
         else:
             soglia = max(70, min(155, massimo - 35))
+            if soglia_media:
+                soglia = max(40, (min(valori) + massimo) // 2)
             acceso = lambda v: v >= soglia  # noqa: E731
         colonne = [x for x in range(larghezza) if any(acceso(px[x, y]) for y in range(altezza))]
     except Exception:  # noqa: BLE001
@@ -9972,13 +9981,183 @@ def _riquadro_sulle_cifre(image_path: Path, box: Dict, cifre: str,
     return _inchiostro_fra(image_path, largo, scelto["da"], scelto["a"])
 
 
+def _colonne_accese(grigio, box: Dict, da: int, a: int):  # noqa: ANN001
+    """Per ogni colonna fra `da` e `a`, se c'e' inchiostro nelle righe del riquadro.
+
+    Stessa soglia di `_stringi_sui_pixel`: cifre chiare su fondo scuro, o il contrario su
+    una riga selezionata.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    zona = np.asarray(grigio.crop((da, int(box["top"]), a, int(box["bottom"]))), dtype=np.int16)
+    if zona.size == 0:
+        return zona, np.zeros(0, dtype=bool)
+    if (zona >= 140).sum() > zona.size / 2:
+        soglia = min(140, max(40, int(zona.min()) + 45))
+        return zona, (zona <= soglia).any(axis=0)
+    soglia = max(70, min(155, int(zona.max()) - 35))
+    return zona, (zona >= soglia).any(axis=0)
+
+
+def _prefisso_attaccato(image_path: Path, box: Dict) -> Optional[Dict]:
+    """Il glifo attaccato a sinistra del riquadro che ha disegnato lei, se ce n'e' uno.
+
+    Sul Mindray l'etichetta e' `D28.6`: la `D` sta a un pixel dalla prima cifra, e il
+    riquadro giusto - quello che ha disegnato lei - comincia nel vuoto fra le due. La `D`
+    e' il riferimento per trovare il numero, non una sua parte. Qui la si ritaglia
+    dall'immagine di riferimento, per riconoscerla nelle altre.
+
+    Se il bordo cade dentro a un glifo decide la parte piu' grande: un glifo quasi tutto
+    fuori e' il prefisso, uno quasi tutto dentro e' la prima cifra (e allora non c'e'
+    prefisso da togliere, solo un bordo tirato un po' largo).
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    sinistra = int(box["left"])
+    try:
+        with Image.open(image_path) as immagine:
+            grigio = immagine.convert("L")
+            da = max(0, sinistra - 24)
+            zona, accese = _colonne_accese(grigio, box, da, min(grigio.size[0], sinistra + 16))
+    except Exception:  # noqa: BLE001
+        return None
+    qui = sinistra - da
+    if qui <= 0 or qui >= len(accese):
+        return None
+    if accese[qui] and accese[qui - 1]:
+        inizio = fine = qui
+        while inizio > 0 and accese[inizio - 1]:
+            inizio -= 1
+        while fine + 1 < len(accese) and accese[fine + 1]:
+            fine += 1
+        if qui - inizio <= fine - qui + 1:
+            return None
+    else:
+        # il bordo sta nel vuoto (o all'inizio della cifra): il prefisso, se c'e', finisce
+        # a non piu' di tre pixel da li'
+        fine = qui - 1
+        while fine >= 0 and not accese[fine]:
+            fine -= 1
+        if fine < 0 or qui - fine > 4:
+            return None
+        inizio = fine
+        while inizio > 0 and accese[inizio - 1]:
+            inizio -= 1
+    if inizio == 0 or fine - inizio < 1:
+        return None  # tagliato dal bordo della zona, o una scheggia: non e' un glifo
+    return {"left": da + inizio, "right": da + fine + 1,
+            "patch": zona[:, inizio:fine + 1].tolist()}
+
+
+def _ancora_dopo_il_prefisso(image_path: Path, box: Dict,
+                             prefisso: Optional[Dict]) -> Optional[int]:
+    """Dove comincia il numero in questa immagine: subito dopo il prefisso, se c'e'.
+
+    Il prefisso si riconosce pixel per pixel nello stesso punto (a due pixel di tolleranza):
+    l'interfaccia lo disegna sempre uguale. Dove al suo posto c'e' altro - una cifra in piu'
+    di un numero allineato a destra - non combacia, e non si copre niente.
+    """
+    import numpy as np  # noqa: PLC0415
+    from PIL import Image  # noqa: PLC0415
+
+    if not prefisso:
+        return None
+    modello = np.asarray(prefisso["patch"], dtype=np.int16)
+    alto, largo = modello.shape
+    escursione = max(1, int(modello.max()) - int(modello.min()))
+    try:
+        with Image.open(image_path) as immagine:
+            zona = np.asarray(immagine.convert("L").crop(
+                (int(prefisso["left"]) - 2, int(box["top"]),
+                 int(prefisso["right"]) + 2, int(box["top"]) + alto)), dtype=np.int16)
+    except Exception:  # noqa: BLE001
+        return None
+    if zona.shape != (alto, largo + 4):
+        return None
+    migliore, spostamento = None, 0
+    for dx in range(5):
+        scarto = float(np.abs(zona[:, dx:dx + largo] - modello).mean())
+        if migliore is None or scarto < migliore:
+            migliore, spostamento = scarto, dx - 2
+    if migliore is None or migliore > 0.08 * escursione:
+        return None
+    return int(prefisso["right"]) + spostamento
+
+
+def _punto_dai_pixel(image_path: Path, parola: Dict, riga: Dict, cifre: str) -> Optional[str]:
+    """Il numero col punto decimale ritrovato nell'inchiostro, se l'OCR l'ha perso.
+
+    A 10 px di altezza tesseract perde a volte il punto: su prova_10 `4.6` usciva `46`.
+    Il punto pero' si vede: e' un glifo stretto con l'inchiostro solo nelle righe basse.
+    Se fra i glifi della parola ce n'e' esattamente uno cosi', e gli altri sono tanti quante
+    le cifre lette, il punto va li'. In ogni altro caso non si inventa niente.
+    """
+    import numpy as np  # noqa: PLC0415
+    from PIL import Image  # noqa: PLC0415
+
+    if not cifre.isdigit() or len(cifre) < 2:
+        return None
+    try:
+        with Image.open(image_path) as immagine:
+            grigio = immagine.convert("L")
+            zona, accese = _colonne_accese(grigio, riga, int(parola["left"]), int(parola["right"]))
+    except Exception:  # noqa: BLE001
+        return None
+    if not accese.any():
+        return None
+    chiaro = (zona >= 140).sum() > zona.size / 2
+    soglia = (min(140, max(40, int(zona.min()) + 45)) if chiaro
+              else max(70, min(155, int(zona.max()) - 35)))
+    inchiostro = (zona <= soglia) if chiaro else (zona >= soglia)
+    righe_testo = np.where(inchiostro.any(axis=1))[0]
+    if len(righe_testo) < 5:
+        return None
+    alto, basso = int(righe_testo[0]), int(righe_testo[-1])
+    gruppi: List[Tuple[int, int]] = []
+    x = 0
+    while x < len(accese):
+        if accese[x]:
+            inizio = x
+            while x + 1 < len(accese) and accese[x + 1]:
+                x += 1
+            gruppi.append((inizio, x))
+        x += 1
+    punti, cifre_viste = [], 0
+    for inizio, fine in gruppi:
+        sue = np.where(inchiostro[:, inizio:fine + 1].any(axis=1))[0]
+        if fine - inizio <= 2 and sue[0] >= alto + 0.6 * (basso - alto):
+            punti.append(cifre_viste)
+        else:
+            cifre_viste += 1
+    if len(punti) != 1 or cifre_viste != len(cifre) or not 0 < punti[0] < len(cifre):
+        return None
+    return cifre[:punti[0]] + "." + cifre[punti[0]:]
+
+
+def _decimali(testo: str) -> Optional[int]:
+    """Quante cifre dopo il punto: `28.6` -> 1, `46` -> 0, niente numero -> None."""
+    trovato = re.search(r"\d+(?:[.,](\d+))?", str(testo or ""))
+    if not trovato:
+        return None
+    return len(trovato.group(1) or "")
+
+
 def _rileggi_nel_riquadro(image_path: Path, box: Dict, timeout: float = 8.0,
-                          accettabile=None) -> Optional[Dict]:  # noqa: ANN001
+                          accettabile=None, ancora: Optional[int] = None,
+                          decimali: Optional[int] = None) -> Optional[Dict]:  # noqa: ANN001
     """Rileggi il numero dentro al riquadro, lasciandogli spazio per crescere di cifre.
 
     Il riquadro che l'utente stringe e' quello di *una* immagine: altrove il numero puo'
     avere una cifra in piu' o in meno. Quindi si cerca in una banda piu' larga e si torna
     il riquadro stretto sul numero che si e' davvero letto, non quello di partenza.
+
+    La banda pero' cresce anche a sinistra, e li' non c'e' nessuna cifra da recuperare: su
+    prova_10 comprendeva la `D` di `D28.6`, che l'OCR a sole cifre trasformava in una cifra
+    (`77` invece di `27.7`, `203` invece di `20.3`) e che entrava nel riquadro spingendo
+    fuori l'ultima cifra. Con `ancora` quello che sta prima si copre prima di leggere, e il
+    riquadro non comincia prima di li'. Con `decimali` si preferiscono le letture scritte
+    come quella di riferimento: l'etichetta di una cartella ha sempre lo stesso formato, e
+    un `74` dove si scrive `7.4` ha perso il punto.
     """
     parole_di = _tesseract_words()
     larghezza = max(1.0, float(box["right"] - box["left"]))
@@ -9999,12 +10178,28 @@ def _rileggi_nel_riquadro(image_path: Path, box: Dict, timeout: float = 8.0,
         for psm in ("7", "11", "6"):
             parole, _ = parole_di(
                 image_path, timeout=timeout, max_side=1800, crop_box=banda, psm=psm,
-                preprocess=variante, char_whitelist="0123456789.,",
+                preprocess=variante, char_whitelist="0123456789.,", blank_left_of=ancora,
             )
             candidati.extend(_pesca_numeri(parole, box, altezza, variante))
     if not candidati:
         return None
     candidati.sort(key=lambda c: (c["distanza"], 0 if c["variante"] == "base" else 1))
+    if decimali is not None:
+        # Preferenza, non obbligo: se nessuna passata legge il formato atteso si tiene
+        # quello che c'e', come prima.
+        vicino = candidati[0]["distanza"] + max(10.0, 1.5 * altezza)
+        if decimali > 0 and not any(c["distanza"] <= vicino and _decimali(c["text"]) == decimali
+                                    for c in candidati):
+            for c in candidati:
+                if c["distanza"] > vicino or _decimali(c["text"]) != 0:
+                    continue
+                riparato = _punto_dai_pixel(image_path, c["box"], box, _cifre_lette(c["text"]))
+                if riparato is not None and _decimali(riparato) == decimali:
+                    c["text"], c["value"] = riparato, float(riparato)
+        stesso_formato = [c for c in candidati
+                          if c["distanza"] <= vicino and _decimali(c["text"]) == decimali]
+        if stesso_formato:
+            candidati = stesso_formato
     # Chi chiama puo' dire cosa si aspetta - una profondita' di lavoro, per esempio. Fra le
     # sei passate dell'OCR ce n'e' spesso una che legge `120` e un'altra che ci attacca
     # l'asterisco di `*mm` e fa `1200`: senza questo filtro vince la piu' vicina al bordo,
@@ -10018,6 +10213,18 @@ def _rileggi_nel_riquadro(image_path: Path, box: Dict, timeout: float = 8.0,
                  if c["distanza"] <= vicino and accettabile(c["value"])]
         if buoni:
             candidati = buoni
+    if ancora is not None:
+        # Col prefisso coperto alcune passate leggono solo la prima cifra: su prova_10 psm 7
+        # e 11 danno «2», psm 6 «28.6», tutte a partire dallo stesso pixel. E' lo stesso
+        # numero letto per intero, e vince lui.
+        primo = candidati[0]
+        inizio_primo = _cifre_lette(primo["text"])
+        estese = [c for c in candidati
+                  if abs(c["box"]["left"] - primo["box"]["left"]) <= 3
+                  and _cifre_lette(c["text"]).startswith(inizio_primo)]
+        if estese:
+            piu_lunga = max(estese, key=lambda c: len(_cifre_lette(c["text"])))
+            candidati = [piu_lunga] + [c for c in candidati if c is not piu_lunga]
     scelto = candidati[0]
     stessi = [
         c for c in candidati
@@ -10032,9 +10239,16 @@ def _rileggi_nel_riquadro(image_path: Path, box: Dict, timeout: float = 8.0,
     fascia["bottom"] = min(fascia["bottom"], box["bottom"] + gioco)
     if fascia["bottom"] - fascia["top"] < 4:
         fascia = dict(stretto["box"])
+    if ancora is not None and fascia["left"] - 3 <= ancora < fascia["right"]:
+        # Si contano i glifi dall'ancora, e con spazio a destra per una cifra in piu' del
+        # riquadro di lei: il riquadro di parola dell'OCR finiva spesso prima dell'ultima
+        # cifra (su prova_10 `13.9` si fermava a 92, il 9 finisce a 100).
+        fascia["left"] = int(ancora)
+        fascia["right"] = max(fascia["right"], int(box["right"] + larghezza / 2))
     return {**stretto,
             "box": _stringi_sui_pixel(image_path, fascia,
-                                      len(cifre.group(0)) if cifre else 0)}
+                                      len(cifre.group(0)) if cifre else 0,
+                                      soglia_media=ancora is not None)}
 
 
 def _pesca_numeri(parole, box: Dict, altezza: float, variante: str) -> List[Dict]:
@@ -10142,7 +10356,8 @@ def _cifre_lette(testo: str) -> str:
 
 
 def _riquadro_stretto(image_path: Path, box: Dict, atteso_testo: str,
-                      atteso_mm: Optional[float], fattore: float) -> Dict:
+                      atteso_mm: Optional[float], fattore: float,
+                      ancora: Optional[int] = None) -> Dict:
     """Il riquadro portato sul **solo numero**, o il motivo per cui si e' lasciato stare.
 
     Il riquadro che il modulo consegna e' quello di parola dell'OCR, e la parola comprende
@@ -10155,14 +10370,17 @@ def _riquadro_stretto(image_path: Path, box: Dict, atteso_testo: str,
     non e' un riquadro piu' stretto: e' un riquadro finito su un altro numero, e si lascia
     tutto com'era. Restringere non deve poter cambiare una depth gia' giusta.
     """
-    letto = _rileggi_nel_riquadro(image_path, box)
+    letto = _rileggi_nel_riquadro(image_path, box, ancora=ancora,
+                                  decimali=_decimali(atteso_testo) if ancora is not None else None)
     if letto is None:
         return {"ok": False, "reason": "in quel riquadro non si legge nessun numero"}
     stretto = letto["box"]
     # Seconda passata, che vince quando riesce: rilegge l'etichetta intera e ritaglia sulle
     # sole cifre, dove che siano dentro alla stringa. Serve dove le lettere stanno *prima*
-    # del numero, e li' la prima passata non poteva farcela.
-    sulle_cifre = _riquadro_sulle_cifre(image_path, box, _cifre_lette(letto["text"]))
+    # del numero, e li' la prima passata non poteva farcela. Con l'ancora il prefisso e' gia'
+    # stato tolto, e questa passata - che cerca anche a sinistra - lo rimetterebbe dentro.
+    sulle_cifre = (None if ancora is not None
+                   else _riquadro_sulle_cifre(image_path, box, _cifre_lette(letto["text"])))
     if sulle_cifre is not None and _vicino_al_riquadro(box, sulle_cifre):
         stretto = sulle_cifre
     valore = round(float(letto["value"]) * fattore, 2)
@@ -10261,6 +10479,13 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
         correzioni = valore_step.get("depth_corrections") or {}
         modello = valore_step.get("depth_box_template") or {}
         fattore = float(modello.get("unit_factor") or 1.0)
+        # Il glifo attaccato a sinistra del riquadro di cartella (la `D` di `D28.6`): senza,
+        # stringere allargava a sinistra e se lo riprendeva.
+        prefisso = None
+        if modello.get("box") and modello.get("from"):
+            prefisso = _prefisso_attaccato(base / str(modello["from"]), modello["box"])
+        # I riquadri che lei ha sistemato a mano sono gia' quelli giusti.
+        a_mano = {n for n, l in letture_note.items() if l.get("source") == "user_box"}
 
         righe, _stage = _depth_module_rows(project)
         per_nome = {r["name"]: r for r in righe}
@@ -10292,6 +10517,7 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
         # non si sposta; stringerlo no: si lavora sul riquadro che quell'immagine ha gia',
         # dove si trova. Su prova_3 la depth viene "dalla scala" e i riquadri contengono
         # comunque `3.5 cm` - 92x25 px di cui il numero e' meno di un terzo.
+        scelti = [r for r in scelti if r["name"] not in a_mano]
         lavoro = [r for r in scelti if r.get("box")]
         # Le immagini che un riquadro non ce l'hanno proprio: il modulo non le ha esaminate,
         # ma la depth gliel'ha data lei a mano. Se la cartella un posto del numero ce l'ha,
@@ -10317,9 +10543,11 @@ def _run_depth_tighten(job_id: str, project_id: str, scope: str,
                 fattore_riga = fattore
             corretta = (correzioni.get(riga["name"]) or {}).get("depth_mm")
             atteso = corretta if corretta is not None else riga.get("depth_mm")
+            ancora = (_ancora_dopo_il_prefisso(base / riga["name"], modello["box"], prefisso)
+                      if prefisso else None)
             return riga["name"], _riquadro_stretto(
                 base / riga["name"], riga["box"], str(riga.get("ocr_text") or ""),
-                atteso, fattore_riga)
+                atteso, fattore_riga, ancora=ancora)
 
         strette: Dict[str, Dict] = {}
         invariate: List[Dict] = []
@@ -10497,7 +10725,10 @@ def api_depth_box(project_id: str):
     modello_attuale = project.step_value("depth_scale").get("depth_box_template") or {}
 
     base = project.dedup_link_dir() or Path(project.source.get("folder") or "")
-    letto = _rileggi_nel_riquadro(base / nome, box)
+    # Il glifo attaccato a sinistra del riquadro (la `D` di `D28.6`) si copre anche qui:
+    # e' da questa lettura che si prende il formato che vale per tutta la cartella.
+    ancora = _ancora_dopo_il_prefisso(base / nome, box, _prefisso_attaccato(base / nome, box))
+    letto = _rileggi_nel_riquadro(base / nome, box, ancora=ancora)
     if letto is None:
         return jsonify({"error": "in quel riquadro non si legge nessun numero"}), 400
     fattore = _fattore_unita(riferimento.get("ocr_text"), riferimento.get("depth_mm"), letto["value"])
@@ -10510,7 +10741,8 @@ def api_depth_box(project_id: str):
     scope = str(payload.get("scope") or "all")
     elenco = [str(n) for n in (payload.get("names") or [])] if scope == "names" else []
     return jsonify({
-        "job_id": _start_job(_run_depth_box, project_id, nome, box, fattore, scope, elenco),
+        "job_id": _start_job(_run_depth_box, project_id, nome, box, fattore, scope, elenco,
+                             _decimali(letto["text"])),
         "unit_factor": fattore,
     })
 
@@ -10568,18 +10800,27 @@ def api_depth_box_save(project_id: str):
 
 
 def _leggi_riquadro_su(base: Path, box: Dict, fattore: float, nomi: Sequence[str],
-                       progress=None) -> Tuple[Dict[str, Dict], List[str]]:  # noqa: ANN001
-    """La rilettura nel riquadro su un elenco di immagini, in parallelo. 0.4 s l'una."""
+                       progress=None, riferimento: Optional[str] = None,
+                       decimali: Optional[int] = None,
+                       ) -> Tuple[Dict[str, Dict], List[str]]:  # noqa: ANN001
+    """La rilettura nel riquadro su un elenco di immagini, in parallelo. 0.4 s l'una.
+
+    Con `riferimento` (l'immagine su cui e' stato disegnato il riquadro) il glifo attaccato
+    a sinistra del riquadro - la `D` di `D28.6` - si riconosce e si toglie in tutte le
+    altre; `decimali` e' il formato del numero letto li'.
+    """
     from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
 
     letture: Dict[str, Dict] = {}
     falliti: List[str] = []
     fatte = 0
+    prefisso = _prefisso_attaccato(base / riferimento, box) if riferimento else None
 
     def leggi(n: str) -> Tuple[str, Optional[Dict]]:
         return n, _rileggi_nel_riquadro(
             base / n, box,
             accettabile=lambda v: _depth_credibile(v * fattore),
+            ancora=_ancora_dopo_il_prefisso(base / n, box, prefisso), decimali=decimali,
         )
 
     with ThreadPoolExecutor(max_workers=6) as pool:
@@ -10705,7 +10946,8 @@ def _riquadro_depth_di_riferimento(righe: Sequence[Dict]) -> Optional[Tuple[str,
 
 
 def _run_depth_box(job_id: str, project_id: str, nome: str, box: Dict,
-                   fattore: float, scope: str, elenco: Sequence[str] = ()) -> None:
+                   fattore: float, scope: str, elenco: Sequence[str] = (),
+                   decimali: Optional[int] = None) -> None:
     """Rilegge la depth nel riquadro, immagine per immagine, in parallelo."""
     try:
         project = _project(project_id)
@@ -10729,6 +10971,7 @@ def _run_depth_box(job_id: str, project_id: str, nome: str, box: Dict,
         letture, falliti = _leggi_riquadro_su(
             base, box, fattore, nomi,
             progress=lambda fatte, quante: _job_update(job_id, done=fatte),
+            riferimento=nome, decimali=decimali,
         )
 
         def salva(_project: Project, value: Dict) -> Dict:
@@ -10743,8 +10986,14 @@ def _run_depth_box(job_id: str, project_id: str, nome: str, box: Dict,
             value["depth_box_applications"] = storico + [applicazione]
             # Le letture sono per immagine: una seconda applicazione su un sottoinsieme
             # aggiorna le sue e lascia stare le altre.
-            precedenti = dict(value.get("depth_box_reads") or {}) if scope == "names" else {}
+            vecchie = dict(value.get("depth_box_reads") or {})
+            precedenti = vecchie if scope == "names" else {}
             precedenti.update(letture)
+            # I riquadri sistemati a mano non si riscrivono: rilanciare il riquadro di cartella
+            # cancellava quelli che lei aveva corretto uno per uno.
+            for nome_lettura, lettura in vecchie.items():
+                if lettura.get("source") == "user_box":
+                    precedenti[nome_lettura] = lettura
             value["depth_box_reads"] = precedenti
             return value
 

@@ -788,7 +788,15 @@ def run_tesseract_tsv_region(
     psm: str = "11",
     preprocess: str = "base",
     char_whitelist: str = "0123456789.,:/-%aAcCmMdDeEpPrRtThHfFiIsSzZlL",
+    blank_left_of: Optional[float] = None,
 ) -> Tuple[List[OCRWord], Tuple[float, float]]:
+    """OCR words of an image region, in full-image coordinates.
+
+    `blank_left_of` (full-image x) paints everything left of it with the region's background
+    before OCR. A label prefix glued to the number (Mindray `D28.6`) otherwise joins the
+    number's word: with a digits-only whitelist the `D` is forced into a digit and both the
+    value and the word box come out wrong.
+    """
     try:
         with Image.open(image_path) as original:
             ow, oh = original.size
@@ -802,6 +810,15 @@ def run_tesseract_tsv_region(
                 crop_left, crop_top = 0, 0
                 crop_right, crop_bottom = ow, oh
                 work = original.copy()
+            if blank_left_of is not None:
+                cut = int(round(float(blank_left_of) - crop_left))
+                if cut > 0:
+                    work = work.convert("RGB")
+                    arr = np.asarray(work).copy()
+                    # median colour = background, dark or light (highlighted row) alike
+                    background = np.median(arr.reshape(-1, 3), axis=0).astype(arr.dtype)
+                    arr[:, : min(cut, arr.shape[1])] = background
+                    work = Image.fromarray(arr)
             im = _preprocess_ocr_image(work, max_side=max_side, variant=preprocess)
     except Exception:
         return [], (1.0, 1.0)
