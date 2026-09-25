@@ -11072,6 +11072,23 @@ def _leggi_scala_su(base: Path, corsia: Tuple[float, float, float, float], nomi:
             if esito is not None:
                 letture[nome] = esito
     letture = _punto_dalla_cartella(letture, decimali)
+    # Dove l'OCR non ce l'ha fatta - il marcatore «X3» sopra l'etichetta, la striscia chiara
+    # dell'eco accanto - legge il lettore a glifi, che impara i caratteri da queste letture.
+    import scale_glyphs  # noqa: PLC0415
+
+    banca = scale_glyphs.learn(base, letture)
+    if banca is not None:
+        for nome in nomi:
+            if nome in letture:
+                continue
+            letto = scale_glyphs.read(banca, base / nome, corsia, decimali)
+            if letto is None:
+                continue
+            numero, box = letto
+            valore = round(float(numero) * 10.0, 2)
+            if _depth_credibile(valore):
+                letture[nome] = {"box": box, "depth_mm": valore, "ocr_text": f"{numero}cm",
+                                 "method": "scala", "glyphs": True}
     falliti = [n for n in nomi if n not in letture]
     return letture, falliti
 
