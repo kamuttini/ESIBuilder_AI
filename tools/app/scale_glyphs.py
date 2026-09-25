@@ -33,8 +33,25 @@ def _white(image_path: Path) -> Optional[np.ndarray]:
     return None if image is None else image.min(axis=2)
 
 
+def _drop_long_lines(mask: np.ndarray, length: int = 36) -> np.ndarray:
+    """Remove horizontal lines longer than any character, then re-stitch the characters.
+
+    The bottom border of the ultrasound image is a white line that can run straight through
+    the top of the label (prova_13: 96, 97, 51, 57, 63, 64, 69): it is as white as the digits
+    and glued them into one blob. No character has a horizontal run that long. Where the
+    line crossed a character, the pixels touching the character above or below come back.
+    """
+    lines = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((1, length), np.uint8))
+    if not lines.any():
+        return mask
+    rest = mask & (1 - lines)
+    near = cv2.dilate(rest, np.ones((3, 1), np.uint8))
+    return rest | (lines & near)
+
+
 def _components(gray: np.ndarray, threshold: int) -> List[Component]:
-    count, labels, stats, _ = cv2.connectedComponentsWithStats((gray >= threshold).astype(np.uint8), 8)
+    mask = _drop_long_lines((gray >= threshold).astype(np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     return [(int(stats[i, 0]), int(stats[i, 1]), int(stats[i, 2]), int(stats[i, 3]), labels == i)
             for i in range(1, count) if stats[i, 3] >= 3]
 
@@ -146,13 +163,16 @@ def learn(image_dir: Path, readings: Dict[str, Dict]) -> Optional[GlyphBank]:
                 continue
             bottom = max(c[1] + c[3] for c in tall)
             row = sorted([c for c in comps if abs((c[1] + c[3]) - bottom) <= 2], key=lambda c: c[0])
-            # the dot can vanish at a high threshold
-            for expected in (text, text.replace(".", "")):
-                if len(row) >= len(expected):
-                    break
-            else:
+            # The dot can vanish at a high threshold: align on whether it is really there,
+            # otherwise every glyph after it is taught under the wrong name ('c' as '0').
+            dot = any(c[2] <= 5 and c[3] <= 5 for c in row)
+            expected = text if dot else text.replace(".", "")
+            if len(row) < len(expected):
                 continue
-            for char, comp in zip(expected, row[:len(expected)]):
+            pieces = row[:len(expected)]
+            if any((ch == ".") != (c[2] <= 5 and c[3] <= 5) for ch, c in zip(expected, pieces)):
+                continue  # something else sits in the row: do not learn from it
+            for char, comp in zip(expected, pieces):
                 if char == ".":
                     continue
                 glyphs.setdefault(char, []).append(_normalised(comp))
